@@ -10,12 +10,15 @@ from pipeline.ocr.errors import (
 )
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest, OcrResult
+from pipeline.ocr.provider import LocalContractTestSkip
 
 
 class _ExampleProvider:
     name = "example"
     supported_languages = frozenset({"en"})
     supports_local_contract_test = True
+    skipped_local_contract_angles = frozenset[int]()
+    skipped_local_contract_cases: frozenset[LocalContractTestSkip] = frozenset()
 
     def recognize(self, request: OcrRequest) -> OcrResult:
         del request

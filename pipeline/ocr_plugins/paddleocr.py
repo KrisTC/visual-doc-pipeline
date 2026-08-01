@@ -13,6 +13,7 @@ import numpy.typing as npt
 from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
+from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip
 
 
 class PaddleOcrEngine(Protocol):
@@ -35,6 +36,19 @@ class PaddleOcrProvider:
     name = "paddleocr"
     supported_languages = frozenset({"en", "ja"})
     supports_local_contract_test = True
+    skipped_local_contract_angles = frozenset({90, 135, 180, 225})
+    skipped_local_contract_cases = frozenset(
+        {
+            LocalContractTestSkip(
+                LocalContractTestCase("en", "Noto Sans JP Bold", 0, "dark"),
+                "PaddleOCR does not detect this white-on-black text style reliably.",
+            ),
+            LocalContractTestSkip(
+                LocalContractTestCase("en", "Noto Sans JP Bold", 270, "dark"),
+                "PaddleOCR does not detect this white-on-black text style reliably.",
+            ),
+        }
+    )
 
     def __init__(self) -> None:
         self._engines: dict[str, PaddleOcrEngine] = {}

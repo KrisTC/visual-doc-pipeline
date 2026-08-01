@@ -46,17 +46,29 @@ Consumers must handle absent `extra` keys. Do not use `extra` to change the mean
 
 Each module in `pipeline/ocr_plugins/` provides a `register_providers(factory)` function. Register a constructor rather than an instance so the factory creates a fresh provider when requested.
 
-Providers must also declare `supported_languages` as a `frozenset` of BCP 47 language tags and `supports_local_contract_test` as a boolean. The generic synthetic contract test runs every supported English and Japanese case for providers marked `True`. Set it to `False` for remote or credential-dependent providers; they are excluded from the default local suite.
+Providers must also declare `supported_languages` as a `frozenset` of BCP 47 language tags, `supports_local_contract_test` as a boolean, `skipped_local_contract_angles` as a `frozenset` of integer rotations, and `skipped_local_contract_cases` as a `frozenset` of `LocalContractTestSkip` values. The generic synthetic contract test runs every supported English and Japanese case for providers marked `True`. A skipped angle or case is still reported as an individual skipped case; use it only for an explicit, temporary capability limitation. Set `supports_local_contract_test` to `False` for remote or credential-dependent providers; they are excluded from the default local suite.
+
+The contract test renders its phrases with the repository-owned Noto test-font pack in `tests/assets/fonts/`; it never depends on an operating-system font or downloads fonts during a test run. It runs each case across its defined slide-style foreground and background colour combinations.
 
 ```python
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest, OcrResult
+from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip
 
 
 class ExampleProvider:
     name = "example"
     supported_languages = frozenset({"en"})
     supports_local_contract_test = True
+    skipped_local_contract_angles = frozenset[int]()
+    skipped_local_contract_cases = frozenset(
+        {
+            LocalContractTestSkip(
+                LocalContractTestCase("en", "Example Font", 0, "dark"),
+                "Explain the temporary provider limitation here.",
+            )
+        }
+    )
 
     def recognize(self, request: OcrRequest) -> OcrResult:
         # Call the provider and return normalized OcrText values.
