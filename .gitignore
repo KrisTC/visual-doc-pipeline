@@ -1,7 +1,14 @@
 # Ignore all files in the sample-data/confidential directory
 sample-data/confidential/*
 
+# Generated results
+outputs/results/*
+outputs/evaluations/*
+
 # Python
 .venv/
 __pycache__/
 *.py[cod]
+
+# MacOS
+.DS_Store

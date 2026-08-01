@@ -7,7 +7,6 @@ import sys
 import tomllib
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,24 +15,36 @@ LOCKFILE = ROOT / "uv.lock"
 PYPI_SIMPLE_URL = "https://pypi.org/simple"
 
 
-def load_toml(path: Path) -> dict[str, Any]:
+def load_toml(path: Path) -> dict[str, object]:
     with path.open("rb") as file:
         return tomllib.load(file)
 
 
-def dependency_strings(project: Mapping[str, Any]) -> Iterable[str]:
-    yield from project.get("dependencies", [])
-    for dependencies in project.get("optional-dependencies", {}).values():
-        yield from dependencies
+def mapping(value: object) -> Mapping[str, object]:
+    if isinstance(value, dict) and all(isinstance(key, str) for key in value):
+        return value
+    return {}
+
+
+def string_list(value: object) -> Iterable[str]:
+    if isinstance(value, list):
+        return (item for item in value if isinstance(item, str))
+    return ()
+
+
+def dependency_strings(project: Mapping[str, object]) -> Iterable[str]:
+    yield from string_list(project.get("dependencies"))
+    for dependencies in mapping(project.get("optional-dependencies")).values():
+        yield from string_list(dependencies)
 
 
 def is_direct_reference(requirement: str) -> bool:
     return " @ " in requirement.split(";", maxsplit=1)[0]
 
 
-def validate_pyproject(document: Mapping[str, Any], errors: list[str]) -> None:
-    tool = document.get("tool", {})
-    uv = tool.get("uv", {}) if isinstance(tool, Mapping) else {}
+def validate_pyproject(document: Mapping[str, object], errors: list[str]) -> None:
+    tool = mapping(document.get("tool"))
+    uv = mapping(tool.get("uv"))
 
     expected_settings = {
         "exclude-newer": "7 days",
@@ -56,11 +67,11 @@ def validate_pyproject(document: Mapping[str, Any], errors: list[str]) -> None:
     ]:
         errors.append("pyproject.toml: only the PyPI simple index is permitted.")
 
-    project = document.get("project", {})
-    dependency_groups = document.get("dependency-groups", {})
+    project = mapping(document.get("project"))
+    dependency_groups = mapping(document.get("dependency-groups"))
     requirements = [*dependency_strings(project)]
     for dependencies in dependency_groups.values():
-        requirements.extend(dependencies)
+        requirements.extend(string_list(dependencies))
 
     for requirement in requirements:
         if is_direct_reference(requirement):
@@ -71,17 +82,23 @@ def validate_pyproject(document: Mapping[str, Any], errors: list[str]) -> None:
 
 
 def validate_lockfile(
-    document: Mapping[str, Any], project_name: str | None, errors: list[str]
+    document: Mapping[str, object], project_name: str | None, errors: list[str]
 ) -> None:
-    for package in document.get("package", []):
+    for package in string_mappings(document.get("package")):
         package_name = package.get("name", "<unknown>")
-        source = package.get("source", {})
+        source = mapping(package.get("source"))
         if package_name == project_name and source == {"virtual": "."}:
             continue
         if source != {"registry": PYPI_SIMPLE_URL}:
             errors.append(
                 f"uv.lock: {package_name!r} must be sourced only from PyPI."
             )
+
+
+def string_mappings(value: object) -> Iterable[Mapping[str, object]]:
+    if isinstance(value, list):
+        return (mapping(item) for item in value)
+    return ()
 
 
 def main() -> int:
@@ -92,7 +109,8 @@ def main() -> int:
     else:
         pyproject = load_toml(PYPROJECT)
         validate_pyproject(pyproject, errors)
-        project_name = pyproject.get("project", {}).get("name")
+        project_name_value = mapping(pyproject.get("project")).get("name")
+        project_name = project_name_value if isinstance(project_name_value, str) else None
 
     if not LOCKFILE.is_file():
         errors.append("uv.lock is missing.")

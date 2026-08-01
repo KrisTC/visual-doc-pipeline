@@ -15,7 +15,7 @@ Project requirements are the source of truth and live in [requirements/](require
 
 ## Development setup
 
-This project uses Python 3.14.6 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
+This project uses Python 3.13.14 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
 
 ```sh
 uv sync --locked
@@ -26,6 +26,32 @@ Check the dependency source and cooldown policy with:
 ```sh
 .venv/bin/python scripts/check-dependency-policy.py
 ```
+
+Run all automated tests with:
+
+```sh
+scripts/run-tests.sh
+```
+
+Type-check all Python with:
+
+```sh
+.venv/bin/python scripts/typecheck-python.py
+```
+
+The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md).
+
+### Prepare OCR-evaluation inputs
+
+Prepare local OCR inputs from the sample-data tree:
+
+```sh
+.venv/bin/python scripts/prepare_ocr_evaluation_inputs.py
+```
+
+The generated outputs are ignored by Git and may contain confidential material. Do not add, stage, or commit them.
+
+Only samples in a BCP 47 language directory are prepared. Place that directory directly below `sample-data/`, or one directory below it, for example `sample-data/ja/` or `sample-data/corpus/en-GB/`. The script mirrors eligible source paths and removes whole stale generated directories, while retaining extra files in generated directories that still correspond to source directories.
 
 ## Candidate core technologies
 

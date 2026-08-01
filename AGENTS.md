@@ -12,6 +12,16 @@ Do not duplicate requirements in code comments, design documents, or this file u
 
 ---
 
+## Confidential Sample Data — Hard Rule
+
+`sample-data/confidential/` may contain company-confidential documents used for local development and testing. Agents may inspect and process these files locally when necessary for a user-requested test, diagnosis, or verification.
+
+Treat all contents, filenames, paths below that directory, and metadata from that directory as confidential. Do not upload, send to external services, copy, quote, summarise, or disclose them outside the local testing context.
+
+No confidential content, identifier, metadata, or document-specific detail from these files may be copied into or represented in a committed artifact: code, tests, fixtures, requirements, features, documentation, examples, prompts, logs, issue descriptions, commit messages, or generated outputs. Tests and fixtures committed to the repository must use synthetic data only. Agents may make general, content-independent changes informed by a locally observed compatibility defect, but must not encode the confidential input or its distinctive characteristics. Do not add, stage, or commit files from this directory. The developer is ultimately responsible for reviewing local test activity and all changes before committing.
+
+---
+
 ## Requirements Process
 
 Before implementing a feature:
