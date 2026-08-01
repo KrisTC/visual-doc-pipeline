@@ -13,6 +13,20 @@ Basically I thought it would be fun and interesting to solve the middle hard par
 
 Project requirements are the source of truth and live in [requirements/](requirements/).
 
+## Development setup
+
+This project uses Python 3.14.6 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
+
+```sh
+uv sync --locked
+```
+
+Check the dependency source and cooldown policy with:
+
+```sh
+.venv/bin/python scripts/check-dependency-policy.py
+```
+
 ## Candidate core technologies
 
 Going to start with - **Offline:** PaddleOCR + Argos Translate.

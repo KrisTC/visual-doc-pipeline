@@ -1,0 +1,7 @@
+# Ignore all files in the sample-data/confidential directory
+sample-data/confidential/*
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
