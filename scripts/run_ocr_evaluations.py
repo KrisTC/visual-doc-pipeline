@@ -41,8 +41,11 @@ BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", "
 
 
 CHECKSUM_FILENAME = ".input.sha256"
+ARTIFACT_FORMAT_VERSION_FILENAME = ".artifact-format-version"
+ARTIFACT_FORMAT_VERSION = "1"
 VIEWER_FILENAME = "index.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
+TEXT_CLIP_CONTEXT_PIXELS = 20
 
 
 @dataclass
@@ -196,6 +199,9 @@ def evaluate_ocr_inputs(
     for provider_name, provider_root, _ in providers:
         _write_viewer(provider_root, entries_by_provider[provider_name])
         (provider_root / CHECKSUM_FILENAME).write_text(f"{checksum}\n", encoding="ascii")
+        (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+            f"{ARTIFACT_FORMAT_VERSION}\n", encoding="ascii"
+        )
 
     return result
 
@@ -232,6 +238,11 @@ def _provider_output_is_current(provider_root: Path, checksum: str) -> bool:
         and (provider_root / VIEWER_FILENAME).is_file()
         and checksum_path.is_file()
         and checksum_path.read_text(encoding="ascii").strip() == checksum
+        and (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).is_file()
+        and (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).read_text(
+            encoding="ascii"
+        ).strip()
+        == ARTIFACT_FORMAT_VERSION
     )
 
 
@@ -260,7 +271,9 @@ def _evaluate_provider(
                 with Image.open(image.path) as opened_image:
                     source_image = opened_image.copy()
                 ocr_result = provider.recognize(OcrRequest(source_image, image.language))
-                payload = _successful_payload(ocr_result)
+                payload = _successful_payload(
+                    ocr_result, source_image, provider_root, image
+                )
                 _write_json(_result_json_path(provider_root, image), payload)
                 _write_visual_artifacts(provider_root, image, source_image, ocr_result)
             except Exception:
@@ -286,20 +299,32 @@ def _evaluate_provider(
     return entries
 
 
-def _successful_payload(result: OcrResult) -> dict[str, object]:
+def _successful_payload(
+    result: OcrResult,
+    source_image: Image.Image,
+    provider_root: Path,
+    evaluation_image: EvaluationImage,
+) -> dict[str, object]:
     return {
         "status": "succeeded",
         "text_items": [
             {
                 "text": text_item.text,
                 "confidence": text_item.confidence,
-                "bounding_polygon": [
-                    {"x": point.x, "y": point.y}
-                    for point in text_item.bounding_polygon.vertices
-                ],
+                "bounding_polygon": _polygon_payload(text_item.bounding_polygon.vertices),
+                "padded_bounding_polygon": _translated_polygon_payload(
+                    text_item.bounding_polygon.vertices,
+                    _padded_clipped_bounds(
+                        source_image, text_item.bounding_polygon.vertices
+                    ),
+                ),
+                "padded_image_path": _relative_url(
+                    _text_clip_path(provider_root, evaluation_image, index),
+                    _result_json_path(provider_root, evaluation_image).parent,
+                ),
                 "extra": text_item.extra,
             }
-            for text_item in result.text_items
+            for index, text_item in enumerate(result.text_items, start=1)
         ],
     }
 
@@ -323,7 +348,9 @@ def _write_visual_artifacts(
     masked_image.save(_masked_image_path(provider_root, evaluation_image), format="PNG")
 
     for index, text_item in enumerate(result.text_items, start=1):
-        bounds = _clipped_bounds(source_image, text_item.bounding_polygon.vertices)
+        bounds = _padded_clipped_bounds(
+            source_image, text_item.bounding_polygon.vertices
+        )
         source_image.crop(bounds).save(
             _text_clip_path(provider_root, evaluation_image, index), format="PNG"
         )
@@ -340,6 +367,31 @@ def _clipped_bounds(
     if left >= right or top >= bottom:
         raise ValueError("A detected text region has no area within the source image.")
     return (left, top, right, bottom)
+
+
+def _padded_clipped_bounds(
+    source_image: Image.Image, vertices: tuple[PixelPoint, ...]
+) -> tuple[int, int, int, int]:
+    """Return the text bounds plus the configured source-image context."""
+    left, top, right, bottom = _clipped_bounds(source_image, vertices)
+    return (
+        max(0, left - TEXT_CLIP_CONTEXT_PIXELS),
+        max(0, top - TEXT_CLIP_CONTEXT_PIXELS),
+        min(source_image.width, right + TEXT_CLIP_CONTEXT_PIXELS),
+        min(source_image.height, bottom + TEXT_CLIP_CONTEXT_PIXELS),
+    )
+
+
+def _polygon_payload(vertices: tuple[PixelPoint, ...]) -> list[dict[str, float]]:
+    return [{"x": point.x, "y": point.y} for point in vertices]
+
+
+def _translated_polygon_payload(
+    vertices: tuple[PixelPoint, ...], bounds: tuple[int, int, int, int]
+) -> list[dict[str, float]]:
+    """Serialize a source-image polygon relative to the crop's top-left origin."""
+    left, top, _, _ = bounds
+    return [{"x": point.x - left, "y": point.y - top} for point in vertices]
 
 
 def _result_json_path(provider_root: Path, image: EvaluationImage) -> Path:

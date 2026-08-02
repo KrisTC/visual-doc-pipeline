@@ -148,6 +148,13 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                                 {"x": 5, "y": 4},
                                 {"x": 1, "y": 4},
                             ],
+                            "padded_bounding_polygon": [
+                                {"x": 1, "y": 1},
+                                {"x": 5, "y": 1},
+                                {"x": 5, "y": 4},
+                                {"x": 1, "y": 4},
+                            ],
+                            "padded_image_path": "success.png.text-0001.png",
                             "extra": {},
                         }
                     ],
@@ -160,6 +167,8 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             with Image.open(masked_path) as masked_image:
                 self.assertEqual((0, 0, 0, 255), masked_image.getpixel((2, 2)))
                 self.assertEqual((255, 0, 0, 255), masked_image.getpixel((0, 0)))
+            with Image.open(success_base.with_name("success.png.text-0001.png")) as clip:
+                self.assertEqual((8, 6), clip.size)
 
             self.assertEqual(
                 {"status": "failed"},
@@ -188,6 +197,12 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertNotIn("<pre", viewer)
             self.assertNotIn("toggle-results", viewer)
             self.assertTrue((provider_root / ".input.sha256").is_file())
+            self.assertEqual(
+                ocr_evaluation.ARTIFACT_FORMAT_VERSION,
+                (provider_root / ".artifact-format-version").read_text(
+                    encoding="ascii"
+                ).strip(),
+            )
 
             second_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
             self.assertEqual(1, second_run.skipped_providers)
@@ -201,6 +216,45 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertEqual(0, third_run.skipped_providers)
             self.assertEqual(4, provider.calls)
             self.assertFalse(stale_mirrored_folder.exists())
+
+            (provider_root / ".artifact-format-version").unlink()
+            fourth_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(0, fourth_run.skipped_providers)
+            self.assertEqual(6, provider.calls)
+
+    # Verifies FR-2026-08-02-07.
+    def test_pads_text_clips_and_translates_polygon_coordinates(self) -> None:
+        source_image = Image.new("RGB", (100, 80), "white")
+        vertices = (
+            PixelPoint(30, 25),
+            PixelPoint(35, 25),
+            PixelPoint(35, 28),
+            PixelPoint(30, 28),
+        )
+        self.assertEqual(
+            (10, 5, 55, 48),
+            ocr_evaluation._padded_clipped_bounds(source_image, vertices),
+        )
+        self.assertEqual(
+            [
+                {"x": 20, "y": 20},
+                {"x": 25, "y": 20},
+                {"x": 25, "y": 23},
+                {"x": 20, "y": 23},
+            ],
+            ocr_evaluation._translated_polygon_payload(vertices, (10, 5, 55, 48)),
+        )
+
+        edge_vertices = (
+            PixelPoint(1, 1),
+            PixelPoint(5, 1),
+            PixelPoint(5, 4),
+            PixelPoint(1, 4),
+        )
+        self.assertEqual(
+            (0, 0, 25, 24),
+            ocr_evaluation._padded_clipped_bounds(source_image, edge_vertices),
+        )
 
 
 if __name__ == "__main__":

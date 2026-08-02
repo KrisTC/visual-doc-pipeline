@@ -39,7 +39,7 @@ Type-check all Python with:
 .venv/bin/python scripts/typecheck-python.py
 ```
 
-The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md).
+The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md). The text-region-colour API is documented in [docs/text-region-colours-api.md](docs/text-region-colours-api.md), with its rationale and algorithm in [docs/text-region-colours-algorithm.md](docs/text-region-colours-algorithm.md).
 
 ### Prepare OCR-evaluation inputs
 
@@ -62,6 +62,16 @@ Generate visual evaluation artifacts for every discovered OCR provider:
 ```
 
 The command first prepares inputs from `sample-data/`. Results are written below `outputs/evaluations/ocr/output/<provider>/`. Each provider root contains an `index.html` viewer, JSON results, black-masked images, and clipped detected-text regions. tqdm renders one compact progress bar at a time for each language folder and its immediate child folders. A provider is skipped when its input checksum is unchanged and the viewer exists; delete its `.input.sha256` or `index.html` to regenerate it.
+
+### Run colour-estimation evaluations
+
+Generate simple static HTML pages for the supplied colour-detection examples:
+
+```sh
+.venv/bin/python scripts/run_colour_evaluations.py
+```
+
+The pages are written below `outputs/evaluations/color-detection-examples/`. Each page shows the existing padded text-region bitmap for every OCR region, alongside labelled colour swatches, confidence values, and background classification. These local generated artifacts are ignored by Git.
 
 ## Candidate core technologies
 
