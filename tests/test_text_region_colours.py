@@ -55,6 +55,22 @@ class TextRegionColourEstimatorTests(unittest.TestCase):
         self.assertGreater(estimate.background_colour_confidence, 0.8)
 
     # Verifies FR-2026-08-02-09.
+    def test_uses_a_transparent_surface_as_background_not_text_evidence(self) -> None:
+        image, region = _text_image(
+            background=(0, 0, 0, 0), text=(192, 80, 77, 255)
+        )
+
+        estimate = estimate_text_region_colours(image, region)
+
+        _assert_colour_near(
+            self,
+            estimate.text_colour,
+            (192, 80, 77, estimate.text_colour.alpha),
+        )
+        self.assertGreater(estimate.text_colour.alpha, 0)
+        self.assertEqual(0, estimate.background_colour.alpha)
+
+    # Verifies FR-2026-08-02-09.
     def test_estimates_dark_text_with_a_rotated_ocr_polygon(self) -> None:
         image, region = _text_image(
             background=(255, 242, 204, 255), text=(31, 31, 31, 255), angle=18.0

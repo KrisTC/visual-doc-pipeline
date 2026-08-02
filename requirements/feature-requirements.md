@@ -111,7 +111,7 @@ PaddleOCR 3.7.0 and PaddlePaddle 3.3.1 shall be used initially. The project inte
 
 Every provider shall declare the BCP 47 language tags it supports, whether it is eligible for the default local contract test, and any individual cases or angles that are temporarily skipped by that test. Remote or credential-dependent providers shall declare themselves ineligible and are excluded from the default local test suite. A skipped case shall remain visible as an individually skipped subtest, with a provider-declared reason; it shall not be removed from the test matrix.
 
-The generic OCR-provider contract test shall use a repository-owned, test-only Noto Japanese font pack rather than operating-system fonts or runtime font downloads. The pack shall include multiple font faces and its upstream version, source URL, license, and file hashes shall be recorded with the assets. The fonts shall be licensed for redistribution under the SIL Open Font License.
+The generic OCR-provider contract test shall use a repository-owned Noto Japanese font pack rather than operating-system fonts or runtime font downloads. The pack shall include multiple font faces and its upstream version, source URL, license, and file hashes shall be recorded with the assets. The fonts shall be licensed for redistribution under the SIL Open Font License.
 
 The contract test shall render the English phrase "The quick brown fox jumps over the lazy dog." and the Japanese phrase "素早い茶色の狐が怠惰な犬を飛び越える。" in each applicable font face at rotations of 0, 45, 90, 135, 180, 225, 270, and 315 degrees. For every angle, font, and language, it shall test the full set of slide-style foreground and background colour pairs: black (`#000000`) on white (`#FFFFFF`), white (`#FFFFFF`) on black (`#000000`), white on navy (`#1F4E79`), charcoal (`#1F1F1F`) on pale yellow (`#FFF2CC`), and white on purple (`#7030A0`). It shall continue to verify the expected extracted text, normalized confidence, and bounding polygon without sample data.
 
@@ -409,9 +409,9 @@ Reliable colour estimates are an enabling capability for later visual-text maski
 
 The estimator shall crop context from the original image by expanding the OCR region's axis-aligned bounds by 12 source-image pixels on every side and clipping the crop to the source-image bounds. It shall not add artificial pixels outside the image. The implementation may make this padding caller-configurable while retaining 12 pixels as the default.
 
-The analysis shall operate in a perceptual colour space, initially CIELAB. It shall first identify an immediate background candidate inside the OCR polygon, including a broad, coherent label panel when present. It shall use outer-ring crop clusters only as fallback evidence. A background candidate's confidence shall reflect its local support and consistency; `complex` classification alone shall not impose a confidence penalty.
+The analysis shall operate in a perceptual colour space, initially CIELAB. It shall first identify an immediate background candidate inside the OCR polygon, including a broad, coherent label panel when present. A sufficiently supported alpha-zero surface inside the polygon shall be retained as a transparent background candidate rather than discarded as absent evidence. It shall use outer-ring crop clusters only as fallback evidence. A background candidate's confidence shall reflect its local support and consistency; `complex` classification alone shall not impose a confidence penalty.
 
-The implementation shall derive text candidates from perceptual difference from the dominant immediate background surface, clean candidate masks with small morphology and connected-component filtering, and restrict them to the OCR polygon. High variation in surrounding or secondary background evidence shall not expand the text-difference threshold sufficiently to absorb a compact, contrasting glyph candidate. It shall select the primary text colour using contrast, stroke-like geometry, core-pixel purity, and separation from competing candidates. When a loose OCR polygon contains both a thin, high-contrast glyph candidate and a lower-contrast fill-like map or design component, its score shall not select the fill-like component solely because it has a thicker interior. Large, fill-like components shall not be selected as text solely because they contrast with surrounding context. Border-like evidence may be used internally to distinguish text fill, but outline and shadow colours are out of scope for the public result.
+The implementation shall derive text candidates from perceptual difference from the dominant immediate background surface, clean candidate masks with small morphology and connected-component filtering, and restrict them to the OCR polygon. Alpha-zero pixels shall not be text candidates. High variation in surrounding or secondary background evidence shall not expand the text-difference threshold sufficiently to absorb a compact, contrasting glyph candidate. It shall select the primary text colour using contrast, stroke-like geometry, core-pixel purity, and separation from competing candidates. When a loose OCR polygon contains both a thin, high-contrast glyph candidate and a lower-contrast fill-like map or design component, its score shall not select the fill-like component solely because it has a thicker interior. Large, fill-like components shall not be selected as text solely because they contrast with surrounding context. Border-like evidence may be used internally to distinguish text fill, but outline and shadow colours are out of scope for the public result.
 
 The background classification shall be based on non-text local pixels: low variation is `flat`; variation adequately represented by a smooth colour gradient is `gradient`; other cases are `complex`. The classification is advisory and shall not perform or prescribe later background reconstruction.
 
@@ -422,5 +422,124 @@ The local command shall use the existing OCR JSON shape, `bounding_polygon` sour
 The automated test suite shall use repository-owned synthetic images with known colours and shall verify estimates with declared perceptual colour-distance tolerances. It shall cover flat backgrounds, light and dark text, antialiasing, rotated OCR polygons, gradients, patterned backgrounds, transparency, dark text on a high-variation local background, thin dark text beside a lower-contrast fill-like component, text on a strong label panel, and text with an outline or shadow. Tests for the HTML generator shall create synthetic images and OCR-result JSON in a temporary directory; they shall not use `sample-data/` or other real sample files. The user-supplied colour-detection examples may be used for local manual evaluation, but synthetic cases shall provide the automated oracle.
 
 The initial implementation may use Pillow and NumPy. Adding OpenCV requires a separate dependency change that continues to satisfy the project's dependency-security requirements.
+
+---
+
+## FR-2026-08-02-10
+
+| Property | Value |
+|----------|-------|
+| Title | Render replacement text into OCR regions with Skia |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-02-06, FR-2026-08-02-09 |
+
+### Description
+
+The product pipeline shall provide an in-place image utility, implemented with the `skia-python` binding, that accepts a Pillow `Image.Image`, an `OcrText` region, a `TextRegionColourEstimate`, replacement text, a `skia.Typeface`, and a target-language BCP 47 tag. It shall modify the supplied image directly; callers that need the original shall copy it before calling the utility.
+
+For each call, the utility shall first cover the detected OCR region with the estimate's immediate background colour, removing the original visible text. The background wipe shall extend two source-image pixels outward from the detected polygon to cover antialiased source glyph edges. This wipe-only expansion shall not change the region used to fit or clip the replacement text. It shall then render the replacement text in the estimate's primary text colour. It shall calculate a layout and choose the largest font size that contains the replacement text within the detected OCR region. The layout may wrap text onto more lines or combine detected source lines into fewer lines. It shall respect the region geometry, including rotation, when laying out and rendering text.
+
+The utility shall receive the target language as part of its public API. Language-specific shaping and non-Western layout behaviour are deferred unless separately specified.
+
+The project shall provide a local source-language-to-English replacement evaluation command based on the successful OCR-result JSON and paired source images in `sample-data/color-detection-examples/`. Each eligible successful JSON result shall contain a non-empty top-level `source_language` BCP 47 string. For each eligible text region and each registered text-replacement provider, the command shall obtain the replacement using that source language and the fixed target language `en`, estimate region colours, render the replacement into an image copy, and write a clipped bitmap of the resulting text region. It shall generate a static HTML page with a header row containing the region number, original padded text bitmap, and one rendered text-image column for every registered provider; it shall contain one subsequent row per eligible OCR JSON text item. The page shall display the resulting `source_language→en` direction beside the OCR-result identifier, rather than in its title. Its table shall size to its contents rather than the page width. The command shall not modify inputs and shall not process `sample-data/confidential/`.
+
+### Rationale
+
+The replacement-provider API, OCR geometry, and colour estimates provide the inputs needed to make translated or substituted text visibly fit the source image while avoiding a full-image copy for every individual region.
+
+### Notes
+
+The `skia.Typeface` must be loaded by the caller and may be reused for successive utility calls. No project-wide font abstraction is introduced. Existing Pillow-based test image creation remains unchanged because it is test-fixture generation, rather than a public font or rendering API.
+
+The evaluator shall always render by filling with the representative background colour, including for `gradient` and `complex` classifications. It does not reconstruct the source background and its resulting output is expected to be visually approximate for those cases.
+
+`skia-python` shall be added as a locked dependency only if a compatible binary wheel is available for every supported project platform and Python 3.13. The dependency change shall continue to comply with the existing no-source-build and dependency-cooldown security requirements.
+
+The evaluator shall load its default typeface directly from the committed Noto font assets in `tests/assets/fonts/`, initially the `wght=500` bold variation of `NotoSansJP[wght].ttf`. When the preliminary fit of that face is below 14 pixels, the renderer shall re-fit using the face's `wght=300` variation. It shall not depend on an operating-system font or runtime font download.
+
+The renderer shall calculate fitting and centring from Skia's visible glyph bounds, rather than its full typographic ascent/descent line box. For multiple lines, typographic line advance shall control spacing between baselines but shall not itself reserve top or bottom padding. For OCR regions whose text direction is axis-aligned, the Skia renderer shall place each replacement line on integer source-image pixel coordinates, disable subpixel glyph positioning, enable full hinting and automatic hinting, and use Skia synthetic emboldening. The fitted layout shall measure text with the same font settings used to draw it. For non-axis-aligned regions, it shall retain antialiasing and shall not snap transformed text geometry to the source pixel grid. It shall continue to fit and clip text to the OCR polygon. The initial clarity improvement shall not add an outline or shadow.
+
+For a region whose direction differs from a horizontal or vertical axis by no more than five degrees, the renderer may prefer an upright, pixel-aligned layout only when the complete visible-glyph bounds fit inside the OCR polygon and it does not require a smaller fitted font size than retaining the detected rotation. It shall otherwise preserve the detected rotation.
+
+When determining a region's text direction from an OCR polygon edge, the renderer shall normalize equivalent baseline directions modulo 180 degrees before fitting or upright-angle snapping. Reversing the polygon's baseline edge shall not render text upside down.
+
+The colour estimator shall continue to report observed source colours unchanged. To improve the perceived sharpness of light replacement text on dark surfaces, the renderer shall apply a bounded rendering-only lightness adjustment when the text colour's relative luminance exceeds that of an opaque background whose relative luminance is at most `0.35` by at least `0.15`. The adjustment shall preserve the estimated text colour's hue and alpha and move its HSL lightness 65% of the remaining distance toward white. It shall not make any assumed compositing-background choice for an alpha-zero background, and shall not apply to other foreground/background relationships.
+
+Automated tests shall use synthetic images and fonts only; they shall not use sample data. Tests shall cover in-place modification, background removal, rendered text colour, fitting of both shorter and longer replacement strings, wrapping, rotation, and output bounds. The local command and HTML output shall be verified with temporary synthetic inputs; the supplied examples are for manual visual evaluation only.
+
+---
+
+## FR-2026-08-02-11
+
+| Property | Value |
+|----------|-------|
+| Title | Add deterministic text-replacement test providers |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-02-06, FR-2026-08-02-10 |
+
+### Description
+
+The default text-replacement provider factory shall additionally discover three deterministic providers, each of which supports every language-tag pair and returns confidence `1.0` with no extra data:
+
+- `identity` shall return input text unchanged.
+- `double_character_mask` shall return a string of `#` characters whose Python character length is twice the input text's Python character length.
+- `half_character_mask` shall return a string of `#` characters whose Python character length is half the input text's Python character length, rounded down, with a minimum length of one.
+
+### Rationale
+
+Deterministic same-length, longer, and shorter outputs make the local visual evaluator exercise the text-region renderer's fitting behaviour without depending on a translation service.
+
+### Notes
+
+For requests where `is_filename` is true, every provider shall return the input text unchanged.
+
+The providers shall have provider-owned behavioural tests and continue to participate in the existing generic provider contract tests.
+
+---
+
+## FR-2026-08-02-13
+
+| Property | Value |
+|----------|-------|
+| Title | Generate text-replacement artifacts within OCR evaluations |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-02, FR-2026-08-02-06, FR-2026-08-02-08, FR-2026-08-02-10 |
+
+### Description
+
+For every successful OCR image evaluation, the OCR-evaluation command shall run a text-replacement artifact stage after writing the current OCR artifacts. The stage shall use the current evaluation's original image, `OcrText` items, and source language. It shall use target language `en`, estimate the colours of every text region, and apply the replacement from every registered text-replacement provider to one image copy per provider. Each provider image shall receive all of its replacements successively, allowing the in-place renderer to produce a complete updated image.
+
+The stage shall create a new generated text-replacement artifact directory alongside the current image artifacts. It shall contain one complete updated PNG per text-replacement provider and a clipped replacement bitmap for every eligible region/provider combination. It shall retain the original padded OCR clip as the table's original-text image.
+
+The text-replacement stage and its report shall skip each OCR text region whose confidence is less than `0.65`. Skipped regions shall remain present in the OCR-result JSON and existing OCR report, but shall not be replaced in complete provider images or appear in the text-replacement table.
+
+The OCR artifact stage and text-replacement artifact stage shall have independent cache freshness markers. A missing or stale OCR viewer or OCR cache marker shall regenerate OCR and all dependent artifacts. A current OCR artifact set with a missing or stale text-replacement viewer or text-replacement cache marker shall retain the saved OCR JSON and OCR artifacts, then regenerate only the text-replacement artifacts and report without calling the OCR provider.
+
+The existing provider-root static OCR viewer shall remain unchanged. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every registered provider. The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region mask as its final option. The initial selected option and displayed image shall both be the first registered provider.
+
+Every successful OCR-result JSON file shall include a top-level `source_language` BCP 47 string, equal to the language used in that image's OCR request. Failed JSON results shall remain status-only. The viewer shall display the resulting source-to-target language direction beside each successful OCR result, initially as `source_language→en`.
+
+### Rationale
+
+Running the replacement stage against the full OCR-evaluation corpus tests the renderer with realistic region geometry and demonstrates both individual region results and the complete provider-specific updated image.
+
+### Notes
+
+The OCR and text-replacement artifact stages shall each use independent format-version markers, so a format change invalidates only the stage it affects.
+
+The stage shall use the committed default evaluator typeface and the existing text-region rendering and colour-estimation behaviour. It shall always use the representative background colour, including for gradient and complex classifications.
+
+The command may continue to process confidential samples locally under FR-2026-08-01-03, but it shall not send their content, paths, metadata, OCR text, or replacement text to an external service. Until an explicit local-evaluation eligibility contract exists for text-replacement providers, the stage shall invoke only repository-default providers that execute locally.
+
+Automated tests shall create synthetic OCR inputs, registered local test providers, and temporary output roots. They shall verify source-language JSON output, complete per-provider images, per-region clips, table columns, and provider-preview selection markup without using sample data.
 
 ---

@@ -21,6 +21,7 @@ _DEFAULT_PADDING = 12
 _RING_WIDTH = 3
 _MAX_CLUSTERS = 4
 _MAX_TEXT_DISTANCE_THRESHOLD = 32.0
+_MINIMUM_TRANSPARENT_BACKGROUND_SUPPORT = 0.25
 _FloatArray = npt.NDArray[np.float64]
 _BoolArray = npt.NDArray[np.bool_]
 _IntArray = npt.NDArray[np.intp]
@@ -77,16 +78,27 @@ def estimate_text_region_colours(
     if not np.any(ring_mask):
         ring_mask = _outer_ring_mask(crop_rgba.shape[1], crop_rgba.shape[0])
 
-    (
-        background_lab,
-        background_colour,
-        background_spread,
-        background_mask,
-        background_support,
-        background_centres,
-    ) = (
-        _immediate_background(crop_lab, crop_rgba, polygon_mask, ring_mask)
-    )
+    transparent_background_mask = polygon_mask & (crop_rgba[:, :, 3] == 0)
+    if _has_supported_transparent_background(transparent_background_mask, polygon_mask):
+        (
+            background_lab,
+            background_colour,
+            background_spread,
+            background_mask,
+            background_support,
+            background_centres,
+        ) = _transparent_background(
+            crop_lab, crop_rgba, transparent_background_mask, polygon_mask
+        )
+    else:
+        (
+            background_lab,
+            background_colour,
+            background_spread,
+            background_mask,
+            background_support,
+            background_centres,
+        ) = _immediate_background(crop_lab, crop_rgba, polygon_mask, ring_mask)
     # Secondary clusters filter broad patterned background areas. They can however
     # include a glyph shade, so fall back to the dominant surface when they leave
     # too little evidence for a credible text candidate.
@@ -341,6 +353,43 @@ def _immediate_background(
         background_mask,
         float(dominant_support),
         background_centres,
+    )
+
+
+def _has_supported_transparent_background(
+    transparent_mask: _BoolArray, polygon_mask: _BoolArray
+) -> bool:
+    """Return whether transparent pixels make up a credible local surface."""
+    transparent_pixels = int(np.count_nonzero(transparent_mask))
+    minimum_pixels = max(
+        3,
+        ceil(np.count_nonzero(polygon_mask) * _MINIMUM_TRANSPARENT_BACKGROUND_SUPPORT),
+    )
+    return transparent_pixels >= minimum_pixels
+
+
+def _transparent_background(
+    lab: _FloatArray,
+    rgba: _UInt8Array,
+    transparent_mask: _BoolArray,
+    polygon_mask: _BoolArray,
+) -> tuple[_FloatArray, RgbaColour, float, _BoolArray, float, _FloatArray]:
+    """Use a sufficiently broad alpha-zero surface as immediate background evidence."""
+    values = lab[transparent_mask]
+    rgba_values = rgba[transparent_mask]
+    background_lab = np.median(values, axis=0)
+    median_rgba = np.rint(np.median(rgba_values, axis=0)).astype(np.uint8)
+    background_spread = float(
+        np.percentile(_colour_distances(values, background_lab), 75)
+    )
+    background_support = np.count_nonzero(transparent_mask) / np.count_nonzero(polygon_mask)
+    return (
+        background_lab,
+        _to_colour(median_rgba),
+        background_spread,
+        transparent_mask,
+        float(background_support),
+        np.expand_dims(background_lab, axis=0),
     )
 
 

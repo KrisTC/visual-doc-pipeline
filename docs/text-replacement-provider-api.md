@@ -50,3 +50,14 @@ Use `extra` for optional information that may enrich a future interactive viewer
 No schema is prescribed for this information: not every provider can produce it, and its meaning may differ by provider and model. A consumer that wants to use it must explicitly understand the provider's documented data; all other consumers must treat it as optional and safely ignore absent or unknown values. Keep `text` and `confidence` as the normalized replacement result rather than using `extra` to alter their meaning.
 
 The generic contract test checks only the stable result shape. Each provider must add its own behavioural tests with independently specified expected output; semantic validation is necessarily provider-specific for translation and other replacement tasks.
+
+## Built-in deterministic providers
+
+The local visual evaluator discovers all of these providers. Each supports every language pair, returns confidence `1.0`, and preserves filename inputs unchanged:
+
+| Provider | Ordinary text result |
+|---|---|
+| `identity` | Original text unchanged. |
+| `character_mask` | One `#` per Python character. |
+| `double_character_mask` | Two `#` characters per Python character. |
+| `half_character_mask` | Half as many `#` characters, rounded down, with at least one. |

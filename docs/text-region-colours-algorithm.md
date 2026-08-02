@@ -86,6 +86,9 @@ letting individual pixels become their own explanation.
 The largest interior cluster is the *dominant immediate background*. Its median
 stored RGBA value becomes `background_colour`. Its local colour spread and its
 share of polygon pixels provide the evidence for `background_colour_confidence`.
+When alpha-zero pixels have sufficient support inside the polygon, they instead
+form a transparent immediate-background surface. They remain excluded from
+foreground candidates, which are always opaque source pixels.
 
 Clusters with substantial support—at least 12% of the polygon and at least 12
 pixels—are retained as secondary background evidence. This is important on a

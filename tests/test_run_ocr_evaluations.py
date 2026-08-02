@@ -49,10 +49,22 @@ class FakeOcrProvider:
                     confidence=0.75,
                     bounding_polygon=BoundingPolygon(
                         (
-                            PixelPoint(1, 1),
-                            PixelPoint(5, 1),
-                            PixelPoint(5, 4),
-                            PixelPoint(1, 4),
+                            PixelPoint(30, 25),
+                            PixelPoint(50, 25),
+                            PixelPoint(50, 35),
+                            PixelPoint(30, 35),
+                        )
+                    ),
+                ),
+                OcrText(
+                    text="low confidence",
+                    confidence=0.64,
+                    bounding_polygon=BoundingPolygon(
+                        (
+                            PixelPoint(55, 25),
+                            PixelPoint(75, 25),
+                            PixelPoint(75, 35),
+                            PixelPoint(55, 35),
                         )
                     ),
                 ),
@@ -108,7 +120,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 {folder.as_posix(): len(images) for folder, images in groups.items()},
             )
 
-    # Verifies FR-2026-08-01-03.
+    # Verifies FR-2026-08-01-03 and FR-2026-08-02-13.
     def test_generates_visual_artifacts_failure_json_viewer_and_checksum_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -119,9 +131,9 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             failed_image = input_root / "collection" / "en" / "failed.png"
             successful_image.parent.mkdir(parents=True)
             unsupported_image.parent.mkdir(parents=True)
-            Image.new("RGB", (8, 6), "red").save(successful_image)
-            Image.new("RGB", (8, 6), "blue").save(unsupported_image)
-            Image.new("RGB", (8, 6), "black").save(failed_image)
+            Image.new("RGB", (80, 60), "red").save(successful_image)
+            Image.new("RGB", (80, 60), "blue").save(unsupported_image)
+            Image.new("RGB", (80, 60), "black").save(failed_image)
 
             provider = FakeOcrProvider()
             factory = OcrProviderFactory()
@@ -138,25 +150,44 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertEqual(
                 {
                     "status": "succeeded",
+                    "source_language": "en",
                     "text_items": [
                         {
                             "text": "detected",
                             "confidence": 0.75,
                             "bounding_polygon": [
-                                {"x": 1, "y": 1},
-                                {"x": 5, "y": 1},
-                                {"x": 5, "y": 4},
-                                {"x": 1, "y": 4},
+                                {"x": 30, "y": 25},
+                                {"x": 50, "y": 25},
+                                {"x": 50, "y": 35},
+                                {"x": 30, "y": 35},
                             ],
                             "padded_bounding_polygon": [
-                                {"x": 1, "y": 1},
-                                {"x": 5, "y": 1},
-                                {"x": 5, "y": 4},
-                                {"x": 1, "y": 4},
+                                {"x": 20, "y": 20},
+                                {"x": 40, "y": 20},
+                                {"x": 40, "y": 30},
+                                {"x": 20, "y": 30},
                             ],
                             "padded_image_path": "success.png.text-0001.png",
                             "extra": {},
-                        }
+                        },
+                        {
+                            "text": "low confidence",
+                            "confidence": 0.64,
+                            "bounding_polygon": [
+                                {"x": 55, "y": 25},
+                                {"x": 75, "y": 25},
+                                {"x": 75, "y": 35},
+                                {"x": 55, "y": 35},
+                            ],
+                            "padded_bounding_polygon": [
+                                {"x": 20, "y": 20},
+                                {"x": 40, "y": 20},
+                                {"x": 40, "y": 30},
+                                {"x": 20, "y": 30},
+                            ],
+                            "padded_image_path": "success.png.text-0002.png",
+                            "extra": {},
+                        },
                     ],
                 },
                 json.loads(success_base.with_name("success.png.json").read_text(encoding="utf-8")),
@@ -164,11 +195,24 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             masked_path = success_base.with_name("success.png.masked.png")
             self.assertTrue(masked_path.is_file())
             self.assertTrue(success_base.with_name("success.png.text-0001.png").is_file())
+            self.assertTrue(success_base.with_name("success.png.text-0002.png").is_file())
             with Image.open(masked_path) as masked_image:
-                self.assertEqual((0, 0, 0, 255), masked_image.getpixel((2, 2)))
+                self.assertEqual((0, 0, 0, 255), masked_image.getpixel((35, 30)))
                 self.assertEqual((255, 0, 0, 255), masked_image.getpixel((0, 0)))
             with Image.open(success_base.with_name("success.png.text-0001.png")) as clip:
-                self.assertEqual((8, 6), clip.size)
+                self.assertEqual((60, 50), clip.size)
+            replacement_directory = success_base.with_name("success.png.text-replacements")
+            self.assertTrue((replacement_directory / "provider-0001.png").is_file())
+            self.assertTrue((replacement_directory / "provider-0004.png").is_file())
+            self.assertTrue(
+                (replacement_directory / "region-0001.provider-0001.png").is_file()
+            )
+            self.assertTrue(
+                (replacement_directory / "region-0001.provider-0004.png").is_file()
+            )
+            self.assertFalse(
+                (replacement_directory / "region-0002.provider-0001.png").exists()
+            )
 
             self.assertEqual(
                 {"status": "failed"},
@@ -196,6 +240,51 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertIn('target="_blank"', viewer)
             self.assertNotIn("<pre", viewer)
             self.assertNotIn("toggle-results", viewer)
+            self.assertNotIn("character_mask", viewer)
+            replacement_viewer = (provider_root / "text-replacement.html").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("<th>Region</th><th>Original text image</th>", replacement_viewer)
+            self.assertIn("character_mask", replacement_viewer)
+            self.assertIn("double_character_mask", replacement_viewer)
+            self.assertIn("half_character_mask", replacement_viewer)
+            self.assertIn("identity", replacement_viewer)
+            self.assertIn("Language: en→en.", replacement_viewer)
+            self.assertIn('data-replacement-preview="replacement-preview-', replacement_viewer)
+            self.assertIn('document.querySelectorAll("select[data-replacement-preview]")', replacement_viewer)
+            self.assertIn(
+                ">Detected regions masked</option>", replacement_viewer
+            )
+            self.assertIn('.top-previews { display: flex; flex-wrap: nowrap;', replacement_viewer)
+            self.assertIn('flex: 0 0 calc(50% - .5rem);', replacement_viewer)
+            self.assertIn('.top-preview img { display: block; max-width: 100%; }', replacement_viewer)
+            self.assertLess(
+                replacement_viewer.index(">identity</option>"),
+                replacement_viewer.index(">Detected regions masked</option>"),
+            )
+            first_preview_path = (
+                "collection/en/nested/success.png.text-replacements/provider-0001.png"
+            )
+            self.assertIn(
+                f'<option value="{first_preview_path}">character_mask</option>',
+                replacement_viewer,
+            )
+            self.assertIn(
+                f'<img id="replacement-preview-2" alt="Complete text-replacement preview" '
+                f'src="{first_preview_path}">',
+                replacement_viewer,
+            )
+            self.assertIn(
+                '<tr><td>1</td>', replacement_viewer
+            )
+            self.assertNotIn(
+                '<tr><td>2</td>', replacement_viewer
+            )
+            self.assertEqual(
+                1,
+                replacement_viewer.count('alt="Original input"'),
+            )
+            self.assertNotIn('alt="Detected text masked in black"', replacement_viewer)
             self.assertTrue((provider_root / ".input.sha256").is_file())
             self.assertEqual(
                 ocr_evaluation.ARTIFACT_FORMAT_VERSION,
@@ -203,23 +292,35 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                     encoding="ascii"
                 ).strip(),
             )
+            self.assertEqual(
+                ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION,
+                (
+                    provider_root / ".text-replacement-artifact-format-version"
+                ).read_text(encoding="ascii").strip(),
+            )
 
             second_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
             self.assertEqual(1, second_run.skipped_providers)
             self.assertEqual(2, provider.calls)
 
+            (provider_root / "text-replacement.html").unlink()
+            third_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(1, third_run.skipped_providers)
+            self.assertEqual(2, provider.calls)
+            self.assertTrue((provider_root / "text-replacement.html").is_file())
+
             stale_mirrored_folder = provider_root / "stale mirrored folder"
             stale_mirrored_folder.mkdir()
             (stale_mirrored_folder / "stale.txt").write_text("stale", encoding="ascii")
             (provider_root / "index.html").unlink()
-            third_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
-            self.assertEqual(0, third_run.skipped_providers)
+            fourth_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(0, fourth_run.skipped_providers)
             self.assertEqual(4, provider.calls)
             self.assertFalse(stale_mirrored_folder.exists())
 
             (provider_root / ".artifact-format-version").unlink()
-            fourth_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
-            self.assertEqual(0, fourth_run.skipped_providers)
+            fifth_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(0, fifth_run.skipped_providers)
             self.assertEqual(6, provider.calls)
 
     # Verifies FR-2026-08-02-07.
