@@ -53,6 +53,16 @@ The generated outputs are ignored by Git and may contain confidential material. 
 
 Only samples in a BCP 47 language directory are prepared. Place that directory directly below `sample-data/`, or one directory below it, for example `sample-data/ja/` or `sample-data/corpus/en-GB/`. The script mirrors eligible source paths and removes whole stale generated directories, while retaining extra files in generated directories that still correspond to source directories.
 
+### Run OCR evaluations
+
+Generate visual evaluation artifacts for every discovered OCR provider:
+
+```sh
+.venv/bin/python scripts/run_ocr_evaluations.py
+```
+
+The command first prepares inputs from `sample-data/`. Results are written below `outputs/evaluations/ocr/output/<provider>/`. Each provider root contains an `index.html` viewer, JSON results, black-masked images, and clipped detected-text regions. tqdm renders one compact progress bar at a time for each language folder and its immediate child folders. A provider is skipped when its input checksum is unchanged and the viewer exists; delete its `.input.sha256` or `index.html` to regenerate it.
+
 ## Candidate core technologies
 
 Going to start with - **Offline:** PaddleOCR + Argos Translate.

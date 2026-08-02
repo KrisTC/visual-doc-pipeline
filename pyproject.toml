@@ -13,12 +13,14 @@ dependencies = [
     "pypdf",
     "python-docx",
     "python-pptx",
+    "tqdm",
 ]
 
 [dependency-groups]
 dev = [
     "mypy",
     "types-openpyxl",
+    "types-tqdm",
 ]
 
 [tool.uv]

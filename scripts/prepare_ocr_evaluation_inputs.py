@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import posixpath
-import re
 import shutil
 import sys
 import xml.etree.ElementTree as ElementTree
@@ -18,24 +17,19 @@ from typing import Iterable, Iterator, Protocol, cast
 from urllib.parse import unquote
 from zipfile import BadZipFile, ZipFile
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+
 from pypdf import PdfReader
+from pipeline.ocr.languages import discover_language_directories
 
 
 BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 OFFICE_DOCUMENT_EXTENSIONS = {".docx", ".pptx", ".xlsx"}
 OFFICE_DOCUMENT_RELATIONSHIP_TYPE = "/officeDocument"
-LANGUAGE_TAG_PATTERN = re.compile(
-    r"^(?:"
-    r"(?:[A-Za-z]{2,3}(?:-[A-Za-z]{3}){0,3}|[A-Za-z]{4}|[A-Za-z]{5,8})"
-    r"(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?"
-    r"(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*"
-    r"(?:-[0-9A-WY-Za-wy-z](?:-[A-Za-z0-9]{2,8})+)*"
-    r"(?:-x(?:-[A-Za-z0-9]{1,8})+)?|"
-    r"x(?:-[A-Za-z0-9]{1,8})+"
-    r")$"
-)
-
-
 @dataclass(frozen=True)
 class ExtractedImage:
     data: bytes
@@ -182,30 +176,6 @@ def document_output_directory(output_root: Path, relative_source_path: Path) -> 
 def is_unchanged(output_directory: Path, source_checksum: str) -> bool:
     checksum_path = output_directory / ".source.sha256"
     return checksum_path.is_file() and checksum_path.read_text(encoding="ascii").strip() == source_checksum
-
-
-def is_language_tag(directory_name: str) -> bool:
-    """Return whether a directory name has BCP 47 language-tag syntax."""
-    return LANGUAGE_TAG_PATTERN.fullmatch(directory_name) is not None
-
-
-def discover_language_directories(source_root: Path) -> list[Path]:
-    """Find language-tag directories one or two levels below ``source_root``."""
-    language_directories: list[Path] = []
-    for first_level_directory in sorted(
-        path for path in source_root.iterdir() if path.is_dir()
-    ):
-        if is_language_tag(first_level_directory.name):
-            language_directories.append(first_level_directory)
-            continue
-        language_directories.extend(
-            sorted(
-                path
-                for path in first_level_directory.iterdir()
-                if path.is_dir() and is_language_tag(path.name)
-            )
-        )
-    return language_directories
 
 
 def expected_output_directories(

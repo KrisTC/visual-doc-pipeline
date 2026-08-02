@@ -118,3 +118,163 @@ The contract test shall render the English phrase "The quick brown fox jumps ove
 For every non-skipped rotated case, the contract test shall verify that the provider's returned text-region polygons overlap the known rendered text region with a mask intersection-over-union score of at least 0.5. This establishes that the detected regions are sufficiently accurate for subsequent text masking or replacement. PaddleOCR shall initially skip 90, 135, 180, and 225 degrees, until rotation handling is implemented. It shall also skip its known unsupported dark-style cases: English Noto Sans JP Bold at 0 and 270 degrees, with white text on a black background.
 
 ---
+
+## FR-2026-08-01-03
+
+| Property | Value |
+|----------|-------|
+| Title | Generate manual OCR-evaluation results and viewer |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-01 |
+| Related Requirements | FR-2026-08-01-01, FR-2026-08-01-02 |
+
+### Description
+
+The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
+
+The command shall use the existing OCR-provider factory and OCR task request and response abstractions in `pipeline/ocr/`. It shall not implement, discover, or invoke provider-specific OCR logic independently.
+
+For each provider, the command shall create a corresponding provider root in `outputs/evaluations/ocr/output/`. Beneath that root, it shall mirror the input hierarchy. For every input image, it shall write a JSON serialization of the normalized OCR response together with a status, a copy of the source image with every detected text region masked in black, and one clipped bitmap image for each detected text region, using that region's bounding box. When a provider does not support an image's language, or when OCR fails for an image with a supported language, the command shall continue evaluating other images and providers, write a JSON file containing only a failed status for that image, and shall not create visual OCR artifacts for that image.
+
+Each provider root shall contain a generated static HTML viewer that lets a user browse that provider's image evaluations, including the input image, masked image, detected-region clips, and OCR result data.
+
+### Rationale
+
+Persisting visual artifacts alongside normalized provider output makes it practical to inspect detection coverage and compare OCR providers against the local, real-data corpus.
+
+### Notes
+
+Evaluation outputs are local generated artifacts and remain ignored by Git. The command may process confidential inputs locally, but it shall not send their contents, paths, metadata, or extracted text to external services or commit them to repository artifacts.
+
+The static viewer may load jQuery from a CDN. The precise success-status JSON shape and generated-file naming shall be defined by the implementation.
+
+Each provider root shall contain a checksum representing its complete evaluation input tree. The command shall skip regenerating a provider's output only when that checksum matches the current input tree and the provider root's `index.html` exists. Removing either the checksum or `index.html` shall force that provider's output to be regenerated.
+
+---
+
+## FR-2026-08-02-01
+
+| Property | Value |
+|----------|-------|
+| Title | Report OCR-evaluation progress |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01 |
+
+### Description
+
+The OCR-evaluation command shall use Rich to render live terminal progress while it evaluates images. It shall display a progress bar for each folder below an input language-code directory.
+
+### Rationale
+
+OCR evaluation against the local real-data corpus can take substantial time. Folder-level progress gives the user useful visibility into work completed without requiring them to infer it from model output files.
+
+### Notes
+
+Images directly in a language-code directory shall be represented by that language directory's progress bar. Each bar shall aggregate image evaluations across all providers that are not checksum-skipped and shall show the current provider and image. The command shall write a one-line skipped status for each checksum-skipped provider.
+
+---
+
+## FR-2026-08-02-02
+
+| Property | Value |
+|----------|-------|
+| Title | Present OCR text regions in the evaluation viewer |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-01-03 |
+
+### Description
+
+The static OCR-evaluation viewer shall not render JSON result content inline. For each successful image evaluation, it shall show the detected text-region clips in a table with an image column and an extracted-text column. Each detected region shall occupy one row.
+
+### Rationale
+
+The table gives a compact, legible visual comparison of every detected region and its OCR result without overwhelming the manual-evaluation view with serialized data.
+
+### Notes
+
+The viewer shall retain the input and black-masked comparison images above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
+
+---
+
+## FR-2026-08-02-03
+
+| Property | Value |
+|----------|-------|
+| Title | Render OCR-evaluation progress with tqdm |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-02-01 |
+
+### Description
+
+The OCR-evaluation command shall use tqdm, rather than Rich, to render terminal progress.
+
+### Rationale
+
+tqdm provides the compact notebook-style progress display preferred for this command.
+
+### Notes
+
+The command shall render one folder bar at a time, labelled with the folder. It shall show the current provider and image basename in the bar postfix. Each bar shall aggregate all non-cached provider/image evaluations for that folder, and checksum-skipped providers shall be written as one-line status messages.
+
+---
+
+## FR-2026-08-02-04
+
+| Property | Value |
+|----------|-------|
+| Title | Show OCR confidence in the evaluation viewer |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-02-02 |
+
+### Description
+
+The detected-region table in the static OCR-evaluation viewer shall include a confidence column. Each region's normalized OCR confidence shall be displayed as a percentage rounded to two decimal places.
+
+### Rationale
+
+Displaying normalized confidence beside each detected region helps manual reviewers judge whether recognition quality corresponds with the provider's confidence.
+
+### Notes
+
+Confidence shall be a narrow third column in the existing one-row-per-detected-region table. A normalized confidence of `0.7543` shall display as `75.43%`.
+
+---
+
+## FR-2026-08-02-05
+
+| Property | Value |
+|----------|-------|
+| Title | Prepare OCR-evaluation inputs before evaluation |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-02 |
+| Related Requirements | FR-2026-08-01-01, FR-2026-08-01-03 |
+
+### Description
+
+The OCR-evaluation command shall run OCR-evaluation input preparation before it discovers or evaluates input images.
+
+### Rationale
+
+Preparing inputs first ensures the evaluation corpus reflects the current eligible sample-data tree without requiring a separate manual command.
+
+### Notes
+
+The command shall invoke preparation internally with `sample-data/` as its source root and pass the evaluation command's `--input-root` value as the preparation output root. It shall add no preparation-specific command-line options. If preparation fails, evaluation shall not start.
+
+---
