@@ -39,7 +39,7 @@ Type-check all Python with:
 .venv/bin/python scripts/typecheck-python.py
 ```
 
-The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md).
+The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md).
 
 ### Prepare OCR-evaluation inputs
 
