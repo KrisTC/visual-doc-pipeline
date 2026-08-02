@@ -6,11 +6,7 @@ from pipeline.text_replacement.models import TextReplacementRequest, TextReplace
 
 
 class TextReplacementProvider(Protocol):
-    """A named implementation of the text-replacement task."""
-
-    @property
-    def name(self) -> str:
-        """Return the unique name under which this provider is registered."""
+    """An implementation selected by its text-replacement plugin-package name."""
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Replace the request text."""

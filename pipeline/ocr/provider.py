@@ -25,11 +25,7 @@ class LocalContractTestSkip:
 
 
 class OcrProvider(Protocol):
-    """A named implementation of the OCR task."""
-
-    @property
-    def name(self) -> str:
-        """Return the unique name under which this provider is registered."""
+    """An implementation of the OCR task selected by its plugin-package name."""
 
     @property
     def supported_languages(self) -> frozenset[str]:

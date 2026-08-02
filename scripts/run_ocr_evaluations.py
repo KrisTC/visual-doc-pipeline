@@ -201,6 +201,7 @@ def evaluate_ocr_inputs(
                 for provider_name, provider_root, provider in providers:
                     entries_by_provider[provider_name].extend(
                         _evaluate_provider(
+                            provider_name,
                             provider,
                             folder_images,
                             provider_root,
@@ -298,6 +299,7 @@ def _text_replacement_output_is_current(provider_root: Path, checksum: str) -> b
 
 
 def _evaluate_provider(
+    provider_name: str,
     provider: OcrProvider,
     images: list[EvaluationImage],
     provider_root: Path,
@@ -307,7 +309,7 @@ def _evaluate_provider(
     entries: list[ViewerEntry] = []
     for image in images:
         progress.set_postfix_str(
-            f"{provider.name}: {_progress_label(image.path.name)}",
+            f"{provider_name}: {_progress_label(image.path.name)}",
             refresh=True,
         )
         try:

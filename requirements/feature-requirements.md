@@ -543,3 +543,44 @@ The command may continue to process confidential samples locally under FR-2026-0
 Automated tests shall create synthetic OCR inputs, registered local test providers, and temporary output roots. They shall verify source-language JSON output, complete per-provider images, per-region clips, table columns, and provider-preview selection markup without using sample data.
 
 ---
+
+## FR-2026-08-03-01
+
+| Property | Value |
+|----------|-------|
+| Title | Package OCR and text-replacement providers in name-derived directories |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06 |
+
+### Description
+
+The OCR-provider and text-replacement-provider factories shall discover each provider from its own direct-child Python package beneath, respectively, `pipeline/ocr_plugins/` and `pipeline/text_replacement_plugins/`. A provider package shall contain an `__init__.py` discovery entry point, the provider-specific implementation, and any provider-specific supporting code, configuration templates, documentation, or assets needed by that provider. The shared task abstractions and factory code shall remain outside provider packages.
+
+The basename of a provider directory shall be the provider's sole factory-visible name. A provider shall not declare, configure, or otherwise supply a separate name. The factories shall use that directory name when listing, selecting, and reporting the provider.
+
+The factories shall no longer perform duplicate provider-name detection or raise a duplicate-name error. A filesystem directory cannot have two direct children with the same name; therefore the provider-directory structure is the uniqueness mechanism.
+
+Each provider package's `__init__.py` shall expose a zero-argument `create_provider()` function that returns its single OCR or text-replacement provider. The factory shall retain this function during discovery and call it only when that provider is requested. Discovery shall not instantiate providers. Registration functions and provider `name` attributes shall not be part of the provider-plugin contract.
+
+Each provider's optional human-readable description shall be the trimmed, dedented docstring of its `__init__.py` discovery entry point. A missing or empty docstring shall produce no description and shall not prevent the provider from being discovered or used. Each factory shall expose the discovered descriptions as a read-only mapping from provider name to optional description.
+
+All repository-default OCR and text-replacement providers shall be migrated to this directory-per-provider layout.
+
+### Rationale
+
+A self-contained provider directory prevents name collisions by construction and gives contributors a clear boundary for more substantial providers, including cloud-based OCR or translation integrations that need provider-specific code, configuration, and authentication guidance.
+
+### Notes
+
+This requirement supersedes the declared-name and duplicate-name-rejection clauses in FR-2026-08-01-02 and FR-2026-08-02-06. Their request/response models, provider APIs, unavailable-provider errors, provider-failure errors, contract tests, and all other requirements remain unchanged.
+
+Provider-specific dependencies remain subject to the project's existing dependency-management and security requirements. This requirement does not authorize credentials, tokens, or confidential content to be committed, logged, or sent to an external service; separate requirements shall define credential handling and external-service eligibility before a cloud provider is used with local evaluation data.
+
+The selected `__init__.py` and `create_provider()` convention deliberately permits moving an existing single-file plugin into a same-named directory with minimal import churn: for example, `pipeline/ocr_plugins/paddleocr.py` becomes `pipeline/ocr_plugins/paddleocr/__init__.py`. Imports of `pipeline.ocr_plugins.paddleocr` therefore remain valid. The migration shall remove each provider's `name` attribute and replace its `register_providers(factory)` function with `create_provider()`.
+
+Factory tests shall verify that package-directory names determine provider names, that a provider without a `name` attribute is discovered, and that a package docstring supplies its description. Existing unavailable-provider and provider-failure tests shall remain.
+
+---

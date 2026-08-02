@@ -2,64 +2,71 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from importlib import import_module
+from inspect import cleandoc
 from pkgutil import iter_modules
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import cast
 
-from pipeline.text_replacement.errors import (
-    DuplicateTextReplacementProviderError,
-    TextReplacementProviderNotFoundError,
-)
+from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from pipeline.text_replacement.provider import TextReplacementProvider
 
 
-ProviderConstructor = Callable[[], TextReplacementProvider]
-PluginRegistration = Callable[["TextReplacementProviderFactory"], None]
+ProviderCreator = Callable[[], TextReplacementProvider]
 PLUGIN_PACKAGE = "pipeline.text_replacement_plugins"
 
 
 class TextReplacementProviderFactory:
-    """Creates providers registered by modules in the default plugin package."""
+    """Creates providers discovered from the default provider-package directory."""
 
-    def __init__(self) -> None:
-        self._constructors: dict[str, ProviderConstructor] = {}
+    def __init__(
+        self,
+        creators: Mapping[str, ProviderCreator] | None = None,
+        descriptions: Mapping[str, str | None] | None = None,
+    ) -> None:
+        self._creators = dict(creators or {})
+        self._provider_descriptions: Mapping[str, str | None] = MappingProxyType(
+            {
+                name: descriptions.get(name) if descriptions is not None else None
+                for name in self._creators
+            }
+        )
 
     @classmethod
     def discover_default_plugins(cls) -> "TextReplacementProviderFactory":
-        """Discover and register all modules in ``pipeline.text_replacement_plugins``."""
-        factory = cls()
+        """Discover provider packages without creating their providers."""
         plugin_package = import_module(PLUGIN_PACKAGE)
         package_paths = _package_paths(plugin_package)
+        creators: dict[str, ProviderCreator] = {}
+        descriptions: dict[str, str | None] = {}
         for module_info in iter_modules(package_paths, f"{PLUGIN_PACKAGE}."):
+            if not module_info.ispkg:
+                continue
             plugin_module = import_module(module_info.name)
-            _register_plugin(plugin_module, factory)
-        return factory
-
-    def register(self, name: str, constructor: ProviderConstructor) -> None:
-        """Register a provider constructor under a unique, non-empty name."""
-        if not name.strip():
-            message = "A text-replacement provider name must not be empty."
-            raise ValueError(message)
-        if name in self._constructors:
-            message = f"A text-replacement provider named {name!r} is already registered."
-            raise DuplicateTextReplacementProviderError(message)
-        self._constructors[name] = constructor
+            provider_name = module_info.name.rpartition(".")[2]
+            creators[provider_name] = _provider_creator(plugin_module)
+            descriptions[provider_name] = _description(plugin_module.__doc__)
+        return cls(creators, descriptions)
 
     def create(self, name: str) -> TextReplacementProvider:
-        """Create the provider registered under ``name``."""
+        """Create the provider stored under its package-derived ``name``."""
         try:
-            constructor = self._constructors[name]
+            creator = self._creators[name]
         except KeyError as error:
             message = f"No text-replacement provider is registered under {name!r}."
             raise TextReplacementProviderNotFoundError(message) from error
-        return constructor()
+        return creator()
 
     @property
     def provider_names(self) -> tuple[str, ...]:
-        """Return registered names in deterministic order."""
-        return tuple(sorted(self._constructors))
+        """Return discovered package-derived names in deterministic order."""
+        return tuple(sorted(self._creators))
+
+    @property
+    def provider_descriptions(self) -> Mapping[str, str | None]:
+        """Return read-only descriptions keyed by package-derived provider name."""
+        return self._provider_descriptions
 
 
 def _package_paths(plugin_package: ModuleType) -> list[str]:
@@ -70,16 +77,20 @@ def _package_paths(plugin_package: ModuleType) -> list[str]:
     return list(package_paths)
 
 
-def _register_plugin(
-    plugin_module: ModuleType, factory: TextReplacementProviderFactory
-) -> None:
-    registration = getattr(plugin_module, "register_providers", None)
-    if not callable(registration):
+def _provider_creator(plugin_module: ModuleType) -> ProviderCreator:
+    creator = getattr(plugin_module, "create_provider", None)
+    if not callable(creator):
         message = (
-            f"Text-replacement plugin {plugin_module.__name__!r} "
-            "has no register_providers function."
+            f"Text-replacement plugin package {plugin_module.__name__!r} "
+            "has no create_provider function."
         )
         raise RuntimeError(message)
-    # Plugin modules are discovered dynamically; their registration function cannot be typed statically.
-    register = cast(PluginRegistration, registration)
-    register(factory)
+    # Plugin packages are discovered dynamically; their creator function cannot be typed statically.
+    return cast(ProviderCreator, creator)
+
+
+def _description(docstring: str | None) -> str | None:
+    """Normalize an optional provider-package docstring for factory metadata."""
+    if docstring is None:
+        return None
+    return cleandoc(docstring) or None

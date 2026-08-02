@@ -4,40 +4,25 @@ from __future__ import annotations
 
 import unittest
 
-from pipeline.ocr.errors import (
-    DuplicateOcrProviderError,
-    OcrProviderNotFoundError,
-)
+from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.factory import OcrProviderFactory
-from pipeline.ocr.models import OcrRequest, OcrResult
-from pipeline.ocr.provider import LocalContractTestSkip
-
-
-class _ExampleProvider:
-    name = "example"
-    supported_languages = frozenset({"en"})
-    supports_local_contract_test = True
-    skipped_local_contract_angles = frozenset[int]()
-    skipped_local_contract_cases: frozenset[LocalContractTestSkip] = frozenset()
-
-    def recognize(self, request: OcrRequest) -> OcrResult:
-        del request
-        return OcrResult(())
 
 
 class OcrProviderFactoryTests(unittest.TestCase):
-    # Verifies FR-2026-08-01-02.
-    def test_discovers_the_paddleocr_plugin(self) -> None:
+    # Verifies FR-2026-08-01-02 and FR-2026-08-03-01.
+    def test_discovers_the_paddleocr_package_by_its_directory_name(self) -> None:
         factory = OcrProviderFactory.discover_default_plugins()
 
         self.assertEqual(("paddleocr",), factory.provider_names)
+        self.assertEqual(
+            {"paddleocr": "PaddleOCR implementation of the product OCR-provider protocol."},
+            dict(factory.provider_descriptions),
+        )
+        self.assertFalse(hasattr(factory.create("paddleocr"), "name"))
 
-    # Verifies FR-2026-08-01-02.
-    def test_rejects_duplicate_names_and_reports_unknown_names(self) -> None:
+    # Verifies FR-2026-08-01-02 and FR-2026-08-03-01.
+    def test_reports_unknown_names_without_provider_registration(self) -> None:
         factory = OcrProviderFactory()
-        factory.register("example", _ExampleProvider)
 
-        with self.assertRaises(DuplicateOcrProviderError):
-            factory.register("example", _ExampleProvider)
         with self.assertRaises(OcrProviderNotFoundError):
             factory.create("missing")

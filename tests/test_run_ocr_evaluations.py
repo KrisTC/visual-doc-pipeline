@@ -29,7 +29,6 @@ SPECIFICATION.loader.exec_module(ocr_evaluation)
 class FakeOcrProvider:
     """Predictable provider used to exercise the evaluator through its public protocol."""
 
-    name = "fake"
     supported_languages = frozenset({"en"})
     supports_local_contract_test = False
     skipped_local_contract_angles: frozenset[int] = frozenset()
@@ -137,7 +136,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
 
             provider = FakeOcrProvider()
             factory = OcrProviderFactory()
-            factory.register(provider.name, lambda: provider)
+            factory = OcrProviderFactory({"fake": lambda: provider})
 
             first_run = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
 

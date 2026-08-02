@@ -52,12 +52,12 @@ class DeterministicTextReplacementProviderTests(unittest.TestCase):
         input_text = "quarterly report_日本語.pptx"
         request = TextReplacementRequest(input_text, True, "ja", "en")
 
-        for provider in (
-            IdentityProvider(),
-            DoubleCharacterMaskProvider(),
-            HalfCharacterMaskProvider(),
+        for provider_name, provider in (
+            ("identity", IdentityProvider()),
+            ("double_character_mask", DoubleCharacterMaskProvider()),
+            ("half_character_mask", HalfCharacterMaskProvider()),
         ):
-            with self.subTest(provider=provider.name):
+            with self.subTest(provider=provider_name):
                 result = provider.replace(request)
                 self.assertEqual(input_text, result.text)
                 self.assertEqual(1.0, result.confidence)

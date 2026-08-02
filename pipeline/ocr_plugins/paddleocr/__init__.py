@@ -11,9 +11,8 @@ import numpy as np
 import numpy.typing as npt
 
 from pipeline.ocr.errors import OcrProviderError
-from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
-from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip
+from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip, OcrProvider
 
 
 class PaddleOcrEngine(Protocol):
@@ -33,7 +32,6 @@ class PaddleOcrEngine(Protocol):
 class PaddleOcrProvider:
     """OCR provider backed by PaddleOCR's official models."""
 
-    name = "paddleocr"
     supported_languages = frozenset({"en", "ja"})
     supports_local_contract_test = True
     skipped_local_contract_angles = frozenset({90, 135, 180, 225})
@@ -75,9 +73,9 @@ class PaddleOcrProvider:
         return _parse_result(raw_result)
 
 
-def register_providers(factory: OcrProviderFactory) -> None:
-    """Register PaddleOCR under its stable product-provider name."""
-    factory.register(PaddleOcrProvider.name, PaddleOcrProvider)
+def create_provider() -> OcrProvider:
+    """Create the PaddleOCR provider selected by this package's directory name."""
+    return PaddleOcrProvider()
 
 
 def _paddle_language(language: str) -> str:

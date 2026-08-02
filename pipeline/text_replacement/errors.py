@@ -5,10 +5,6 @@ class TextReplacementError(RuntimeError):
     """Base exception for text-replacement task failures."""
 
 
-class DuplicateTextReplacementProviderError(TextReplacementError):
-    """Raised when two plugins declare the same provider name."""
-
-
 class TextReplacementProviderError(TextReplacementError):
     """Raised when a text-replacement provider cannot process a request."""
 
