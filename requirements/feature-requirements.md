@@ -619,3 +619,299 @@ The ordering of background wipes and the ordering of replacement-text drawing wi
 Automated tests shall use synthetic adjacent OCR regions and verify both explicit separate-pass calls and the batch operation: a later background wipe cannot erase a replacement glyph rendered for an earlier region. Tests shall also retain the existing single-region API behaviour.
 
 ---
+
+## FR-2026-08-03-03
+
+| Property | Value |
+|----------|-------|
+| Title | Process a folder of documents and bitmap images for visible-text replacement |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06, FR-2026-08-02-10, FR-2026-08-03-02, TR-2026-08-01-02 |
+
+### Description
+
+The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported.
+
+The command shall accept a text-replacement-provider name, defaulting to `character_mask`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined.
+
+For bitmap images, the command shall use the selected OCR provider, text-region colour estimator, and existing batch text-region renderer to replace detected text. It shall skip a detected text region when its normalized OCR confidence is less than `0.65`; colour-estimate confidence shall not affect eligibility. For supported document files, it shall replace both native editable text and text in every embedded raster bitmap. Native editable text is not subject to an OCR-confidence threshold.
+
+The command shall retain each source document's file format. When a processed output path would collide with an earlier processed output path, it shall append a number to the filename to make the path unique. A failure for one eligible input file shall be reported and shall not prevent the command from processing other eligible input files.
+
+### Rationale
+
+The existing pipeline primitives and local evaluators need a user-facing command that produces complete, replacement-processed copies of an input folder.
+
+### Notes
+
+The existing requirements define supported bitmap formats as PNG, JPEG, TIFF, BMP, GIF, and WebP, and initial document extensions as PDF, DOCX, PPTX, and XLSX.
+
+The command is `scripts/run_folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER`. `--source-language` is required; `--target-language en`, `--ocr paddleocr`, and `--text-replacement character_mask` are its defaults. It exits non-zero if one or more eligible files fail, after continuing to process other files.
+
+The Office implementation processes visible WordprocessingML, DrawingML, SpreadsheetML, and VML text nodes throughout each OOXML package, which covers document body content as well as reachable package parts such as headers, footers, tables, comments, text boxes, grouped-shape text, notes, and shared spreadsheet strings. It processes every embedded raster part under an Office `media` directory.
+
+The PDF implementation rewrites native text-showing operations in page content and reusable Form XObjects, annotation and AcroForm text values, and form appearance streams. It replaces raster image XObjects, including images in Form XObjects. A PDF containing an inline image that cannot be safely rewritten is reported as a failed file; later files continue to be processed.
+
+Native text replacement is applied to individual native text items. Embedded bitmap replacement uses OCR and skips regions with confidence below `0.65`; it ignores colour-estimate confidence.
+
+Automated tests shall use synthetic input folders and files only. They shall cover supported-file discovery, ignored files, output-filename collisions, isolated file failures, confidence gating, native OOXML and PDF text replacement, embedded Office bitmap processing, and the direct-script help entry point.
+
+No source or output content may be sent to external services. The selected providers must be locally eligible when inputs might contain confidential information.
+
+---
+
+## FR-2026-08-03-04
+
+| Property | Value |
+|----------|-------|
+| Title | Report folder-replacement progress |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-02-03, FR-2026-08-03-03 |
+
+### Description
+
+The folder-replacement command shall use tqdm to render terminal progress while it processes supported input files. It shall render one progress bar at a time for each input folder that contains eligible files, labelled with that folder's path relative to the input root. The bar shall show the basename of the current source file in its postfix.
+
+The command shall print the relative path of each source file when it starts processing it. It shall render one tqdm progress bar for that source file. A bitmap file's bar shall contain one work item. A document file's bar shall contain one native-text work item and one work item for every embedded raster bitmap. The document's bar shall advance after each work item completes, allowing a user to see progress through its embedded-image work.
+
+### Rationale
+
+OCR and later translation can take substantial time. Per-document progress provides visibility through long embedded-image work while retaining the command's isolated per-file failure behaviour.
+
+### Notes
+
+The progress bar shall show its current native-text or embedded-image work item in its postfix. Existing one-line per-file failure reporting shall remain visible without stopping later work. A failure shall close that file's bar and later files shall still be processed.
+
+---
+
+## FR-2026-08-03-05
+
+| Property | Value |
+|----------|-------|
+| Title | Replace editable text in embedded vector graphics directly |
+| Owner | |
+| Status | Implemented |
+| Source | Implementation diagnosis |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03 |
+
+### Description
+
+The folder-replacement pipeline shall replace editable text contained in embedded vector graphics in supported document files by directly updating the vector graphic's native text representation. It shall send each vector-text item to the selected text-replacement provider with `is_filename=False`, the command's source language, and target language.
+
+It shall not use OCR or rasterize a vector graphic to replace its text. It shall preserve the graphic as vector output and retain non-text vector content unchanged.
+
+When a vector graphic's visible text is represented only by paths or outlines, rather than an editable native text representation, the current implementation shall retain it unchanged and report that it was not replaced. Rasterizing it and using the existing bitmap path is deferred to a future requirement.
+
+### Rationale
+
+Visible text may be part of a vector graphic rather than a native document text run or a raster bitmap. Direct native-text replacement preserves the graphic's fidelity and avoids unnecessary OCR cost and recognition errors.
+
+### Notes
+
+The initial supported embedded vector formats are SVG, EMF, and WMF. The implementation shall identify and update their editable native text structures directly. Direct mutation is format-specific; the implementation must not treat the formats as interchangeable.
+
+The initial direct-text implementation supports SVG `text`, `tspan`, and `textPath` content; EMF `EMR_EXTTEXTOUTA` and `EMR_EXTTEXTOUTW` records; and WMF `META_TEXTOUT` and `META_EXTTEXTOUT` records. A vector graphic with none of these editable text structures is retained unchanged and reported as unsupported. Additional vector text-record variants require a future requirement.
+
+The current locked Python image stack has no usable EMF or WMF rasterizer. Implementing the deferred outlined-text fallback requires a separately specified, dependency-policy-compliant renderer and an output-reembedding strategy for replacing the original vector package part with its processed bitmap result.
+
+A renderer that requires a commercial license shall not be used in evaluation mode: generated documents must not contain evaluation watermarks or other licensing artifacts. Its license file, key, or equivalent credential shall not be committed, logged, or included in generated artifacts. The licence configuration and deployment mechanism require a separate approved requirement before such a renderer is added.
+
+---
+
+## FR-2026-08-03-06
+
+| Property | Value |
+|----------|-------|
+| Title | Comment on unsupported images in Office documents |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-05 |
+
+### Description
+
+When processing a Word, Excel, or PowerPoint document, the pipeline shall add a document-native comment for every image whose text cannot be processed. The comment shall state that the image contains text that is not supported yet.
+
+### Rationale
+
+Comments make unreplaced visible text reviewable without altering the source image or silently implying that its content was processed.
+
+### Notes
+
+Before implementation, define which conditions create a comment (for example, a vector with no editable text, OCR failure, or every skipped low-confidence OCR region); the exact comment text; comment author/identity; and the required anchor for Word, Excel, and PowerPoint comments. The implementation shall not replace the requested comment with a visible text box, speaker note, cell value, or other non-comment artifact.
+
+---
+
+## FR-2026-08-03-07
+
+| Property | Value |
+|----------|-------|
+| Title | Select native document-text layout-preservation mode |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-02-10 |
+
+### Description
+
+The folder-replacement command shall provide a document-text layout mode for native editable text in PDF, DOCX, PPTX, and XLSX output. The mode shall not change the established OCR bitmap replacement path or direct editable-vector-text replacement path.
+
+`preserve-source-formatting` shall be the default. It shall replace native text while retaining the source document's existing font and size. It shall not attempt to resize, reflow, or otherwise fit the replacement text to its original bounds.
+
+`preserve-basic-layout` shall replace text using an appropriate Noto font distributed under the SIL Open Font License and shall adjust font size to fit the replacement text within the source text item's explicit bounding box. It shall favour fitting within the original visible region over retaining the source font or font size. It shall apply to explicitly laid-out native document text and editable vector text, including PowerPoint shapes and grouped shapes, Word text boxes and embedded diagrams, and Excel and PowerPoint drawing text.
+
+Free-flowing Word text, including normal document paragraphs, shall retain source formatting in both modes because it has no stable explicit bounding box to fit. The mode shall not change the established OCR bitmap replacement path.
+
+### Rationale
+
+Source formatting may be essential to a document's design, but translated text can be substantially longer or shorter. An explicit mode lets users choose between source fidelity and a basic readability-oriented fit.
+
+### Notes
+
+The command-line option name and its exact accepted values remain to be defined. The current implementation's native-document replacement behaviour corresponds to `preserve-source-formatting`.
+
+Before implementation, define the bounding-box source and fitting behaviour for each format, including PowerPoint shapes and grouped shapes, Word text boxes and embedded diagrams, Excel cells and drawing text, and PDF content/form/annotation text. Also define the target-language-to-Noto-face mapping, handling when no committed Noto face supports the target language, wrapping, and overflow behaviour when a minimum readable font size cannot fit.
+
+The `preserve-basic-layout` implementation shall use a repository-owned, redistributable Noto font asset. It shall not depend on operating-system fonts or runtime font downloads. The font selection and all fitting calculations shall be deterministic for the same input, options, and font assets.
+
+Automated tests shall use synthetic documents and fonts only. They shall verify the default mode retains source font settings, the fitting mode selects the specified Noto font and reduces or increases size as needed, and each supported document format's output remains valid.
+
+---
+
+## FR-2026-08-03-08
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve OOXML markup-compatibility namespace bindings |
+| Owner | |
+| Status | Implemented |
+| Source | Implementation diagnosis |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03 |
+
+### Description
+
+When replacing native text in an OOXML package part, the pipeline shall preserve every namespace binding referenced by Markup Compatibility attributes and elements, including `mc:Choice` `Requires` values and `mc:Ignorable` values. The rewritten part shall retain valid namespace bindings for those references.
+
+### Rationale
+
+OOXML compatibility markup uses prefix-valued attributes whose prefixes may not otherwise appear in an element or attribute name. A generic XML serializer can discard those declarations even though the resulting package still requires them. Preserving the bindings keeps generated Word, Excel, and PowerPoint documents valid and avoids application repair prompts.
+
+### Notes
+
+The implementation shall use only synthetic OOXML package data in automated tests. Tests shall verify that a text-rewritten part containing a compatibility choice still declares the prefix named by its `Requires` value.
+
+---
+
+## FR-2026-08-03-09
+
+| Property | Value |
+|----------|-------|
+| Title | Replace raster DIBs embedded in EMF graphics |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-05, TR-2026-08-03-01 |
+
+### Description
+
+When an embedded EMF graphic contains a raster DIB payload in an `EMR_STRETCHDIBITS` record, the folder-replacement pipeline shall decode that payload in memory and process it through the existing shared bitmap OCR and text-replacement path. It shall re-embed the resulting DIB in the same EMF record, retaining the EMF graphic and its other vector content.
+
+The raster DIB path shall use the selected OCR and text-replacement providers, source and target languages, typeface, confidence threshold, colour estimation, and batch text-region rendering already used for standalone and Office-embedded bitmap images. Its replaced OCR-region count shall contribute to the document's image-region result.
+
+### Rationale
+
+An EMF can combine editable vector text with already-rasterized visual content. Processing DIB payloads directly covers that contained bitmap content without requiring an EMF renderer or rasterizing the whole vector graphic.
+
+### Notes
+
+The initial scope is `EMR_STRETCHDIBITS`. Other EMF bitmap record types and outlined or path-only vector text remain out of scope until separately specified. The DIB shall be processed only in memory and shall invoke the existing shared raster handler; no intermediate image file is permitted.
+
+Automated tests shall use a synthetic EMF containing a DIB payload. They shall verify that the shared image processor is invoked, its result is re-embedded, and unrelated EMF records remain valid.
+
+---
+
+## FR-2026-08-03-10
+
+| Property | Value |
+|----------|-------|
+| Title | Separate vector format handlers and support standalone vector inputs |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-05, TR-2026-08-03-01 |
+
+### Description
+
+The vector-replacement implementation shall provide separate SVG, EMF, and WMF modules, with a small extension-based dispatcher and shared result and DIB helpers. Standalone `.svg`, `.emf`, and `.wmf` input files shall be supported by the folder command and shall use the same in-memory format handler as an embedded Office vector part.
+
+### Rationale
+
+The vector formats have distinct binary and XML structures that need independent iteration. Sharing the one in-memory entry point prevents different behaviour for standalone and embedded graphics.
+
+### Notes
+
+The existing shared bitmap handler remains the sole raster text-replacement implementation. Vector handlers shall pass a decoded embedded bitmap directly to it and shall not write intermediate files.
+
+---
+
+## FR-2026-08-03-11
+
+| Property | Value |
+|----------|-------|
+| Title | Replace self-contained SVG raster images |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-10, SR-2026-08-03-02 |
+
+### Description
+
+The SVG handler shall process a raster image referenced by an SVG `image` element only when the image is a supported bitmap encoded as a `data:` URI in that SVG. It shall decode the bitmap in memory, apply the shared bitmap OCR and text-replacement handler, and update the same `data:` URI when one or more OCR regions are replaced.
+
+### Rationale
+
+An SVG can combine editable text and an embedded raster image. Supporting self-contained raster data covers the image without requiring a renderer or an external resource.
+
+### Notes
+
+Nested SVG, video, canvas, foreign-object content, malformed data URIs, and non-supported image MIME types remain unchanged until separately specified.
+
+---
+
+## FR-2026-08-03-12
+
+| Property | Value |
+|----------|-------|
+| Title | Replace self-contained WMF DIB bitmap records |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-10 |
+
+### Description
+
+The WMF handler shall decode and process the self-contained source DIB in `META_STRETCHDIB` records through the shared bitmap OCR and text-replacement handler, then re-embed the resulting DIB in the same record. Its replaced OCR-region count shall contribute to the folder result.
+
+### Rationale
+
+WMF supports raster DIB content alongside its native drawing and text records. Processing the DIB directly preserves the surrounding WMF without requiring a WMF renderer.
+
+### Notes
+
+The initial scope is `META_STRETCHDIB`. Other WMF bitmap records, compressed DIB payloads, and vector text represented only by outlines remain out of scope until separately specified.
+
+---

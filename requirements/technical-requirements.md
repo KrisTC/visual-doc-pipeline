@@ -132,3 +132,30 @@ Strong static typing detects integration errors before runtime and keeps the pip
 The mypy configuration is stored in `pyproject.toml`, the dependency is locked in `uv.lock`, and `scripts/typecheck-python.py` runs mypy across the `pipeline/`, `scripts/`, and `tests/` directories.
 
 ---
+
+## TR-2026-08-03-01
+
+| Property | Value |
+|----------|-------|
+| Title | Isolate folder-processor format handlers and shared helpers |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-05 |
+
+### Description
+
+The folder processor shall delegate each processed format type to a separate Python module, so format-specific behaviour can evolve independently. Shared orchestration and common helpers shall live in separate modules rather than in a single file-specific handler.
+
+Each format handler shall expose an in-memory processing path in addition to any path-based entry point. When a supported type is embedded within another supported document type, the enclosing handler shall invoke that embedded type's same in-memory handler directly. It shall not write an intermediate file solely to process that embedded value.
+
+### Rationale
+
+Format-specific replacement behaviour will need iterative development. Separate handlers make that work focused, while shared in-memory processing prevents duplicated behaviour and unnecessary disk I/O for embedded content.
+
+### Notes
+
+The initial module boundary needs confirmation: whether a “format type” means each individual extension (for example, PNG and JPEG separately) or a format family with a shared codec-oriented handler (for example, one raster-bitmap handler). The refactor shall preserve the current command-line behaviour, output formats, per-file isolation, progress reporting, and public folder-replacement API.
+
+---

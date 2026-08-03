@@ -53,3 +53,28 @@ A dependency cooldown gives the wider community time to detect and respond to a 
 uv enforces the cooldown through `exclude-newer = "7 days"` and prevents source-distribution builds through `no-build = true`. Dependencies are restricted to the PyPI registry; a repository validation script rejects prohibited source types in project metadata and the lockfile. `no-build` may prevent installation of dependencies that do not provide a compatible wheel.
 
 ---
+
+## SR-2026-08-03-02
+
+| Property | Value |
+|----------|-------|
+| Title | Do not dereference external resources from vector graphics |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-10, FR-2026-08-03-11, FR-2026-08-03-12 |
+
+### Description
+
+Vector processing shall not fetch, open, or otherwise dereference an external URL, filesystem path, package-relative path, or network resource referenced by a vector graphic. Only bytes contained within the submitted standalone graphic or Office package part may be processed.
+
+### Rationale
+
+External resource references create network and filesystem disclosure paths, non-deterministic output, and server-side request forgery risk when graphics are processed automatically.
+
+### Notes
+
+An SVG `data:` URI is self-contained data, not an external resource, and is permitted only for the supported bitmap MIME types defined by the corresponding feature requirement. Unsupported external references remain unchanged and must not be logged with their target value.
+
+---

@@ -1,0 +1,9 @@
+"""EMF format handler."""
+from __future__ import annotations
+from collections.abc import Callable
+from PIL import Image
+from pipeline.vector_text.common import VectorReplacementResult
+
+def replace_emf(data: bytes, replace_text: Callable[[str], str], replace_image: Callable[[Image.Image], int] | None) -> VectorReplacementResult:
+    from pipeline.vector_text.replacer import _replace_emf_text
+    return _replace_emf_text(data, replace_text, replace_image)
