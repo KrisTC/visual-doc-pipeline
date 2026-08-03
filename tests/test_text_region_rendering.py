@@ -12,7 +12,13 @@ import skia  # type: ignore[import-not-found]
 
 from pipeline.ocr import BoundingPolygon, OcrText, PixelPoint
 from pipeline.text_region_colours import BackgroundKind, RgbaColour, TextRegionColourEstimate
-from pipeline.text_region_rendering import replace_text_region
+from pipeline.text_region_rendering import (
+    TextRegionReplacement,
+    render_replacement_text,
+    replace_text_region,
+    replace_text_regions,
+    wipe_text_region_background,
+)
 from pipeline.text_region_rendering.renderer import (
     _fit_text,
     _placement_coordinate,
@@ -70,6 +76,63 @@ class TextRegionRenderingTests(unittest.TestCase):
         self.assertEqual(_rgba_tuple(BACKGROUND), image.getpixel((40, 51)))
         self.assertEqual(_rgba_tuple(BACKGROUND), image.getpixel((40, 52)))
         self.assertEqual((0, 0, 0), image.getpixel((40, 53)))
+
+    # Verifies FR-2026-08-03-02.
+    def test_explicit_and_batch_two_passes_preserve_text_from_a_later_wipe(self) -> None:
+        first_region = _region((10, 20), (90, 60))
+        second_region = _region((45, 20), (125, 60))
+        expected_foreground_pixel = self._foreground_pixel_inside(second_region, first_region)
+
+        sequential_image = self._blank_image()
+        replace_text_region(
+            sequential_image,
+            first_region,
+            ESTIMATE,
+            "first",
+            self._typeface(),
+            target_language="en",
+        )
+        replace_text_region(
+            sequential_image,
+            second_region,
+            ESTIMATE,
+            "",
+            self._typeface(),
+            target_language="en",
+        )
+        self.assertEqual(
+            _rgba_tuple(BACKGROUND), sequential_image.getpixel(expected_foreground_pixel)
+        )
+
+        explicit_pass_image = self._blank_image()
+        for region in (first_region, second_region):
+            wipe_text_region_background(explicit_pass_image, region, ESTIMATE)
+        for region, text in ((first_region, "first"), (second_region, "")):
+            render_replacement_text(
+                explicit_pass_image,
+                region,
+                ESTIMATE,
+                text,
+                self._typeface(),
+                target_language="en",
+            )
+        self.assertEqual(
+            _rgba_tuple(FOREGROUND), explicit_pass_image.getpixel(expected_foreground_pixel)
+        )
+
+        batch_image = self._blank_image()
+        replace_text_regions(
+            batch_image,
+            (
+                TextRegionReplacement(first_region, ESTIMATE, "first"),
+                TextRegionReplacement(second_region, ESTIMATE, ""),
+            ),
+            self._typeface(),
+            target_language="en",
+        )
+        self.assertEqual(
+            _rgba_tuple(FOREGROUND), batch_image.getpixel(expected_foreground_pixel)
+        )
 
     # Verifies FR-2026-08-02-10.
     def test_light_text_on_a_dark_background_is_lightened_only_for_rendering(self) -> None:
@@ -226,6 +289,37 @@ class TextRegionRenderingTests(unittest.TestCase):
     def _typeface(self) -> skia.Typeface:
         assert self.typeface is not None
         return self.typeface
+
+    def _blank_image(self) -> Image.Image:
+        return Image.new("RGB", (140, 80), _rgba_tuple(BACKGROUND))
+
+    def _foreground_pixel_inside(
+        self, containing_region: OcrText, rendered_region: OcrText
+    ) -> tuple[int, int]:
+        foreground_only = self._blank_image()
+        render_replacement_text(
+            foreground_only,
+            rendered_region,
+            ESTIMATE,
+            "first",
+            self._typeface(),
+            target_language="en",
+        )
+        pixels = np.asarray(foreground_only)
+        foreground_pixels = np.all(pixels == _rgba_tuple(FOREGROUND), axis=2)
+        vertices = containing_region.bounding_polygon.vertices
+        left = int(min(vertex.x for vertex in vertices)) - 2
+        top = int(min(vertex.y for vertex in vertices)) - 2
+        right = int(max(vertex.x for vertex in vertices)) + 2
+        bottom = int(max(vertex.y for vertex in vertices)) + 2
+        foreground_pixels[:top, :] = False
+        foreground_pixels[bottom + 1 :, :] = False
+        foreground_pixels[:, :left] = False
+        foreground_pixels[:, right + 1 :] = False
+        coordinates = np.argwhere(foreground_pixels)
+        self.assertGreater(len(coordinates), 0)
+        y, x = coordinates[0]
+        return (int(x), int(y))
 
 
 def _region(top_left: tuple[float, float], bottom_right: tuple[float, float]) -> OcrText:

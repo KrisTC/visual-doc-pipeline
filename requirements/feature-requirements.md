@@ -584,3 +584,38 @@ The selected `__init__.py` and `create_provider()` convention deliberately permi
 Factory tests shall verify that package-directory names determine provider names, that a provider without a `name` attribute is discovered, and that a package docstring supplies its description. Existing unavailable-provider and provider-failure tests shall remain.
 
 ---
+
+## FR-2026-08-03-02
+
+| Property | Value |
+|----------|-------|
+| Title | Use separate background and text passes for complete replacement images |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-02-10, FR-2026-08-02-13 |
+
+### Description
+
+The public text-region-rendering API shall provide separate in-place operations to wipe a text region's background and to render replacement text into a text region. Both operations shall accept and modify the caller-supplied Pillow image without requiring the caller to make an image copy. A caller shall therefore be able to wipe every region in one loop and render every replacement in a second loop.
+
+The public API shall also provide a batch in-place operation that accepts a caller-supplied image and all region, colour-estimate, and replacement-text inputs for one image. The batch operation shall process those regions in two passes: first wipe every region with its estimated immediate background colour, including the existing two-pixel wipe outset; then render every corresponding replacement string into its region. No replacement glyph shall be rendered until the first pass has finished for every eligible region in that complete image.
+
+The OCR-evaluation text-replacement stage shall use the batch operation for each complete provider-specific image.
+
+### Rationale
+
+When detected text regions are close together, the existing per-region wipe-and-render order can allow a later background wipe to cover a replacement glyph rendered for an earlier region. Separating the operations preserves replacement text from later wipes.
+
+### Notes
+
+This requirement supersedes the per-region successive-rendering clause in FR-2026-08-02-13 for complete provider images only. The existing single-region `replace_text_region` public API shall remain as a compatibility convenience that performs its background wipe followed by its text rendering.
+
+The batch operation shall render a complete image through one shared Skia surface, avoiding a full-image conversion and write-back for every region. The separate public operations permit explicit caller-controlled passes but need not have the same whole-image efficiency when called repeatedly.
+
+The ordering of background wipes and the ordering of replacement-text drawing within their respective passes remain the OCR-result item order. Overlapping OCR polygons may still cause one replacement string to draw over another; resolving that geometry conflict is out of scope unless separately specified.
+
+Automated tests shall use synthetic adjacent OCR regions and verify both explicit separate-pass calls and the batch operation: a later background wipe cannot erase a replacement glyph rendered for an earlier region. Tests shall also retain the existing single-region API behaviour.
+
+---

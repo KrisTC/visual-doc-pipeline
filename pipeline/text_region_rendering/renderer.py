@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from colorsys import hls_to_rgb, rgb_to_hls
 from dataclasses import dataclass
 from math import atan2, ceil, cos, degrees, floor, hypot, radians, sin
@@ -93,6 +93,15 @@ class _RenderPlan:
     offset_y: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class TextRegionReplacement:
+    """One text region and its prepared replacement for batch rendering."""
+
+    text_region: OcrText
+    colour_estimate: TextRegionColourEstimate
+    replacement_text: str
+
+
 def replace_text_region(
     image: Image.Image,
     text_region: OcrText,
@@ -110,33 +119,151 @@ def replace_text_region(
     reused across calls. ``target_language`` is validated and retained at this
     API boundary; language-specific shaping is not implemented yet.
     """
+    replace_text_regions(
+        image,
+        (TextRegionReplacement(text_region, colour_estimate, replacement_text),),
+        typeface,
+        target_language,
+    )
+
+
+def wipe_text_region_background(
+    image: Image.Image,
+    text_region: OcrText,
+    colour_estimate: TextRegionColourEstimate,
+) -> None:
+    """Cover one OCR region and its wipe outset with its estimated background colour.
+
+    The supplied image is modified in place. Callers that coordinate multiple
+    nearby regions may call this function for every region before calling
+    :func:`render_replacement_text` for any of them.
+    """
+    _validate_image(image)
+    _draw_on_image(
+        image,
+        lambda canvas: _wipe_background(
+            canvas,
+            _polygon_path(text_region.bounding_polygon),
+            colour_estimate.background_colour,
+        ),
+    )
+
+
+def render_replacement_text(
+    image: Image.Image,
+    text_region: OcrText,
+    colour_estimate: TextRegionColourEstimate,
+    replacement_text: str,
+    typeface: skia.Typeface,
+    target_language: str,
+) -> None:
+    """Draw a fitted replacement into one OCR region without wiping its background.
+
+    The supplied image is modified in place. This operation is intended to be
+    paired with :func:`wipe_text_region_background` when a caller needs
+    explicit control of separate background and foreground passes.
+    """
+    _validate_image(image)
+    _validate_target_language(target_language)
+    _draw_on_image(
+        image,
+        lambda canvas: _render_replacement_text_on_canvas(
+            canvas,
+            text_region,
+            colour_estimate,
+            replacement_text,
+            typeface,
+        ),
+    )
+
+
+def replace_text_regions(
+    image: Image.Image,
+    replacements: Sequence[TextRegionReplacement],
+    typeface: skia.Typeface,
+    target_language: str,
+) -> None:
+    """Replace every supplied region in two passes using one shared Skia surface.
+
+    The first pass wipes every region's estimated background. The second draws
+    every replacement, in the supplied order. The supplied Pillow image is
+    modified directly and no caller-owned image copy is required.
+    """
+    _validate_image(image)
+    _validate_target_language(target_language)
+    _draw_on_image(
+        image,
+        lambda canvas: _replace_text_regions_on_canvas(canvas, replacements, typeface),
+    )
+
+
+def _replace_text_regions_on_canvas(
+    canvas: skia.Canvas,
+    replacements: Sequence[TextRegionReplacement],
+    typeface: skia.Typeface,
+) -> None:
+    """Perform background then foreground replacement passes on one canvas."""
+    for replacement in replacements:
+        _wipe_background(
+            canvas,
+            _polygon_path(replacement.text_region.bounding_polygon),
+            replacement.colour_estimate.background_colour,
+        )
+    for replacement in replacements:
+        _render_replacement_text_on_canvas(
+            canvas,
+            replacement.text_region,
+            replacement.colour_estimate,
+            replacement.replacement_text,
+            typeface,
+        )
+
+
+def _render_replacement_text_on_canvas(
+    canvas: skia.Canvas,
+    text_region: OcrText,
+    colour_estimate: TextRegionColourEstimate,
+    replacement_text: str,
+    typeface: skia.Typeface,
+) -> None:
+    """Render one replacement without modifying pixels outside its text polygon."""
+    if not replacement_text:
+        return
+    path = _polygon_path(text_region.bounding_polygon)
+    render_plan = _select_render_plan(
+        replacement_text, typeface, text_region.bounding_polygon
+    )
+    _draw_layout(
+        canvas,
+        path,
+        render_plan,
+        _render_text_colour(
+            colour_estimate.text_colour, colour_estimate.background_colour
+        ),
+    )
+
+
+def _validate_target_language(target_language: str) -> None:
+    """Reject an empty target-language tag at the public rendering boundary."""
     if not target_language.strip():
         message = "A text-region replacement requires a non-empty target language tag."
         raise ValueError(message)
+
+
+def _validate_image(image: Image.Image) -> None:
+    """Reject an image that cannot have a usable Skia raster surface."""
     if image.width <= 0 or image.height <= 0:
         message = "A text-region replacement requires a non-empty image."
         raise ValueError(message)
 
-    path = _polygon_path(text_region.bounding_polygon)
+
+def _draw_on_image(image: Image.Image, draw: Callable[[skia.Canvas], None]) -> None:
+    """Draw one or more operations on a Skia surface and paste it into ``image``."""
     source = np.ascontiguousarray(np.asarray(image.convert("RGBA")))
     surface = _make_surface(image.width, image.height)
     canvas = surface.getCanvas()
     canvas.drawImage(skia.Image.fromarray(source), 0, 0)
-
-    _wipe_background(canvas, path, colour_estimate.background_colour)
-    if replacement_text:
-        render_plan = _select_render_plan(
-            replacement_text, typeface, text_region.bounding_polygon
-        )
-        _draw_layout(
-            canvas,
-            path,
-            render_plan,
-            _render_text_colour(
-                colour_estimate.text_colour, colour_estimate.background_colour
-            ),
-        )
-
+    draw(canvas)
     rendered = Image.fromarray(surface.makeImageSnapshot().toarray(), "RGBA")
     if image.mode == "RGBA":
         image.paste(rendered)

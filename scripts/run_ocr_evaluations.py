@@ -39,7 +39,7 @@ from pipeline.ocr import (
 )
 from pipeline.ocr.languages import discover_language_directories
 from pipeline.text_region_colours import estimate_text_region_colours
-from pipeline.text_region_rendering import replace_text_region
+from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
 from scripts.prepare_ocr_evaluation_inputs import prepare_evaluation_inputs
 from scripts.run_text_replacement_evaluations import _load_default_typeface
@@ -55,7 +55,7 @@ TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "7"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "8"
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
@@ -434,6 +434,7 @@ def _write_text_replacement_artifacts(
     for provider_index, provider_name in enumerate(text_replacement_factory.provider_names, start=1):
         provider = text_replacement_factory.create(provider_name)
         updated_image = source_image.copy()
+        replacements: list[TextRegionReplacement] = []
         for (_, text_item), estimate in zip(eligible_text_items, estimates, strict=True):
             replacement = provider.replace(
                 TextReplacementRequest(
@@ -443,14 +444,16 @@ def _write_text_replacement_artifacts(
                     target_language="en",
                 )
             )
-            replace_text_region(
-                updated_image,
-                text_item,
-                estimate,
-                replacement.text,
-                replacement_typeface,
-                target_language="en",
+            replacements.append(
+                TextRegionReplacement(
+                    text_region=text_item,
+                    colour_estimate=estimate,
+                    replacement_text=replacement.text,
+                )
             )
+        replace_text_regions(
+            updated_image, replacements, replacement_typeface, target_language="en"
+        )
         updated_image.save(
             _replacement_complete_image_path(provider_root, evaluation_image, provider_index),
             format="PNG",
