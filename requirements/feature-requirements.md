@@ -1428,9 +1428,9 @@ Argos does not provide a calibrated translation-confidence score. The provider s
 
 For filename requests, the provider shall translate only the filename stem and append the original suffix unchanged. It shall reject an empty translated stem or a translated stem containing a path separator, NUL character, `.` or `..`, by raising `TextReplacementProviderError`.
 
-The provider shall be ineligible for automatic local text-replacement evaluation artifacts because those evaluations must not trigger model-package acquisition. It remains available for an explicitly selected folder-replacement run. The provider factory shall expose the eligible subset of providers so evaluators do not hard-code provider names.
+The provider shall participate in automatic local text-replacement evaluation artifacts. Those evaluations may acquire missing Argos language packages from Argos Translate's default official package index; translation input and replacement text shall continue to be processed locally and shall not be sent to that index. The provider factory shall expose the eligible subset of providers so evaluators do not hard-code provider names.
 
-Provider-owned behavioural tests shall use synthetic text and filename cases with a mocked Argos library. They shall not depend on model downloads, sample data, or confidential inputs. The generic response-shape contract test shall show `argos_translate` as an individually skipped case because running it would require dynamic model artifacts; provider-owned tests shall cover its stable result shape as well as its behaviour.
+Provider-owned behavioural tests shall use synthetic text and filename cases with a mocked Argos library. They shall not depend on model downloads, sample data, or confidential inputs. The generic response-shape contract test shall show `argos_translate` as an individually skipped case because automated tests shall not acquire dynamic model artifacts; provider-owned tests shall cover its stable result shape as well as its behaviour.
 
 ---
 
@@ -1458,3 +1458,28 @@ PowerPoint speaker notes are editable document text but are not exposed through 
 ### Notes
 
 Automated tests shall create a synthetic PPTX package with a speaker-note part and verify that the note text is replaced in every document-text layout mode, while slide text, relationships, and non-text note XML remain valid and unchanged where not otherwise eligible for replacement. Tests shall not use sample data or confidential presentations.
+
+---
+
+## FR-2026-08-04-14
+
+| Property | Value |
+|----------|-------|
+| Title | Report native text-replacement evaluation progress |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-13 |
+
+### Description
+
+The native PowerPoint text-replacement evaluation command, `scripts/run_text_replacement_evaluations.py`, shall use tqdm to render terminal progress. It shall render one progress bar at a time for each discovered source-language directory containing eligible PPTX files. Each bar shall be labelled with that directory's path relative to the input root, advance once per eligible presentation after it is processed or skipped, and show the current presentation basename in its postfix.
+
+### Rationale
+
+Native-text evaluation may process many presentations and render every eligible text box with each replacement provider. Folder-level progress makes that work visible while preserving the command's isolated per-presentation failure handling.
+
+### Notes
+
+PowerPoint temporary lock files remain ineligible and shall not contribute to a progress bar's total. Existing one-line skipped-presentation reporting shall remain visible and later presentations shall continue processing.

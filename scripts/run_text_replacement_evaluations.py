@@ -34,6 +34,7 @@ from pptx.shapes.group import GroupShape
 from pptx.text.text import TextFrame, _Paragraph, _Run
 from pptx.util import Length
 from PIL import Image
+from tqdm import tqdm
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
@@ -222,49 +223,59 @@ def evaluate_text_replacement_examples(
     factory = TextReplacementProviderFactory.discover_default_plugins()
     provider_names = factory.local_evaluation_provider_names
     result = TextReplacementEvaluationRunResult()
-    for source_path, source_language in _presentation_paths(input_root):
-        if source_path.name.startswith("~$"):
-            continue
-        result.processed_presentations += 1
-        try:
-            text_box_evaluations = tuple(_presentation_text_boxes(source_path))
-            output_path = (output_root / source_path.relative_to(input_root)).with_suffix(
-                ".html"
-            )
-            providers = {
-                provider_name: factory.create(provider_name) for provider_name in provider_names
-            }
-            artifacts = _render_text_boxes(
-                text_box_evaluations,
-                typefaces,
-                output_path,
-                providers,
-                source_language,
-                target_language,
-            )
-            _write_html_page(
-                output_path,
-                source_path.relative_to(input_root),
-                tuple(item.source_properties for item in text_box_evaluations),
-                artifacts,
-                provider_names,
-                source_language,
-                target_language,
-            )
-        except (OSError, PackageNotFoundError, RuntimeError, ValueError) as error:
-            result.skipped_presentations += 1
-            print(f"Skipping {source_path}: {error}.")
-            continue
-        result.written_pages += 1
-        result.rendered_text_boxes += len(text_box_evaluations)
-    return result
-
-
-def _presentation_paths(input_root: Path) -> Iterable[tuple[Path, str]]:
-    """Yield PPTX files beneath the OCR evaluator's established language directories."""
     for language_directory in discover_language_directories(input_root):
-        for source_path in sorted(language_directory.rglob("*.pptx")):
-            yield source_path, language_directory.name
+        source_paths = tuple(
+            source_path
+            for source_path in sorted(language_directory.rglob("*.pptx"))
+            if not source_path.name.startswith("~$")
+        )
+        if not source_paths:
+            continue
+        relative_language_directory = language_directory.relative_to(input_root).as_posix()
+        with tqdm(
+            total=len(source_paths),
+            desc=relative_language_directory,
+            dynamic_ncols=True,
+            leave=True,
+            unit="presentation",
+        ) as progress:
+            for source_path in source_paths:
+                progress.set_postfix_str(source_path.name)
+                result.processed_presentations += 1
+                try:
+                    text_box_evaluations = tuple(_presentation_text_boxes(source_path))
+                    output_path = (output_root / source_path.relative_to(input_root)).with_suffix(
+                        ".html"
+                    )
+                    providers = {
+                        provider_name: factory.create(provider_name) for provider_name in provider_names
+                    }
+                    artifacts = _render_text_boxes(
+                        text_box_evaluations,
+                        typefaces,
+                        output_path,
+                        providers,
+                        language_directory.name,
+                        target_language,
+                    )
+                    _write_html_page(
+                        output_path,
+                        source_path.relative_to(input_root),
+                        tuple(item.source_properties for item in text_box_evaluations),
+                        artifacts,
+                        provider_names,
+                        language_directory.name,
+                        target_language,
+                    )
+                except (OSError, PackageNotFoundError, RuntimeError, ValueError) as error:
+                    result.skipped_presentations += 1
+                    print(f"Skipping {source_path}: {error}.")
+                else:
+                    result.written_pages += 1
+                    result.rendered_text_boxes += len(text_box_evaluations)
+                finally:
+                    progress.update(1)
+    return result
 
 
 def _load_typefaces() -> dict[str, skia.Typeface]:

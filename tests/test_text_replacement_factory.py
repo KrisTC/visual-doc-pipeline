@@ -9,7 +9,7 @@ from pipeline.text_replacement.factory import TextReplacementProviderFactory
 
 
 class TextReplacementProviderFactoryTests(unittest.TestCase):
-    # Verifies FR-2026-08-02-06, FR-2026-08-02-11, and FR-2026-08-03-01.
+    # Verifies FR-2026-08-02-06, FR-2026-08-02-11, FR-2026-08-03-01, and FR-2026-08-04-12.
     def test_discovers_built_in_provider_packages_by_their_directory_names(self) -> None:
         factory = TextReplacementProviderFactory.discover_default_plugins()
 
@@ -40,6 +40,7 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
         self.assertFalse(hasattr(factory.create("character_mask"), "name"))
         self.assertEqual(
             (
+                "argos_translate",
                 "character_mask",
                 "double_character_mask",
                 "half_character_mask",

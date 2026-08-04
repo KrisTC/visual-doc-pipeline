@@ -13,7 +13,6 @@ from pipeline.text_replacement.models import TextReplacementRequest, TextReplace
 from pipeline.text_replacement.provider import TextReplacementProvider
 
 
-LOCAL_EVALUATION_ELIGIBLE = False
 _OFFICIAL_PACKAGE_INDEX_URL = "https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json"
 
 

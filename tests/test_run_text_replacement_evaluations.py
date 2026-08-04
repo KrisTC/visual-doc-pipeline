@@ -8,7 +8,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 from PIL import Image, ImageChops
 from pptx import Presentation
@@ -33,6 +33,14 @@ from scripts.run_text_replacement_evaluations import (
 
 
 class NativeTextLayoutEvaluationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        argos_translation = patch(
+            "pipeline.text_replacement_plugins.argos_translate.ArgosTranslateProvider._translate",
+            return_value="translated",
+        )
+        argos_translation.start()
+        self.addCleanup(argos_translation.stop)
+
     # Verifies FR-2026-08-03-13.
     def test_uses_committed_noto_mono_for_fixed_width_text(self) -> None:
         typefaces = _load_typefaces()
@@ -201,7 +209,50 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
 
         self.assertIs(second_run, _dominant_run((first_run, second_run)))
 
-    # Verifies FR-2026-08-03-13.
+    # Verifies FR-2026-08-04-14.
+    def test_reports_progress_for_each_source_language_directory(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            _write_presentation(input_root / "ja" / "first.pptx")
+            _write_presentation(input_root / "sample_data" / "en" / "second.pptx")
+            (input_root / "ja" / "~$locked.pptx").write_bytes(b"not a presentation")
+            progress = MagicMock()
+            progress_context = MagicMock()
+            progress_context.__enter__.return_value = progress
+
+            with patch(
+                "scripts.run_text_replacement_evaluations.tqdm",
+                return_value=progress_context,
+            ) as mocked_tqdm:
+                evaluate_text_replacement_examples(input_root, root / "output")
+
+            self.assertEqual(
+                [
+                    call(
+                        total=1,
+                        desc="ja",
+                        dynamic_ncols=True,
+                        leave=True,
+                        unit="presentation",
+                    ),
+                    call(
+                        total=1,
+                        desc="sample_data/en",
+                        dynamic_ncols=True,
+                        leave=True,
+                        unit="presentation",
+                    ),
+                ],
+                mocked_tqdm.call_args_list,
+            )
+            self.assertEqual(
+                [call("first.pptx"), call("second.pptx")],
+                progress.set_postfix_str.call_args_list,
+            )
+            self.assertEqual([call(1), call(1)], progress.update.call_args_list)
+
+    # Verifies FR-2026-08-03-13 and FR-2026-08-04-12.
     def test_processes_the_configured_confidential_subtree_locally(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -366,7 +417,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             self.assertEqual(1, result.written_pages)
             self.assertEqual(2, result.rendered_text_boxes)
             self.assertIn("Native text-layout evaluation", page)
-            self.assertIn("<th>Original</th><th>character_mask</th>", page)
+            self.assertIn("<th>Original</th><th>argos_translate</th>", page)
             self.assertIn("main { padding: 2rem; width: max-content; }", page)
             self.assertIn('href="layout.text-layout-artifacts/text-box-0001.json" target="_blank"', page)
             self.assertIn(
@@ -411,7 +462,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
                 16.0, explicit_properties["paragraphs"][0]["runs"][0]["font_size_points"]
             )
             provider_properties = json.loads(first_provider_properties.read_text(encoding="utf-8"))
-            self.assertEqual("character_mask", provider_properties["replacement"]["provider"])
+            self.assertEqual("argos_translate", provider_properties["replacement"]["provider"])
             self.assertEqual("ja", provider_properties["replacement"]["source_language"])
             self.assertEqual("en", provider_properties["replacement"]["target_language"])
             self.assertEqual("paragraph", provider_properties["replacement"]["unit"])
