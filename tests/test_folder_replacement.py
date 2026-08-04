@@ -1042,6 +1042,46 @@ class FolderReplacementTests(unittest.TestCase):
             ))
             self.assertIn(b"<23>", (output_root / "document.pdf").read_bytes())
 
+    # Verifies FR-2026-08-04-13.
+    def test_replaces_pptx_speaker_notes_in_every_document_text_layout_mode(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "notes.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[1])
+            slide.shapes.title.text = "Slide title"
+            presentation.save(str(source))
+            self._add_speaker_note_part(source)
+
+            for layout_mode in (
+                "preserve-source-formatting",
+                "preserve-basic-layout",
+                "preserve-basic-layout-source-font",
+            ):
+                with self.subTest(document_text_layout=layout_mode):
+                    destination_root = output_root / layout_mode
+                    result = self._run(
+                        input_root,
+                        destination_root,
+                        _EmptyOcrProvider(),
+                        _RecordingReplacementProvider(replacement_text="Translated speaker note"),
+                        document_text_layout=layout_mode,
+                    )
+
+                    self.assertEqual(1, result.processed_files)
+                    self.assertGreaterEqual(result.replaced_native_text_items, 1)
+                    with ZipFile(destination_root / "notes.pptx") as archive:
+                        note_xml = archive.read("ppt/notesSlides/notesSlide1.xml")
+                        slide_relationships = archive.read("ppt/slides/_rels/slide1.xml.rels")
+                    self.assertIn(b"Translated speaker note", note_xml)
+                    self.assertNotIn(b"Speaker note source", note_xml)
+                    self.assertIn(b'uri="keep-note-extension"', note_xml)
+                    self.assertIn(b"../notesSlides/notesSlide1.xml", slide_relationships)
+                    Presentation(str(destination_root / "notes.pptx"))
+
     @staticmethod
     def _write_png(path: Path) -> None:
         Image.new("RGB", (30, 20), "white").save(path, "PNG")
@@ -1099,6 +1139,62 @@ class FolderReplacementTests(unittest.TestCase):
             for entry in entries:
                 destination_archive.writestr(entry, payloads[entry.filename])
             destination_archive.writestr("ppt/diagrams/data1.xml", payloads["ppt/diagrams/data1.xml"])
+        temporary_path.replace(path)
+
+    @staticmethod
+    def _add_speaker_note_part(path: Path) -> None:
+        """Add one reachable synthetic speaker-note part to a PPTX fixture."""
+        content_types_namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+        relationships_namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+        with ZipFile(path) as source_archive:
+            entries = source_archive.infolist()
+            payloads = {
+                entry.filename: source_archive.read(entry.filename) for entry in entries
+            }
+        relationships = ElementTree.fromstring(payloads["ppt/slides/_rels/slide1.xml.rels"])
+        ElementTree.SubElement(
+            relationships,
+            f"{{{relationships_namespace}}}Relationship",
+            {
+                "Id": "rIdSpeakerNotes",
+                "Type": (
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+                    "notesSlide"
+                ),
+                "Target": "../notesSlides/notesSlide1.xml",
+            },
+        )
+        payloads["ppt/slides/_rels/slide1.xml.rels"] = ElementTree.tostring(
+            relationships, encoding="utf-8", xml_declaration=True
+        )
+        content_types = ElementTree.fromstring(payloads["[Content_Types].xml"])
+        ElementTree.SubElement(
+            content_types,
+            f"{{{content_types_namespace}}}Override",
+            {
+                "PartName": "/ppt/notesSlides/notesSlide1.xml",
+                "ContentType": "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml",
+            },
+        )
+        payloads["[Content_Types].xml"] = ElementTree.tostring(
+            content_types, encoding="utf-8", xml_declaration=True
+        )
+        note_name = "ppt/notesSlides/notesSlide1.xml"
+        payloads[note_name] = b'''<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>
+    <p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+    <p:sp><p:nvSpPr><p:cNvPr id="2" name="Notes Placeholder"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/>
+      <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Speaker note source</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+  </p:spTree></p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr><p:extLst><p:ext uri="keep-note-extension"/></p:extLst>
+</p:notes>'''
+        temporary_path = path.with_name(f".{path.name}.notes-fixture.tmp")
+        with ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive:
+            for entry in entries:
+                destination_archive.writestr(entry, payloads[entry.filename])
+            destination_archive.writestr(note_name, payloads[note_name])
         temporary_path.replace(path)
 
     def _assert_drawingml_paragraph_property_order(self, data: bytes) -> None:

@@ -1431,3 +1431,30 @@ For filename requests, the provider shall translate only the filename stem and a
 The provider shall be ineligible for automatic local text-replacement evaluation artifacts because those evaluations must not trigger model-package acquisition. It remains available for an explicitly selected folder-replacement run. The provider factory shall expose the eligible subset of providers so evaluators do not hard-code provider names.
 
 Provider-owned behavioural tests shall use synthetic text and filename cases with a mocked Argos library. They shall not depend on model downloads, sample data, or confidential inputs. The generic response-shape contract test shall show `argos_translate` as an individually skipped case because running it would require dynamic model artifacts; provider-owned tests shall cover its stable result shape as well as its behaviour.
+
+---
+
+## FR-2026-08-04-13
+
+| Property | Value |
+|----------|-------|
+| Title | Replace PowerPoint speaker-note text |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-15 |
+
+### Description
+
+The PPTX folder-replacement handler shall replace editable text in every `ppt/notesSlides/notesSlide*.xml` part using the selected text-replacement provider and request languages.
+
+Speaker-note text shall use direct OOXML text replacement in every document-text layout mode, including `preserve-basic-layout` and `preserve-basic-layout-source-font`. It shall not use bounded-text fitting, rewrite speaker-note geometry, or alter non-text XML, package relationships, slide content, or notes-master parts.
+
+### Rationale
+
+PowerPoint speaker notes are editable document text but are not exposed through the slide-shape traversal used for fitted slide text. Direct replacement ensures that the notes remain translated while avoiding unnecessary layout changes.
+
+### Notes
+
+Automated tests shall create a synthetic PPTX package with a speaker-note part and verify that the note text is replaced in every document-text layout mode, while slide text, relationships, and non-text note XML remain valid and unchanged where not otherwise eligible for replacement. Tests shall not use sample data or confidential presentations.

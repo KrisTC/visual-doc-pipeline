@@ -34,7 +34,10 @@ from pipeline.bounded_text_layout import (
     source_occupied_text_box,
 )
 from pipeline.ocr import OcrProvider
-from pipeline.folder_replacement.office_xml import replace_drawing_diagram_xml_text
+from pipeline.folder_replacement.office_xml import (
+    replace_drawing_diagram_xml_text,
+    replace_office_xml_text,
+)
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -161,6 +164,12 @@ def replace_pptx_file(
             preserve_source_font_family,
         )
     presentation.save(str(destination))
+    native_items += _replace_speaker_note_parts(
+        destination,
+        replacement,
+        source_language,
+        target_language,
+    )
     completed("native text layout")
     return native_items, image_regions, retained_vectors
 
@@ -256,6 +265,48 @@ def _replace_smartart_data_parts(
         if temporary_path.exists():
             temporary_path.unlink()
     return replaced_items
+
+
+def _replace_speaker_note_parts(
+    presentation_path: Path,
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> int:
+    """Directly replace editable text in PPTX speaker-note slide parts."""
+    with ZipFile(presentation_path) as archive:
+        note_parts = frozenset(
+            entry.filename for entry in archive.infolist() if _is_speaker_note_part(entry.filename)
+        )
+    if not note_parts:
+        return 0
+
+    temporary_path = presentation_path.with_name(f".{presentation_path.name}.notes.tmp")
+    replaced_items = 0
+    try:
+        with (
+            ZipFile(presentation_path) as source_archive,
+            ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
+        ):
+            for entry in source_archive.infolist():
+                data = source_archive.read(entry.filename)
+                if entry.filename in note_parts:
+                    data, replaced = replace_office_xml_text(
+                        data, replacement, source_language, target_language
+                    )
+                    replaced_items += replaced
+                destination_archive.writestr(entry, data)
+        os.replace(temporary_path, presentation_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return replaced_items
+
+
+def _is_speaker_note_part(part_name: str) -> bool:
+    """Return whether an OOXML part is a PowerPoint speaker-note slide XML part."""
+    parent, name = posixpath.split(part_name)
+    return parent == "ppt/notesSlides" and name.startswith("notesSlide") and name.endswith(".xml")
 
 
 def _replace_slide_text_frames(
