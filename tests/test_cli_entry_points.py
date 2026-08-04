@@ -3,18 +3,30 @@
 
 from __future__ import annotations
 
+import io
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image
 
-from scripts.run_folder_replacement import _load_default_typeface
+from pipeline.ocr import OcrProviderFactory
+from pipeline.text_replacement import TextReplacementProviderFactory
+from scripts.run_folder_replacement import _argument_parser, _load_default_typeface
 
 PROJECT_ROOT = Path(__file__).parents[1]
+
+
+class _TtyStringIo(io.StringIO):
+    """In-memory text stream that behaves as an interactive terminal for testing."""
+
+    def isatty(self) -> bool:
+        return True
 
 
 class CliEntryPointTests(unittest.TestCase):
@@ -29,6 +41,84 @@ class CliEntryPointTests(unittest.TestCase):
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_runs_as_a_direct_script(self) -> None:
         self._assert_help_succeeds("run_folder_replacement.py")
+
+    # Verifies FR-2026-08-03-03.
+    def test_folder_replacement_help_lists_plugin_choices_and_defaults(self) -> None:
+        completed_process = self._run_help("run_folder_replacement.py")
+
+        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
+        help_output = completed_process.stdout
+        normalized_help_output = " ".join(help_output.split())
+        text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
+        ocr_factory = OcrProviderFactory.discover_default_plugins()
+        self.assertIn("command options:", help_output)
+        self.assertIn("text-replacement providers:", help_output)
+        self.assertIn("OCR providers:", help_output)
+        self.assertIn("document-text-layout modes:", help_output)
+        self.assertNotIn("Select with", help_output)
+        self.assertIn("--document-text-layout LAYOUT", help_output)
+        self.assertNotIn("--document-text-layout {", help_output)
+        for factory in (text_replacement_factory, ocr_factory):
+            for name in factory.provider_names:
+                description = factory.provider_descriptions[name] or "No description available."
+                with self.subTest(provider=name):
+                    self.assertIn(
+                        f"{name}: {description}", normalized_help_output
+                    )
+        for default in (
+            "character_mask",
+            "paddleocr",
+            "en",
+            "preserve-source-formatting",
+        ):
+            with self.subTest(default=default):
+                self.assertIn(f"(default: {default})", normalized_help_output)
+
+    # Verifies FR-2026-08-03-03.
+    def test_folder_replacement_help_lists_document_text_layout_choices_separately(self) -> None:
+        completed_process = self._run_help("run_folder_replacement.py")
+
+        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
+        help_output = completed_process.stdout
+        self.assertIn("document-text-layout modes:", help_output)
+        for choice in (
+            "preserve-source-formatting",
+            "preserve-basic-layout",
+            "preserve-basic-layout-source-font",
+        ):
+            with self.subTest(choice=choice):
+                self.assertIn(choice, help_output)
+
+    # Verifies FR-2026-08-03-03.
+    def test_folder_replacement_help_colours_options_for_a_supported_terminal(self) -> None:
+        output = _TtyStringIo()
+        with patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
+            _argument_parser().print_help(file=output)
+
+        help_output = output.getvalue()
+        self.assertIn("\033[1mcommand options:\033[0m", help_output)
+        self.assertIn("\033[1;36m--text-replacement PROVIDER\033[0m", help_output)
+        self.assertIn("\033[1;32mcharacter_mask:\033[0m", help_output)
+        self.assertIn("\033[33m(default: character_mask)\033[0m", help_output)
+        self.assertIn("Deterministic placeholder text-replacement provider.", help_output)
+        self.assertIn(
+            "Target-language BCP 47 tag. \033[33m(default: en)\033[0m",
+            help_output,
+        )
+
+    # Verifies FR-2026-08-03-03.
+    def test_folder_replacement_help_remains_plain_when_colour_is_disabled(self) -> None:
+        cases = (
+            ("redirected", io.StringIO(), {"TERM": "xterm-256color"}),
+            ("dumb terminal", _TtyStringIo(), {"TERM": "dumb"}),
+            ("NO_COLOR", _TtyStringIo(), {"TERM": "xterm-256color", "NO_COLOR": "1"}),
+        )
+        for reason, output, environment in cases:
+            with self.subTest(reason=reason):
+                with patch.dict(os.environ, environment, clear=True):
+                    _argument_parser().print_help(file=output)
+
+                self.assertNotIn("\033[", output.getvalue())
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_loads_its_default_typeface(self) -> None:
@@ -135,15 +225,18 @@ class CliEntryPointTests(unittest.TestCase):
         )
 
     def _assert_help_succeeds(self, script_name: str) -> None:
-        completed_process = subprocess.run(
+        completed_process = self._run_help(script_name)
+        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
+        self.assertIn("usage:", completed_process.stdout)
+
+    def _run_help(self, script_name: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
             [sys.executable, str(PROJECT_ROOT / "scripts" / script_name), "--help"],
             check=False,
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
         )
-        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
-        self.assertIn("usage:", completed_process.stdout)
 
 
 if __name__ == "__main__":

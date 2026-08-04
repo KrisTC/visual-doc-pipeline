@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
+import os
 from pathlib import Path
+import re
 import sys
+from typing import Protocol
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -26,27 +30,159 @@ from pipeline.text_replacement import TextReplacementProvider, TextReplacementPr
 DEFAULT_FONT_PATH = PROJECT_ROOT / "tests" / "assets" / "fonts" / "NotoSansJP[wght].ttf"
 FONT_WEIGHT_AXIS_TAG = 0x77676874
 DEFAULT_FONT_WEIGHT = 500.0
+DEFAULT_TEXT_REPLACEMENT_PROVIDER = "character_mask"
+DEFAULT_OCR_PROVIDER = "paddleocr"
+DEFAULT_TARGET_LANGUAGE = "en"
+DOCUMENT_TEXT_LAYOUT_CHOICES = (
+    "preserve-source-formatting",
+    "preserve-basic-layout",
+    "preserve-basic-layout-source-font",
+)
+DEFAULT_DOCUMENT_TEXT_LAYOUT = "preserve-source-formatting"
+ANSI_BOLD_CYAN = "\033[1;36m"
+ANSI_BOLD_GREEN = "\033[1;32m"
+ANSI_BOLD = "\033[1m"
+ANSI_YELLOW = "\033[33m"
+ANSI_RESET = "\033[0m"
+
+
+class _HelpOutput(Protocol):
+    """The write-only stream interface accepted by argparse help rendering."""
+
+    def write(self, text: str) -> object: ...
+
+
+class _HelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescriptionHelpFormatter
+):
+    """Render defaults and multi-line argument-group descriptions in CLI help."""
+
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, width=100)
+
+
+class _ColourArgumentParser(argparse.ArgumentParser):
+    """Render ANSI-coloured help only when the output stream supports it."""
+
+    def print_help(self, file: _HelpOutput | None = None) -> None:
+        output = file if file is not None else sys.stdout
+        message = self.format_help()
+        if _supports_ansi_colour(output):
+            message = _colourize_help(message)
+        self._print_message(message, output)
 
 
 def _argument_parser() -> argparse.ArgumentParser:
     """Create the main folder-replacement command-line parser."""
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_folder", type=Path)
-    parser.add_argument("output_folder", type=Path)
-    parser.add_argument("--text-replacement", default="character_mask")
-    parser.add_argument("--ocr", default="paddleocr")
-    parser.add_argument("--source-language", required=True)
-    parser.add_argument("--target-language", default="en")
-    parser.add_argument(
+    text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
+    ocr_factory = OcrProviderFactory.discover_default_plugins()
+    parser = _ColourArgumentParser(
+        description=__doc__, formatter_class=_HelpFormatter
+    )
+    parser.add_argument("input_folder", type=Path, help="Folder to process.")
+    parser.add_argument("output_folder", type=Path, help="Folder for processed files.")
+
+    command_options = parser.add_argument_group("command options")
+    command_options.add_argument(
+        "--source-language", required=True, help="Source-language BCP 47 tag."
+    )
+    command_options.add_argument(
+        "--target-language",
+        default=DEFAULT_TARGET_LANGUAGE,
+        help="Target-language BCP 47 tag.",
+    )
+    command_options.add_argument(
+        "--text-replacement",
+        default=DEFAULT_TEXT_REPLACEMENT_PROVIDER,
+        metavar="PROVIDER",
+        help="Replacement provider; see below.",
+    )
+    command_options.add_argument(
+        "--ocr",
+        default=DEFAULT_OCR_PROVIDER,
+        metavar="PROVIDER",
+        help="OCR provider; see below.",
+    )
+    command_options.add_argument(
         "--document-text-layout",
-        choices=(
-            "preserve-source-formatting",
-            "preserve-basic-layout",
-            "preserve-basic-layout-source-font",
+        choices=DOCUMENT_TEXT_LAYOUT_CHOICES,
+        metavar="LAYOUT",
+        default=DEFAULT_DOCUMENT_TEXT_LAYOUT,
+        help="Layout mode; see below.",
+    )
+
+    parser.add_argument_group(
+        "text-replacement providers",
+        description=_provider_choices_description(
+            text_replacement_factory.provider_names,
+            text_replacement_factory.provider_descriptions,
         ),
-        default="preserve-source-formatting",
+    )
+    parser.add_argument_group(
+        "OCR providers",
+        description=_provider_choices_description(
+            ocr_factory.provider_names, ocr_factory.provider_descriptions
+        ),
+    )
+    parser.add_argument_group(
+        "document-text-layout modes",
+        description=(
+            "  preserve-source-formatting: Retain the source font and size.\n"
+            "  preserve-basic-layout: Fit replacement text with a Noto font.\n"
+            "  preserve-basic-layout-source-font: Fit replacement text while retaining "
+            "source font references where possible."
+        ),
     )
     return parser
+
+
+def _provider_choices_description(
+    provider_names: tuple[str, ...],
+    provider_descriptions: Mapping[str, str | None],
+) -> str:
+    """Format one separate help entry for every discovered provider plugin."""
+    return "\n".join(
+        f"  {name}: {provider_descriptions[name] or 'No description available.'}"
+        for name in provider_names
+    )
+
+
+def _supports_ansi_colour(output: object) -> bool:
+    """Return whether an output stream supports the command's ANSI help styling."""
+    isatty = getattr(output, "isatty", None)
+    return (
+        callable(isatty)
+        and isatty()
+        and os.environ.get("TERM") != "dumb"
+        and "NO_COLOR" not in os.environ
+    )
+
+
+def _colourize_help(help_text: str) -> str:
+    """Apply styling to help headings, option names, and separate choice entries."""
+    return "\n".join(_colourize_help_line(line) for line in help_text.splitlines()) + "\n"
+
+
+def _colourize_help_line(line: str) -> str:
+    """Style one pre-formatted argparse help line without changing its layout."""
+    if line and not line.startswith(" ") and line.endswith(":"):
+        return f"{ANSI_BOLD}{line}{ANSI_RESET}"
+    if line.startswith("  ") and not line.startswith("   "):
+        option_and_description = line[2:]
+        if option_and_description.startswith("-"):
+            option, separator, description = option_and_description.partition("  ")
+            if separator:
+                line = f"  {ANSI_BOLD_CYAN}{option}{ANSI_RESET}{separator}{description}"
+            else:
+                line = f"  {ANSI_BOLD_CYAN}{option}{ANSI_RESET}"
+    if line.startswith("    ") and not line.startswith("     ") and ":" in line:
+        choice, description = line[4:].split(":", maxsplit=1)
+        line = f"    {ANSI_BOLD_GREEN}{choice}:{ANSI_RESET}{description}"
+    return re.sub(
+        r"\(default: [^)]+\)",
+        lambda match: f"{ANSI_YELLOW}{match.group(0)}{ANSI_RESET}",
+        line,
+    )
 
 
 def parse_arguments() -> argparse.Namespace:
