@@ -61,7 +61,7 @@ def evaluate_text_replacement_examples(
         raise ValueError(message)
     typeface = _load_default_typeface()
     factory = TextReplacementProviderFactory.discover_default_plugins()
-    provider_names = factory.provider_names
+    provider_names = factory.local_evaluation_provider_names
     result = TextReplacementEvaluationRunResult()
     for result_path in sorted(input_root.rglob("*.json")):
         result.processed_json_files += 1

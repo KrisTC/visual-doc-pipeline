@@ -22,6 +22,9 @@ class TextReplacementProviderContractTests(unittest.TestCase):
         executed_cases = 0
 
         for provider_name in factory.provider_names:
+            if provider_name == "argos_translate":
+                self._skip_model_dependent_provider(provider_name)
+                continue
             provider = factory.create(provider_name)
             executed_cases += self._test_provider_cases(provider_name, provider)
 
@@ -36,3 +39,10 @@ class TextReplacementProviderContractTests(unittest.TestCase):
                 self.assertLessEqual(result.confidence, 1.0)
                 self.assertIsInstance(result.extra, dict)
         return len(CONTRACT_REQUESTS)
+
+    def _skip_model_dependent_provider(self, provider_name: str) -> None:
+        """Record a visible skip for providers that need downloaded runtime artifacts."""
+        with self.subTest(provider=provider_name):
+            self.skipTest(
+                "Argos Translate needs dynamic model packages; its mocked provider tests cover it."
+            )

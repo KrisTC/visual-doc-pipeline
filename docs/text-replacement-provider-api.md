@@ -43,6 +43,8 @@ def register_providers(factory: TextReplacementProviderFactory) -> None:
 
 Provider names must be unique. The factory rejects duplicate names and raises `TextReplacementProviderNotFoundError` when a requested provider is unavailable.
 
+Plugins may set the module-level boolean `LOCAL_EVALUATION_ELIGIBLE` to `False` when they require dynamic runtime artifacts such as downloaded translation models. `TextReplacementProviderFactory.local_evaluation_provider_names` exposes the remaining provider names for automatic local evaluators. The provider is still available through `provider_names` for explicit selection.
+
 ## Optional provider information
 
 Use `extra` for optional information that may enrich a future interactive viewer or another provider-specific consumer, without changing the stable replacement contract. For example, a translation provider may return details that help explain a translation or present word-to-word correspondences when its underlying model supplies them.

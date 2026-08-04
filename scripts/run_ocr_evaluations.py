@@ -237,7 +237,9 @@ def evaluate_ocr_inputs(
             replacement_typeface,
         )
         _write_text_replacement_viewer(
-            provider_root, replacement_entries, text_replacement_factory.provider_names
+            provider_root,
+            replacement_entries,
+            text_replacement_factory.local_evaluation_provider_names,
         )
         (provider_root / TEXT_REPLACEMENT_CHECKSUM_FILENAME).write_text(
             f"{checksum}\n", encoding="ascii"
@@ -437,7 +439,9 @@ def _write_text_replacement_artifacts(
     )
     artifact_directory = _replacement_artifact_directory(provider_root, evaluation_image)
     artifact_directory.mkdir(parents=True, exist_ok=True)
-    for provider_index, provider_name in enumerate(text_replacement_factory.provider_names, start=1):
+    for provider_index, provider_name in enumerate(
+        text_replacement_factory.local_evaluation_provider_names, start=1
+    ):
         provider = text_replacement_factory.create(provider_name)
         updated_image = source_image.copy()
         replacements: list[TextRegionReplacement] = []

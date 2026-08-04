@@ -220,7 +220,7 @@ def evaluate_text_replacement_examples(
         raise ValueError(f"Input root does not exist or is not a directory: {input_root}")
     typefaces = _load_typefaces()
     factory = TextReplacementProviderFactory.discover_default_plugins()
-    provider_names = factory.provider_names
+    provider_names = factory.local_evaluation_provider_names
     result = TextReplacementEvaluationRunResult()
     for source_path, source_language in _presentation_paths(input_root):
         if source_path.name.startswith("~$"):

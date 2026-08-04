@@ -15,6 +15,7 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
 
         self.assertEqual(
             (
+                "argos_translate",
                 "character_mask",
                 "double_character_mask",
                 "half_character_mask",
@@ -24,6 +25,7 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
         )
         self.assertEqual(
             {
+                "argos_translate": "Offline Argos Translate text and filename translation provider.",
                 "character_mask": "Deterministic placeholder text-replacement provider.",
                 "double_character_mask": (
                     "Deterministic text-replacement provider with double-length hash output."
@@ -36,6 +38,15 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
             dict(factory.provider_descriptions),
         )
         self.assertFalse(hasattr(factory.create("character_mask"), "name"))
+        self.assertEqual(
+            (
+                "character_mask",
+                "double_character_mask",
+                "half_character_mask",
+                "identity",
+            ),
+            factory.local_evaluation_provider_names,
+        )
 
     # Verifies FR-2026-08-02-06 and FR-2026-08-03-01.
     def test_reports_unknown_names_without_provider_registration(self) -> None:
