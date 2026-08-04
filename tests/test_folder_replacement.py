@@ -18,7 +18,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, Protection
 from openpyxl.worksheet.table import Table
 from pptx import Presentation
-from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE
 from pptx.oxml import parse_xml
 from pptx.util import Inches, Pt
 # pypdf does not publish PEP 561 metadata for its generic object model.
@@ -330,6 +330,82 @@ class FolderReplacementTests(unittest.TestCase):
             self._assert_valid_drawingml_font_sizes(slide_xml)
             self._assert_drawingml_paragraph_property_order(slide_xml)
 
+    # Verifies FR-2026-08-04-11.
+    def test_pptx_replaces_reachable_smartart_data_and_editable_wordart(self) -> None:
+        for layout_mode in (
+            "preserve-source-formatting",
+            "preserve-basic-layout",
+            "preserve-basic-layout-source-font",
+        ):
+            with self.subTest(layout_mode=layout_mode), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                input_root = root / "input"
+                output_root = root / "output"
+                input_root.mkdir()
+                source = input_root / "deck.pptx"
+                presentation = Presentation()
+                slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+                wordart = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
+                wordart.name = "editable-wordart"
+                wordart.text = "WordArt source"
+                wordart.text_frame._element.bodyPr.set("anchor", "ctr")
+                wordart.text_frame._element.bodyPr.append(
+                    parse_xml(
+                        '<a:prstTxWarp xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                        'prst="textNoShape"><a:avLst/></a:prstTxWarp>'
+                    )
+                )
+                wordart.text_frame.paragraphs[0].runs[0]._r.get_or_add_rPr().append(
+                    parse_xml(
+                        '<a:pattFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+                        'prst="pct10"><a:fgClr><a:srgbClr val="112233"/></a:fgClr>'
+                        "<a:bgClr><a:srgbClr val=\"FFFFFF\"/></a:bgClr></a:pattFill>"
+                    )
+                )
+                wordart._element.spPr.append(
+                    parse_xml(
+                        '<a:effectLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                        '<a:outerShdw blurRad="40000" dist="20000" dir="5400000"/>'
+                        "</a:effectLst>"
+                    )
+                )
+                presentation.save(str(source))
+                self._add_reachable_smartart_data_part(source)
+
+                provider = _RecordingReplacementProvider(replacement_text="Replaced")
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    provider,
+                    document_text_layout=layout_mode,
+                )
+
+                self.assertEqual(1, result.processed_files)
+                self.assertGreaterEqual(result.replaced_native_text_items, 3)
+                requested_texts = [request.text for request in provider.requests]
+                self.assertEqual(1, requested_texts.count("SmartArt first"))
+                self.assertEqual(1, requested_texts.count("SmartArt second"))
+                self.assertEqual(1, requested_texts.count("WordArt source"))
+                output = output_root / "deck.pptx"
+                loaded = Presentation(str(output))
+                output_wordart = next(
+                    shape
+                    for shape in loaded.slides[0].shapes
+                    if shape.name == "editable-wordart"
+                )
+                self.assertEqual("Replaced", output_wordart.text)
+                with ZipFile(output) as archive:
+                    smartart_data = archive.read("ppt/diagrams/data1.xml")
+                    slide_xml = archive.read("ppt/slides/slide1.xml")
+                self.assertEqual(2, smartart_data.count(b"Replaced"))
+                self.assertNotIn(b"SmartArt first", smartart_data)
+                self.assertNotIn(b"SmartArt second", smartart_data)
+                self.assertIn(b"outerShdw", slide_xml)
+                self.assertIn(b"prstTxWarp", slide_xml)
+                self.assertIn(b"pattFill", slide_xml)
+                self.assertIn(b'anchor="ctr"', slide_xml)
+
     # Verifies FR-2026-08-04-05.
     def test_pptx_no_autofit_uses_source_width_and_natural_height(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -383,6 +459,38 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(no_autofit_dimensions, (int(output_no_autofit.width), int(output_no_autofit.height)))
             self.assertGreater(no_autofit_size, text_to_fit_shape_size)
             self.assertGreater(no_autofit_size, table_size)
+
+    # Verifies FR-2026-08-03-15.
+    def test_pptx_basic_layout_retains_vertical_alignment_xml(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "deck.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            middle = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(3), Inches(1))
+            middle.name = "middle-aligned"
+            middle.text = "Middle aligned"
+            middle.text_frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+            default = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(3), Inches(1))
+            default.name = "default-aligned"
+            default.text = "Default aligned"
+            presentation.save(str(source))
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="Replacement"),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            output_presentation = Presentation(str(output_root / "deck.pptx"))
+            output_shapes = {shape.name: shape for shape in output_presentation.slides[0].shapes}
+            self.assertEqual("ctr", output_shapes["middle-aligned"].text_frame._element.bodyPr.get("anchor"))
+            self.assertIsNone(output_shapes["default-aligned"].text_frame._element.bodyPr.get("anchor"))
 
     # Verifies FR-2026-08-04-06.
     def test_pptx_basic_layout_source_font_preserves_resolved_typeface_references(self) -> None:
@@ -937,6 +1045,61 @@ class FolderReplacementTests(unittest.TestCase):
     @staticmethod
     def _write_png(path: Path) -> None:
         Image.new("RGB", (30, 20), "white").save(path, "PNG")
+
+    @staticmethod
+    def _add_reachable_smartart_data_part(path: Path) -> None:
+        """Add synthetic canonical SmartArt labels linked from the first slide."""
+        content_types_namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
+        relationships_namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
+        with ZipFile(path) as source_archive:
+            entries = source_archive.infolist()
+            payloads = {
+                entry.filename: source_archive.read(entry.filename) for entry in entries
+            }
+        relationships = ElementTree.fromstring(payloads["ppt/slides/_rels/slide1.xml.rels"])
+        ElementTree.SubElement(
+            relationships,
+            f"{{{relationships_namespace}}}Relationship",
+            {
+                "Id": "rIdSmartArtData",
+                "Type": (
+                    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+                    "diagramData"
+                ),
+                "Target": "../diagrams/data1.xml",
+            },
+        )
+        payloads["ppt/slides/_rels/slide1.xml.rels"] = ElementTree.tostring(
+            relationships, encoding="utf-8", xml_declaration=True
+        )
+        content_types = ElementTree.fromstring(payloads["[Content_Types].xml"])
+        ElementTree.SubElement(
+            content_types,
+            f"{{{content_types_namespace}}}Override",
+            {
+                "PartName": "/ppt/diagrams/data1.xml",
+                "ContentType": "application/vnd.ms-office.drawingml.diagramData+xml",
+            },
+        )
+        payloads["[Content_Types].xml"] = ElementTree.tostring(
+            content_types, encoding="utf-8", xml_declaration=True
+        )
+        payloads["ppt/diagrams/data1.xml"] = b"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<dgm:dataModel xmlns:dgm=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">
+  <dgm:ptLst>
+    <dgm:pt modelId=\"node-1\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>SmartArt first</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"node-2\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>SmartArt second</a:t></a:r></a:p></dgm:t></dgm:pt>
+  </dgm:ptLst>
+  <dgm:cxnLst/>
+  <dgm:bg/>
+  <dgm:whole/>
+</dgm:dataModel>"""
+        temporary_path = path.with_name(f".{path.name}.smartart-fixture.tmp")
+        with ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive:
+            for entry in entries:
+                destination_archive.writestr(entry, payloads[entry.filename])
+            destination_archive.writestr("ppt/diagrams/data1.xml", payloads["ppt/diagrams/data1.xml"])
+        temporary_path.replace(path)
 
     def _assert_drawingml_paragraph_property_order(self, data: bytes) -> None:
         """Verify the schema order that PowerPoint requires for ``a:pPr`` children."""

@@ -1363,3 +1363,34 @@ The implemented ASCII fallback is suitable for local masking and redaction but n
 ### Notes
 
 Automated tests shall use synthetic non-ASCII replacements and verify embedded fallback resources, parser-loadable output, and visual rendering in an independent PDF viewer or renderer.
+
+---
+
+## FR-2026-08-04-11
+
+| Property | Value |
+|----------|-------|
+| Title | Replace editable SmartArt and WordArt text in PPTX files |
+| Owner | |
+| Status | Implemented |
+| Source | User request and local output diagnosis |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-14, FR-2026-08-03-15 |
+
+### Description
+
+The folder-replacement PPTX handler shall replace editable text in SmartArt diagrams and WordArt shapes. The supplied diagnostic examples are SmartArt diagrams; this requirement also covers editable DrawingML WordArt text that uses text effects.
+
+For SmartArt, the handler shall traverse the presentation's reachable diagram data parts and replace each eligible logical text value that PowerPoint uses to render the diagram. It shall update the canonical SmartArt text source rather than only a generated drawing representation, and it shall replace each logical text value at most once. The output shall retain the diagram's nodes, connections, layout, styles, colours, and non-text content, and shall open in PowerPoint without a repair prompt.
+
+For WordArt, the handler shall replace the text in its editable DrawingML text body while preserving the shape's geometry and all text-effect, fill, outline, and transform markup. It shall not attempt to replace text that has been converted to outlines or rasterized.
+
+Both container types shall participate in `preserve-source-formatting`. They shall participate in `preserve-basic-layout` or `preserve-basic-layout-source-font` only when the handler can identify a finite rendered text rectangle and safely write the resulting explicit text formatting; otherwise they shall use `preserve-source-formatting` replacement. The command's existing text-replacement provider, language options, per-file isolation, and result reporting shall apply.
+
+### Rationale
+
+SmartArt commonly stores its visible editable text in diagram-specific package parts rather than ordinary slide-shape text frames. WordArt can similarly rely on a text body whose appearance is defined by DrawingML effects. Treating both as native editable PPTX text closes a visible replacement gap without rasterizing or rebuilding the presentation's design.
+
+### Notes
+
+Automated tests shall use synthetic PPTX files only. They shall include a SmartArt diagram with multiple labels and an editable WordArt shape with text effects. Tests shall verify that every eligible logical text value is replaced exactly once, the output package remains loadable without repair, diagram and WordArt non-text XML is retained, and a PowerPoint-compatible renderer shows the replacements. Tests shall not use confidential presentations or derived artifacts.

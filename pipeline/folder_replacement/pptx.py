@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
+import os
 from pathlib import Path
+import posixpath
 from typing import Protocol, cast
+import xml.etree.ElementTree as ElementTree
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -30,6 +34,7 @@ from pipeline.bounded_text_layout import (
     source_occupied_text_box,
 )
 from pipeline.ocr import OcrProvider
+from pipeline.folder_replacement.office_xml import replace_drawing_diagram_xml_text
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -78,6 +83,7 @@ _RUN_PROPERTY_CHILD_ORDER = (
 )
 _OOXML_MINIMUM_FONT_SIZE_CENTIPOINTS = 100
 _OOXML_MAXIMUM_FONT_SIZE_CENTIPOINTS = 400_000
+_RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
 
 
 def replace_pptx_file(
@@ -94,8 +100,9 @@ def replace_pptx_file(
     """Replace PPTX content, optionally fitting bounded slide text frames."""
     from pipeline.folder_replacement.processor import _replace_office_file
 
+    smartart_parts, smartart_data_parts = _reachable_smartart_parts(source)
     if document_text_layout == "preserve-source-formatting":
-        return _replace_office_file(
+        native_items, image_regions, retained_vectors = _replace_office_file(
             source,
             destination,
             ocr,
@@ -104,7 +111,16 @@ def replace_pptx_file(
             target_language,
             typeface,
             completed,
+            skip_native_xml_part=smartart_parts.__contains__,
         )
+        native_items += _replace_smartart_data_parts(
+            destination,
+            smartart_data_parts,
+            replacement,
+            source_language,
+            target_language,
+        )
+        return native_items, image_regions, retained_vectors
     if document_text_layout not in {
         "preserve-basic-layout",
         "preserve-basic-layout-source-font",
@@ -125,6 +141,13 @@ def replace_pptx_file(
         completed,
         replace_native_xml=False,
     )
+    native_items += _replace_smartart_data_parts(
+        destination,
+        smartart_data_parts,
+        replacement,
+        source_language,
+        target_language,
+    )
     presentation = Presentation(str(destination))
     layout_typefaces = noto_typefaces()
     for slide in presentation.slides:
@@ -140,6 +163,99 @@ def replace_pptx_file(
     presentation.save(str(destination))
     completed("native text layout")
     return native_items, image_regions, retained_vectors
+
+
+def _reachable_smartart_parts(source: Path) -> tuple[frozenset[str], frozenset[str]]:
+    """Find reachable SmartArt package parts and their canonical data parts."""
+    with ZipFile(source) as archive:
+        archive_parts = frozenset(archive.namelist())
+        pending: list[str | None] = [None]
+        visited: set[str | None] = set()
+        reachable: set[str] = set()
+        data_parts: set[str] = set()
+        while pending:
+            source_part = pending.pop()
+            if source_part in visited:
+                continue
+            visited.add(source_part)
+            relationships_part = _relationships_part_name(source_part)
+            if relationships_part not in archive_parts:
+                continue
+            try:
+                relationships = ElementTree.fromstring(archive.read(relationships_part))
+            except ElementTree.ParseError:
+                continue
+            for relationship in relationships:
+                if relationship.tag != f"{{{_RELATIONSHIPS_NAMESPACE}}}Relationship":
+                    continue
+                if relationship.get("TargetMode") == "External":
+                    continue
+                target = relationship.get("Target")
+                if target is None:
+                    continue
+                target_part = _relationship_target_part_name(source_part, target)
+                if target_part is None or target_part not in archive_parts:
+                    continue
+                reachable.add(target_part)
+                pending.append(target_part)
+                if (relationship.get("Type") or "").endswith("/diagramData"):
+                    data_parts.add(target_part)
+
+    smartart_parts = {
+        part for part in reachable if part.startswith("ppt/diagrams/")
+    } | data_parts
+    return frozenset(smartart_parts), frozenset(data_parts)
+
+
+def _relationships_part_name(source_part: str | None) -> str:
+    if source_part is None:
+        return "_rels/.rels"
+    parent, basename = posixpath.split(source_part)
+    return posixpath.join(parent, "_rels", f"{basename}.rels")
+
+
+def _relationship_target_part_name(source_part: str | None, target: str) -> str | None:
+    base = "" if source_part is None else posixpath.dirname(source_part)
+    candidate = target.lstrip("/") if target.startswith("/") else posixpath.join(base, target)
+    normalized = posixpath.normpath(candidate)
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        return None
+    return normalized
+
+
+def _replace_smartart_data_parts(
+    presentation_path: Path,
+    data_parts: frozenset[str],
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> int:
+    """Replace only canonical SmartArt labels, not generated diagram drawings."""
+    if not data_parts:
+        return 0
+    temporary_path = presentation_path.with_name(f".{presentation_path.name}.smartart.tmp")
+    replaced_items = 0
+    try:
+        with (
+            ZipFile(presentation_path) as source_archive,
+            ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
+        ):
+            for entry in source_archive.infolist():
+                data = source_archive.read(entry.filename)
+                if entry.filename in data_parts:
+                    data, replaced = replace_drawing_diagram_xml_text(
+                        data,
+                        replacement,
+                        source_language,
+                        target_language,
+                    )
+                    replaced_items += replaced
+                destination_archive.writestr(entry, data)
+        os.replace(temporary_path, presentation_path)
+    finally:
+        if temporary_path.exists():
+            temporary_path.unlink()
+    return replaced_items
 
 
 def _replace_slide_text_frames(
@@ -178,6 +294,14 @@ def _replace_slide_text_frames(
             continue
         text_shape = cast(_TextShape, shape)
         if not _has_text(text_shape):
+            continue
+        if _is_wordart(text_shape):
+            replaced += _replace_text_frame_source_formatting(
+                text_shape.text_frame,
+                replacement,
+                source_language,
+                target_language,
+            )
             continue
         text_box = _text_box(text_shape, slide_layout)
         fit_box = (
@@ -342,6 +466,40 @@ def _has_text(shape: "_TextShape") -> bool:
 def _has_explicit_no_autofit(text_frame: TextFrame) -> bool:
     """Whether the source, rather than our output, explicitly disables autofit."""
     return text_frame._element.bodyPr.find(qn("a:noAutofit")) is not None
+
+
+def _is_wordart(shape: "_TextShape") -> bool:
+    """Whether fitted rewriting would discard WordArt text styling.
+
+    The bounded-text writer intentionally creates new runs. It cannot safely
+    reproduce DrawingML WordArt transforms or run paint/effect definitions, so
+    these shapes retain source formatting while their text is replaced in place.
+    """
+    text_body = cast(_XmlElement, shape.text_frame._element)
+    body_properties = text_body.find(qn("a:bodyPr"))
+    if body_properties is not None and body_properties.find(qn("a:prstTxWarp")) is not None:
+        return True
+    unsupported_run_properties = {
+        qn("a:noFill"),
+        qn("a:solidFill"),
+        qn("a:gradFill"),
+        qn("a:blipFill"),
+        qn("a:pattFill"),
+        qn("a:grpFill"),
+        qn("a:effectLst"),
+        qn("a:effectDag"),
+        qn("a:highlight"),
+        qn("a:uLnTx"),
+        qn("a:uLn"),
+        qn("a:uFillTx"),
+        qn("a:uFill"),
+    }
+    return any(
+        child.tag in unsupported_run_properties
+        for properties in text_body.iter()
+        if properties.tag in {qn("a:rPr"), qn("a:defRPr"), qn("a:endParaRPr")}
+        for child in properties
+    )
 
 
 def _text_box(shape: "_TextShape", slide_layout: object) -> BoundedTextBox:
@@ -568,12 +726,6 @@ def _write_explicit_text_frame(
         body_properties.set("rIns", str(int(text_frame.margin_right)))
         body_properties.set("bIns", str(int(text_frame.margin_bottom)))
         body_properties.set("wrap", "square" if text_frame.word_wrap is not False else "none")
-        body_properties.set(
-            "anchor",
-            {"middle": "ctr", "bottom": "b"}.get(
-                _enum_name(text_frame.vertical_anchor) or "", "t"
-            ),
-        )
     body_properties.autofit = MSO_AUTO_SIZE.NONE
     for paragraph, explicit in zip(text_frame.paragraphs, text_box.paragraphs, strict=True):
         _write_paragraph(paragraph, explicit)
@@ -777,6 +929,7 @@ class _XmlElement(Protocol, Iterable["_XmlElement"]):
     def find(self, path: str) -> "_XmlElement | None": ...
     def get(self, key: str) -> str | None: ...
     def set(self, key: str, value: str) -> None: ...
+    def iter(self) -> Iterator["_XmlElement"]: ...
     def __iter__(self) -> Iterator["_XmlElement"]:
         raise NotImplementedError
 

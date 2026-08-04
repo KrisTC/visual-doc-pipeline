@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from io import BytesIO
 import xml.etree.ElementTree as ElementTree
 
@@ -12,6 +12,7 @@ from pipeline.text_replacement import TextReplacementProvider
 
 _WORDPROCESSING_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_DRAWING_DIAGRAM_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
 _SPREADSHEET_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _MARKUP_COMPATIBILITY_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -38,6 +39,38 @@ def replace_office_xml_text(
     target_language: str,
 ) -> tuple[bytes, int]:
     """Replace visible OOXML text while retaining compatibility namespace bindings."""
+    return _replace_xml_text(
+        data,
+        replacement_provider,
+        source_language,
+        target_language,
+        _is_visible_office_text_element,
+    )
+
+
+def replace_drawing_diagram_xml_text(
+    data: bytes,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> tuple[bytes, int]:
+    """Replace canonical editable text in a DrawingML diagram data part."""
+    return _replace_xml_text(
+        data,
+        replacement_provider,
+        source_language,
+        target_language,
+        _is_drawing_diagram_text_element,
+    )
+
+
+def _replace_xml_text(
+    data: bytes,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    is_text_element: Callable[[str], bool],
+) -> tuple[bytes, int]:
     try:
         namespaces = _namespace_bindings(data)
         root = ElementTree.fromstring(data)
@@ -45,7 +78,7 @@ def replace_office_xml_text(
         return data, 0
     replaced_items = 0
     for element in root.iter():
-        if element.text is None or not _is_visible_office_text_element(element.tag):
+        if element.text is None or not is_text_element(element.tag):
             continue
         element.text = replace_native_text(
             element.text, replacement_provider, source_language, target_language
@@ -135,4 +168,11 @@ def _is_visible_office_text_element(tag: str) -> bool:
         f"{{{_HTML_NAMESPACE}}}span",
         "div",
         "span",
+    }
+
+
+def _is_drawing_diagram_text_element(tag: str) -> bool:
+    return tag in {
+        f"{{{_DRAWING_DIAGRAM_NAMESPACE}}}t",
+        f"{{{_DRAWING_NAMESPACE}}}t",
     }
