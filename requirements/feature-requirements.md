@@ -10,7 +10,7 @@
 |----------|-------|
 | Title | |
 | Owner | |
-| Status | Proposed |
+| Status | Implemented |
 | Source | |
 | Date Added | YYYY-MM-DD |
 | Related Requirements | |
@@ -35,7 +35,7 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 |----------|-------|
 | Title | Prepare OCR-evaluation image inputs |
 | Owner | |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-01 |
 | Related Requirements | TR-2026-08-01-02 |
@@ -78,7 +78,7 @@ The output hierarchy shall continue to mirror the eligible source hierarchy. The
 |----------|-------|
 | Title | Pluggable OCR-provider API |
 | Owner | |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-01 |
 | Related Requirements | FR-2026-08-01-01 |
@@ -296,7 +296,7 @@ The product pipeline shall define a text-replacement task abstraction, including
 
 A text-replacement request shall accept a string of text, a boolean that indicates whether that text is a filename, a source-language BCP 47 tag, and a requested target-language BCP 47 tag. A text-replacement response shall contain the replacement string, normalized confidence from `0.0` to `1.0` inclusive, and an optional dictionary of provider-specific extra data.
 
-The initial provider, named `character_mask`, shall support all language-tag pairs. It shall replace every character of non-filename input with `#`, preserving the input string's Python character length. For filename input, it shall return the input unchanged. In both cases it shall return confidence `1.0` and no extra data.
+The initial provider, named `character_mask`, shall support all language-tag pairs. For non-filename input, it shall replace every non-whitespace character with `#` while preserving every Unicode whitespace character exactly, including ordinary, non-breaking, and ideographic spaces, tabs, and line breaks. Whitespace is defined by Python `str.isspace()`. It shall preserve the input string's Python character length. For filename input, it shall return the input unchanged. In both cases it shall return confidence `1.0` and no extra data.
 
 This feature shall only provide the pipeline-library abstraction and initial plugin. It shall not yet integrate text replacement with document, image, or OCR processing.
 
@@ -488,8 +488,8 @@ Automated tests shall use synthetic images and fonts only; they shall not use sa
 The default text-replacement provider factory shall additionally discover three deterministic providers, each of which supports every language-tag pair and returns confidence `1.0` with no extra data:
 
 - `identity` shall return input text unchanged.
-- `double_character_mask` shall return a string of `#` characters whose Python character length is twice the input text's Python character length.
-- `half_character_mask` shall return a string of `#` characters whose Python character length is half the input text's Python character length, rounded down, with a minimum length of one.
+- `double_character_mask` shall replace each non-whitespace input character with two `#` characters and preserve every Unicode whitespace character exactly, as defined by Python `str.isspace()`.
+- `half_character_mask` shall preserve every Unicode whitespace character exactly, as defined by Python `str.isspace()`. For each contiguous sequence of non-whitespace input characters, it shall return `#` characters equal to half that sequence's Python character length, rounded down, with a minimum of one.
 
 ### Rationale
 
@@ -497,7 +497,7 @@ Deterministic same-length, longer, and shorter outputs make the local visual eva
 
 ### Notes
 
-For requests where `is_filename` is true, every provider shall return the input text unchanged.
+For requests where `is_filename` is true, every provider shall return the input text unchanged. For non-filename whitespace-only input, every deterministic provider shall return the input unchanged.
 
 The providers shall have provider-owned behavioural tests and continue to participate in the existing generic provider contract tests.
 
@@ -915,3 +915,451 @@ WMF supports raster DIB content alongside its native drawing and text records. P
 The initial scope is `META_STRETCHDIB`. Other WMF bitmap records, compressed DIB payloads, and vector text represented only by outlines remain out of scope until separately specified.
 
 ---
+
+## FR-2026-08-03-13
+
+| Property | Value |
+|----------|-------|
+| Title | Evaluate native text-element layout for preserve-basic-layout |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-07, FR-2026-08-02-10 |
+
+### Description
+
+The project shall rename `scripts/run_text_replacement_evaluations.py` to identify it as the OCR text-replacement evaluator. The name `scripts/run_text_replacement_evaluations.py` shall be used for a separate local evaluation command for native editable PowerPoint text elements.
+
+For its first pass, the native-text evaluator shall inspect each eligible text element in PPTX source files in the same local sample corpus used by the other evaluation commands, extract its basic text-box properties including autofit settings, and render that element to a bitmap with Skia. It shall skip a text frame with no non-whitespace run text, while retaining blank paragraphs in an otherwise nonempty text frame. It shall write the extracted properties as a JSON file beside each rendered bitmap. The generated static HTML evaluation shall contain one row per source text element and present the slide and object reference, a new-tab link to that row's JSON properties file, and the rendered bitmap. The HTML shall display each native-size preview with a thin red border that makes the text-box bounds visible without changing the raster bitmap. It may process `sample-data/confidential/` locally only under the repository's confidential-sample rule.
+
+The extracted and reported text-box properties shall include the source location; bounding-box position and size; source and effective text rotation; all four text-frame padding values; word-wrap setting; horizontal and vertical alignment; and autofit mode, font scale, and line-spacing reduction when represented in the source. For each paragraph and run, the report shall include text content, paragraph alignment and spacing when set, direct bullet settings, and the run's font family, broad serif/sans-serif/fixed-width classification, size, bold, italic, underline, and baseline settings when set.
+
+The evaluator shall render without applying autofit. It shall render within the explicit text box after applying the extracted padding and text rotation. It shall select a committed, redistributable Noto face matching the source element's broad serif, sans-serif, or fixed-width classification when the original font is unavailable. The first pass shall render text layout only; source text, shape, and page colours, fills, borders, and other non-layout visual styling are out of scope. The evaluator shall run independently of OCR and shall not invoke an OCR provider.
+
+### Rationale
+
+Native text elements have explicit bounds and may contain multiple runs with distinct formatting. Inspecting their geometry and source settings separately from OCR-region replacement provides a fast visual baseline for the later `preserve-basic-layout` fitting implementation.
+
+### Notes
+
+The initial input format is PPTX only. The evaluator shall use the ordinary local evaluation corpus, including locally processed confidential samples under the repository's confidential-sample rule. It shall ignore PowerPoint temporary lock files whose filename starts with `~$`. It shall recursively traverse each slide's shape tree and evaluate each shape with a text frame, including text frames within grouped shapes. Tables, charts, notes, masters, layouts, and other text not exposed as a slide-shape text frame are out of scope. The command shall accept `--input-root` and `--output-root`, defaulting to `sample-data/` and `outputs/evaluations/text-replacement/`. It shall write one HTML page for each source presentation and a sibling artifact directory named after that page; each text box shall have a PNG rendering and JSON properties file in that directory. The HTML shall display the PNG at its native pixel dimensions without a forced maximum size. Because each HTML page represents one presentation, the table shall show only a slide/object reference rather than repeating the presentation filename in each row. Reported dimensions, padding, paragraph spacing, and font sizes shall use PowerPoint's source English Metric Units (EMUs) and points where applicable.
+
+The first renderer shall support the reported run-level typography, paragraph alignment and spacing, text-frame padding, vertical alignment, text rotation, direct bullet characters, and empty paragraphs. It shall preserve an empty paragraph's line advance, using its direct end-paragraph run font size when present, but shall not render a bullet for an empty paragraph. Underlines shall use the selected Skia typeface's underline position and thickness metrics rather than an estimated size-relative position, and an explicit false underline setting shall suppress underline rendering. It shall report direct source properties and resolve list-style defaults through the PowerPoint master, layout, text-frame, and paragraph precedence chain for the evaluator's explicit-properties artifacts. Theme resolution remains out of scope. For rendering only, an absent direct font size shall use 18 points and an absent direct font-family classification shall use sans-serif. The committed Noto Sans JP, Noto Serif JP, and Noto Sans Mono assets shall be selected, respectively, for sans-serif, serif, and fixed-width classifications. Tab layout and automatic-number and picture bullets remain out of scope. Colour, shape fill, borders, and other non-layout visual styling are out of scope for this first pass.
+
+Source symbol-font `buChar` codepoints may not render as their intended visual glyph with the committed Noto fonts. A future fallback must map a source symbol-font character to an appropriate Unicode glyph supported by the committed Noto assets; it shall not depend on an operating-system symbol font. The initial supported source symbol fonts and their mapping coverage remain to be specified.
+
+The evaluator shall measure and reflow the complete text before drawing, then select the largest uniform scale from the source run font sizes that fits within the padded text-box bounds rather than clipping at the bottom. It shall preserve every run's relative font-size ratio and style, rewrap at each candidate scale, and retain explicit blank paragraphs and line breaks. It shall test scales down to a one-pixel font size. If content still cannot fit, the output shall record overflow rather than silently clipping. Each JSON artifact shall include the selected scale and fit status.
+
+When an otherwise unbreakable token alone exceeds its available line width, the evaluator shall introduce character-level layout breaks for that token before reducing font size. It shall retain ordinary word wrapping when the token fits on a line.
+
+When a paragraph has explicit point-based line spacing below the rendered glyph line height, the evaluator shall use at least the glyph line height as its drawing and fitting advance. It shall continue to report the original point-based spacing value unchanged.
+
+For each source text box, the HTML shall show the original rendering followed by one native-size rendering column per locally discovered text-replacement provider. The evaluator shall infer the source language from the established language-code directory hierarchy used by OCR evaluation and shall request English (`en`) as the target language by default. It shall issue one replacement request for each nonempty paragraph, preserving paragraph-level layout properties, including bullets, indentation, alignment, and spacing. Each returned paragraph shall be represented by one run using that paragraph's dominant source run style: the style of the run with the greatest number of non-whitespace source characters, with the first run winning a tie. The provider-specific rendered bitmap and a sibling provider-specific explicit-properties JSON shall record that paragraph-level replacement and its independently fitted text size. The HTML may be wider than the viewport and shall retain every image at its native size for horizontal-scroll review.
+
+Alongside the source-properties JSON, the evaluator shall write a sibling explicit-properties JSON for each rendered text box. It shall retain the same text-box definition shape while flattening the layout properties needed by a future PPTX-writing helper. In particular, it shall set the selected committed Noto font family explicitly for every run, multiply every direct or defaulted run font size by the selected fitting scale, set autofit to `none`, and retain the selected scale and fit status. The source-properties JSON shall remain an unmodified record of extracted source properties. The HTML row shall provide new-tab links to both JSON artifacts.
+
+Automated tests shall use synthetic documents only. They shall verify property extraction, autofit extraction, Noto-face selection, one output row per eligible text element, deterministic Skia bitmap output, and that the command does not construct or invoke an OCR provider.
+
+---
+
+## FR-2026-08-03-14
+
+| Property | Value |
+|----------|-------|
+| Title | Apply preserve-basic-layout to bounded native document text |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-03-13 |
+
+### Description
+
+The folder-replacement command shall expose `--document-text-layout` with values `preserve-source-formatting` (default) and `preserve-basic-layout`. The latter shall apply only to native editable text for which a format adapter can determine a finite text rectangle and write explicit text formatting back to that same container. It shall not change the OCR bitmap or editable-vector replacement paths. Free-flowing document text without a stable bounding box shall retain source formatting.
+
+The product shall provide a shared bounded-text layout core. It shall accept styled paragraphs and runs, bounds, padding, rotation or writing direction, alignment, and list settings; obtain a replacement for each nonempty paragraph; select the dominant source run style for each returned paragraph; select an appropriate committed Noto face; wrap and fit the replacement within the box; and return explicit writable text-frame, paragraph, and run settings with autofit disabled. A token that alone exceeds line width shall be character-wrapped before font reduction. A fit that cannot meet the minimum one-pixel font size shall remain visible as overflow rather than silently clipping.
+
+The core shall support format-specific adapters for PPTX slide and grouped-shape text frames, DOCX drawing text boxes and embedded-diagram text, XLSX drawing-shape text, XLSX worksheet cells with finite explicit grid bounds, and bounded PDF form or annotation text. Each adapter shall use the shared fitting semantics while retaining format-specific extraction, inherited-style resolution, and writing logic. A format or text container that cannot supply reliable bounds or cannot safely write the resulting explicit formatting shall retain `preserve-source-formatting`.
+
+The fitting output shall calculate its scale with the selected Noto face and write the fitted size explicitly. Each format adapter shall embed the selected redistributable Noto face(s) when its output format supports portable font embedding, subject to the font's embedding permissions. Portable embedding shall use repository-owned static Noto faces, rather than the variable test faces used for deterministic measurement. Where a format has no safe portable-font embedding path, the adapter shall retain its resolved source font reference while applying the Noto-derived fitted size, equivalent to `preserve-basic-layout-source-font`; it shall not claim portable rendering. The initial PPTX implementation may write explicit Noto font references without embedding while compatible static font assets and a PowerPoint-compatible embedding path are specified.
+
+### Rationale
+
+Translated text may differ substantially in length. A shared fitting model provides a readability-first replacement path wherever the source exposes an explicit text container, while allowing each document format to retain its own safe serialization rules.
+
+### Notes
+
+The existing generic native-text replacement remains the implementation of `preserve-source-formatting`. The initial shared font assets are the committed Noto Sans JP, Noto Serif JP, and Noto Sans Mono faces; an adapter shall select the corresponding broad sans-serif, serif, or fixed-width face. Target-language coverage and additional Noto families require separate requirements when those faces are added.
+
+The initial implementation order is PPTX, then DOCX drawing text, XLSX drawing text and worksheet cells, and bounded PDF text. An XLSX cell is eligible only when its column width and row height resolve to finite explicit grid bounds; a merged cell uses the complete merged grid rectangle. For a cell fit, the adapter shall convert Excel's explicit column-width character unit to its standard 96-DPI grid width and row-height points to EMUs. A cell without reliable bounds retains source formatting. A structured XLSX table body cell uses the same finite-grid-cell rule. Until FR-2026-08-04-08 is implemented, its header row and `xl/tables/*.xml` definitions are structured-reference metadata and shall remain unchanged, so formula, query, and table references remain valid. Charts, ordinary Word paragraphs, and arbitrary PDF content streams require a separate bounding-box definition before they can opt in. Ordinary EMF and WMF text records have no portable embedding path; when they have an eligible explicit clip rectangle, they shall retain the source face while applying the Noto-derived fitted size.
+
+Automated tests shall use synthetic documents and fonts only. They shall verify mode selection, bounded-container eligibility, paragraph-level replacement, explicit no-autofit output, fitted Noto typography, stable overflow behavior, and valid output for each implemented adapter.
+
+---
+
+## FR-2026-08-03-15
+
+| Property | Value |
+|----------|-------|
+| Title | Apply preserve-basic-layout to PPTX text frames |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-13 |
+
+### Description
+
+When `--document-text-layout preserve-basic-layout` is selected, the folder-replacement PPTX handler shall replace text in slide-shape text frames, including placeholders and text frames inside grouped shapes, using the shared bounded-text layout core. It shall resolve applicable PowerPoint list styles from master, layout, text frame, and paragraph sources; make resulting body, paragraph, bullet, and run settings explicit; select the chosen Noto face; disable autofit; and apply the independently fitted replacement text and font sizes to the output presentation.
+
+The PPTX handler shall preserve existing processing of embedded bitmap and editable-vector package parts. It shall leave slide text outside a supported text frame unchanged. In `preserve-source-formatting` mode, it shall retain the existing generic OOXML native-text behavior.
+
+### Rationale
+
+PPTX is the evaluated bounded-text format and provides the first production integration for the fitting model.
+
+### Notes
+
+The implementation shall preserve the package's unrelated parts and relationships. It shall use only the repository-owned Noto assets and shall not rely on operating-system font discovery or runtime font downloads. The initial implementation shall write explicit Noto font references but shall not claim portable font embedding: the committed faces are variable fonts and a PowerPoint-compatible embedding path has not been specified. A follow-up embedding implementation shall include the regular face and any bold, italic, or bold-italic face needed by written runs, using separately specified compatible static font assets. Although fitting evaluates down to a one-pixel size, PPTX serialization shall write every DrawingML run size within OOXML's 1–4,000 point range. If fitting requires a smaller size, the written run shall use one point and retain the resulting overflow rather than emitting invalid package content.
+
+Automated tests shall build synthetic PPTX files with ordinary, placeholder, and grouped text frames. They shall verify source-formatting mode, basic-layout paragraph replacement and fitting, explicit no-autofit and font settings, and a valid output package. Font-part tests will be added with the separately specified embedding implementation.
+
+---
+
+## FR-2026-08-03-16
+
+| Property | Value |
+|----------|-------|
+| Title | Replace and fit PowerPoint table-cell text |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-03 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15 |
+
+### Description
+
+When `--document-text-layout preserve-basic-layout` is selected, the PPTX handler shall replace text in every editable PowerPoint table cell. Where the cell exposes a finite text rectangle, including its cell bounds and text-frame padding, it shall use the shared bounded-text layout core and write explicit fitted Noto typography with autofit disabled. It shall retain the table's geometry, fill, borders, merge state, and other non-text properties.
+
+If a table cell cannot supply a reliable finite text rectangle or cannot safely accept explicit fitted formatting, the handler shall still replace its editable text through the established source-formatting path. It shall retain the existing font, size, and text-frame behavior for that cell rather than skipping replacement.
+
+### Rationale
+
+Table cells usually provide the explicit bounds needed for readable translated text, while a safe source-formatting fallback ensures that unsupported cell variants do not silently retain source-language text.
+
+### Notes
+
+Automated tests shall use synthetic PPTX tables with ordinary cells and merged cells. They shall verify fitted replacement for bounded cells, source-formatting replacement fallback for an ineligible cell, preservation of table geometry, and valid output packages.
+
+---
+
+## FR-2026-08-04-01
+
+| Property | Value |
+|----------|-------|
+| Title | Derive fit bounds for PowerPoint no-autofit text frames |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15 |
+
+### Description
+
+For a PowerPoint slide-shape text frame processed with `--document-text-layout preserve-basic-layout`, the handler shall use a derived fit rectangle when the source text-frame autofit mode is explicitly `none` (PowerPoint's **Do not Autofit** setting). It shall lay out the original source paragraphs and runs at their original resolved font sizes, styles, paragraph settings, padding, writing direction, and list settings, then use the occupied source-text rectangle as the replacement fitting rectangle. The derived rectangle shall retain the source text frame's padding and shall not exceed the original shape rectangle.
+
+The handler shall use the original shape or cell rectangle directly for every other bounded-text case, including `text-to-fit-shape`, `shape-to-fit-text`, inherited or unspecified autofit, table cells, and non-PowerPoint adapters. It shall not derive replacement bounds from original text in those cases.
+
+The measurement shall remain deterministic and use the same committed Noto face selected for the source run's broad family classification when the source font itself is unavailable. It shall not use operating-system font discovery.
+
+### Rationale
+
+Authors can disable autofit while leaving a large editing text frame around a smaller intended block of text. Fitting replacement text to that loose frame can produce needlessly small or visually misplaced typography. The original laid-out text provides a closer approximation of the intended visual bounds.
+
+### Notes
+
+The source text frame's geometry remains unchanged. The derived rectangle affects only replacement fitting and is not written back as a resized shape. The implementation shall retain the existing one-point OOXML serialization minimum and overflow behavior.
+
+Automated tests shall use synthetic PPTX text frames with explicit `noAutofit` and a larger source rectangle than the original occupied text. They shall verify that the no-autofit replacement uses the derived rectangle, while `text-to-fit-shape` and table-cell replacement continue to use their actual rectangles.
+
+---
+
+## FR-2026-08-04-04
+
+| Property | Value |
+|----------|-------|
+| Title | Preview PowerPoint no-autofit derived fit bounds |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-04-01 |
+
+### Description
+
+The native PowerPoint text-layout evaluation command shall use the same derived-fit-bound rule as the production PPTX adapter for replacement previews. When the source text frame explicitly uses `noAutofit`, it shall measure the original resolved text with the shared deterministic bounded-text layout core and fit each replacement against that derived rectangle. Every other evaluated text frame shall continue to fit replacement text against its full source rectangle.
+
+Each preview bitmap shall retain the full source shape dimensions and render replacement text at the position it would have in the unchanged source shape. For a replacement that uses derived bounds, the bitmap shall also show a distinct, thin dashed guide for the derived fit rectangle, in addition to the existing red source-shape border displayed by the HTML viewer. This guide is evaluation-only and shall not be included in an explicit-properties definition intended to represent output formatting.
+
+Replacement explicit-properties JSON shall retain the original source shape geometry, because the production adapter does not resize the shape. It shall record the fitting rectangle and whether it was derived from the source text, so reviewers can compare the source geometry, the fit input, and the fitted result.
+
+### Rationale
+
+The evaluator must preview the same fit decision that the production PPTX adapter writes. Showing both the original shape and the derived fit rectangle makes it possible to identify loose `noAutofit` frames and assess whether source-text measurement produces useful replacement typography.
+
+### Notes
+
+The evaluator may share or delegate to the existing bounded-text layout core rather than maintain a second measurement implementation. Its existing source-property extraction and visual source rendering remain unchanged. Automated tests shall use synthetic text boxes to verify that explicit `noAutofit` replacements use a recorded smaller derived fitting rectangle while other autofit modes retain the source rectangle.
+
+---
+
+## FR-2026-08-04-05
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve PowerPoint no-autofit width and derive its natural text height |
+| Owner | |
+| Status | Implemented |
+| Source | User clarification |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-04-01, FR-2026-08-04-04 |
+
+### Description
+
+This requirement supersedes the derived-rectangle dimensional rule in FR-2026-08-04-01 and FR-2026-08-04-04 for explicitly `noAutofit` PowerPoint slide-shape text frames.
+
+For such a frame, the PPTX adapter shall retain the source text-frame width and padding. It shall lay out the original resolved paragraphs and runs at their source font sizes using that padded width, preserving wrapping. The derived fitting height shall be the source layout's natural height plus the frame's top and bottom padding. It shall not be clamped to the source shape height. The replacement shall be fitted against this source-width and natural-height rectangle.
+
+The adapter shall retain the source shape geometry when writing the presentation. A no-autofit text frame may therefore display text below its nominal source rectangle, consistent with the source's no-autofit layout behaviour. Every other autofit mode and bounded-text adapter shall continue to fit against its original source rectangle.
+
+The native-text evaluator shall render explicit no-autofit source text at its original scale and shall expand its evaluation canvas vertically as needed to show the natural text height. Its replacement preview shall use the same source-width/natural-height fitting rectangle and expand vertically as needed to show it. It shall show the original source-shape rectangle and the derived fitting rectangle as distinct evaluation-only guides. The replacement explicit-properties JSON shall record the derived rectangle without changing the reported source shape geometry.
+
+### Rationale
+
+PowerPoint's no-autofit behaviour preserves the text-frame width and wraps content downward at the selected font size. A tight occupied-width calculation or height clamp incorrectly shrinks text and hides vertical overflow, producing a preview and fitted result unlike the source presentation.
+
+### Notes
+
+Automated tests shall use a synthetic no-autofit text frame whose source text needs more height than its shape. They shall verify original-scale source rendering, a fitting rectangle with the source width and a natural height greater than the source shape, and a taller replacement preview. Tests shall also retain the full-source-rectangle behaviour for `text-to-fit-shape`.
+
+---
+
+## FR-2026-08-04-06
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve source typeface references during best-effort PPTX fitting |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-04-05 |
+
+### Description
+
+The folder-replacement command shall provide a PPTX layout mode named `preserve-basic-layout-source-font`. It shall perform the same source-bound selection, source-width/natural-height handling for explicit `noAutofit`, paragraph formatting, fitted font-size calculation, and explicit autofit disabling as `preserve-basic-layout`.
+
+For every replacement run with a resolved source typeface reference, this mode shall retain that reference in the output PPTX while applying the fitted size and other explicit run properties. It shall not replace that reference with Noto merely because fitting is enabled. A run without a resolved source typeface reference shall use the existing Noto fallback.
+
+Fitting measurement shall remain deterministic: it shall use the committed Noto face chosen by the source run's broad family classification to calculate the scale. The mode does not guarantee metric identity with a source font that is unavailable on the viewing machine. It shall neither discover operating-system fonts nor embed fonts in this initial implementation.
+
+The existing `preserve-basic-layout` mode shall retain its current explicit-Noto output behaviour, so users can compare deterministic-Noto and source-font best-effort output without changing existing commands.
+
+### Rationale
+
+Preserving a presentation's source typeface can retain important visual design even when font metrics are only approximately known. A separate mode makes this trade-off explicit and preserves the current deterministic Noto result as a fallback and comparison point.
+
+### Notes
+
+Automated tests shall use synthetic runs with a resolved non-Noto source typeface reference and with no source reference. They shall verify the new mode writes the source reference for the former, uses Noto for the latter, and retains the existing fitting and autofit behaviour.
+
+---
+
+## FR-2026-08-04-02
+
+| Property | Value |
+|----------|-------|
+| Title | Select an empty OCR provider for local pipeline testing |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-01-03, FR-2026-08-03-01, FR-2026-08-03-03 |
+
+### Description
+
+The default OCR-provider factory shall expose a locally implemented provider named `no_ocr`. Its `recognize` operation shall return immediately with an `OcrResult` whose `text_items` collection is empty, without inspecting the supplied image, loading an OCR model, or accessing the network.
+
+The folder-replacement command shall allow `--ocr no_ocr`. When selected, it shall retain the established native editable-text and editable-vector-text replacement behaviour, but it shall leave every raster bitmap unchanged because the empty OCR result contains no eligible text regions.
+
+The `no_ocr` provider shall not be eligible for the synthetic OCR contract test. The OCR-evaluation command shall exclude `no_ocr` from its automatic all-provider evaluation, so selecting this test utility does not create empty results or cache roots in a normal OCR-quality evaluation.
+
+### Rationale
+
+Replacing text in documents with many raster images can be slow because normal OCR initializes models and recognizes every image. An explicit empty local provider makes it possible to test discovery, output paths, native-text replacement, document traversal, progress, and error isolation without paying that OCR cost.
+
+### Notes
+
+The provider shall be a normal directory-derived OCR-provider package under `pipeline/ocr_plugins/`, consistent with FR-2026-08-03-01. It shall not be the default OCR provider and shall not be a fallback after a real OCR-provider failure.
+
+Automated tests shall use synthetic images and temporary folders. They shall verify the provider returns an empty result without touching image pixels, folder replacement with `--ocr no_ocr` leaves raster images unchanged while retaining native-text replacement, and OCR evaluation does not invoke or generate output for this provider.
+
+---
+
+## FR-2026-08-04-03
+
+| Property | Value |
+|----------|-------|
+| Title | Report actionable folder-replacement command-line errors |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-14 |
+
+### Description
+
+Before processing any input, `scripts/run_folder_replacement.py` shall validate its user-supplied parameters and report anticipated validation failures through argparse's normal command-line-error mechanism. It shall print the usage summary and one concise `error:` message to standard error, exit with status 2, and shall not display a Python traceback for these failures.
+
+The command shall report an error when the input path does not exist or is not a directory, or when an existing output path is not a directory. It shall report an error when `--ocr` does not name a discovered OCR provider, or when `--text-replacement` does not name a discovered text-replacement provider. Each unavailable-provider error shall identify the invalid value and list the available provider names for that option.
+
+The command shall also report an error when the output folder is the input folder or is located below it.
+
+Existing argparse validation for missing required arguments and unsupported `--document-text-layout` values shall retain the same command-line-error behaviour. Unexpected operational failures, including failures while processing eligible input files, shall retain the per-file isolation and reporting required by FR-2026-08-03-03.
+
+### Rationale
+
+Input paths and provider names are ordinary user choices. Clear command-line feedback lets a user correct them immediately, rather than interpreting an implementation exception or traceback.
+
+### Notes
+
+Validation shall happen before the command loads the replacement typeface or begins folder processing. It shall not create an output directory or modify input files when validation fails.
+
+Automated tests shall invoke the script as a subprocess with synthetic temporary paths. They shall verify status 2, a concise error message, and no traceback for a missing input directory, a non-directory input, a non-directory output, an output directory nested below the input directory, an unknown OCR provider, and an unknown text-replacement provider. They shall verify the unavailable-provider messages contain the available names.
+
+---
+
+## FR-2026-08-04-07
+
+| Property | Value |
+|----------|-------|
+| Title | Apply preserve-basic-layout to bounded vector, Word, and PDF text |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14 |
+
+### Description
+
+`preserve-basic-layout` shall use the shared bounded-text layout core for every supported native text container that supplies an explicit finite rectangle and can be rewritten safely. This extends the existing PPTX and explicitly bounded XLSX-cell handling to DOCX drawing text, XLSX drawing-shape text, bounded PDF form or annotation text, and bounded editable SVG, EMF, and WMF text. All adapters shall use the same paragraph replacement, dominant-run-style selection, Noto-face selection, reflow, fit/overflow result, and explicit fitted typography semantics. The adapters shall preserve their surrounding document or vector content.
+
+Portable formats shall embed selected repository-owned static Noto faces. For a format without a safe portable embedding path, including ordinary EMF and WMF, the adapter shall retain the resolved source face but write the Noto-derived fitted size and explicit layout settings. This is a required best-effort mode, not a reason to retain the original size when replacement text length changes substantially.
+
+A container without an explicit finite rectangle, or for which the adapter cannot safely write an explicit fitting result, shall retain the existing `preserve-source-formatting` replacement behaviour. Free-flowing Word paragraphs, arbitrary PDF page-content text, outlined vector text, and SVG text without an explicit containing rectangle shall not opt in.
+
+### Rationale
+
+The readability objective applies wherever the document format supplies a true text field, annotation, or clip rectangle, not only to PowerPoint. A shared core prevents later fitting corrections from diverging between Office, PDF, and vector formats.
+
+### Notes
+
+The required bounding sources and safe write rules are not yet fully specified for several requested formats:
+
+- DOCX: DrawingML text boxes can use their drawing extent; Word embedded-diagram text requires a defined mapping from the diagram's text node to its rendered shape extent.
+- XLSX: Drawing-shape text can use its DrawingML transform extent. The existing finite-grid-cell path remains separate only for bounds extraction; it uses the same fitting core.
+- PDF: AcroForm widgets and FreeText annotations have rectangles. Implemented PDF rules are defined by FR-2026-08-04-09; portable Unicode fallback is proposed by FR-2026-08-04-10.
+- SVG: ordinary `text`/`tspan` elements do not define a rectangular text field. A qualifying explicit rectangle must be identified, such as a clipping rectangle associated with the text; `foreignObject` and arbitrary HTML layout remain out of scope unless separately added.
+- EMF and WMF: text output records have an origin and may have a clipping/opaque rectangle. Only records with an explicit clipping rectangle are candidates; a record with only an origin, advances, or current font is not bounded text.
+
+Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. They shall verify exact eligibility/fallback decisions, replacement through the shared core, explicit fitted output, and that every generated file remains loadable by an appropriate format parser. PDF tests shall also verify any required appearance streams and embedded-font resources.
+
+---
+
+## FR-2026-08-04-08
+
+| Property | Value |
+|----------|-------|
+| Title | Translate structured XLSX table headers safely |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-14, FR-2026-08-04-07 |
+
+### Description
+
+The folder-replacement pipeline shall translate a structured XLSX table's visible header-row cells only when it can atomically update the corresponding `xl/tables/*.xml` `tableColumn` names and every supported structured reference that relies on those names. The output shall remain loadable by Excel without a repair operation.
+
+The implementation shall define a deterministic mapping from each source header to its replacement header, including duplicate or empty replacement results. It shall update worksheet formulae, table calculated-column formulae, totals-row formulae, workbook defined names, and other supported structured-reference consumers using token-aware parsing rather than unrestricted string replacement. Unsupported consumers shall be detected and reported with a safe fallback that retains the affected header unchanged.
+
+Until this requirement is implemented, the pipeline shall treat structured XLSX table header cells and their `xl/tables/*.xml` definitions as an explicit non-replacement exception in every document-text layout mode. It shall continue to replace table body cells; finite-grid body cells remain eligible for `preserve-basic-layout` fitting.
+
+### Rationale
+
+Table headers are both visible labels and schema identifiers. Replacing only the visible cells breaks the agreement with table metadata; replacing the metadata without every dependent structured reference can break formulae, query bindings, and workbook semantics.
+
+### Notes
+
+Automated tests shall use synthetic workbooks containing tables, structured formulae, calculated columns, totals rows, and duplicate replacement candidates. They shall verify valid, repair-free output, consistent header and metadata names, correct supported-reference updates, and the unchanged-header fallback for unsupported dependencies.
+
+---
+
+## FR-2026-08-04-09
+
+| Property | Value |
+|----------|-------|
+| Title | Safely replace currently supported PDF text |
+| Owner | |
+| Status | Implemented |
+| Source | User request and implementation review |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07 |
+
+### Description
+
+This requirement defines the implemented PDF-specific eligibility, encoding, appearance, and fallback rules that the generic bounded-text requirements leave open.
+
+For a PDF FreeText annotation or editable AcroForm text field with a finite `/Rect`, `preserve-basic-layout` shall use the shared bounded-text layout core. It shall write the replacement value, explicit fitted size, an embedded repository-owned static Noto face, and a clipped normal appearance stream that renders the replacement within that rectangle. It shall preserve the annotation or field's non-text semantics and surrounding page content. A field or annotation without a safe finite rectangle shall use `preserve-source-formatting` replacement rather than a bounded fit.
+
+PDF page-content and Form XObject text-showing operations do not define a reliable text rectangle. They shall continue to receive native text replacement, but shall not opt into paragraph fitting, box resizing, or inferred bounding boxes. An unchanged replacement shall retain its original encoded text operand and active font selection.
+
+When changing a page-content or Form-XObject text operand, the adapter shall decode composite Type0 text through its `/ToUnicode` CMap using the CMap's actual character-code widths. It shall not assume that `/Identity-H` implies two-byte character codes. A `/ToUnicode` map is decoding evidence only and shall not be reversed to select a CID for replacement text. If the active Type0 font, or a subsetted simple font, cannot safely encode the replacement, the adapter shall select the existing ASCII-safe fallback used for masking and redaction.
+
+When a simple source font has an available character map, `preserve-basic-layout-source-font` may retain it only when that map demonstrates support for every replacement character. A map that lacks a replacement character shall select the ASCII-safe fallback. This mode remains best effort for unbounded PDF page content; it does not promise source-font metric equivalence or layout fitting.
+
+### Rationale
+
+PDF appearance streams, CMaps, subsetted fonts, and page-content operators have materially different safety properties from Office text containers. These rules prevent invisible or corrupt masking text while keeping the bounded-form path portable and the unbounded-content path conservative.
+
+### Notes
+
+The ASCII-safe page-content fallback is not sufficient for general non-ASCII replacement text; FR-2026-08-04-10 specifies that follow-up.
+
+Automated tests shall use synthetic PDFs only. They shall cover Type0 `/ToUnicode` CMaps with one-byte and multi-byte codes, `TJ` arrays, subsetted simple fonts that lack a replacement glyph, unchanged identity operands, bounded field and FreeText appearance generation, embedded fallback resources, and parser-loadable output. Visual verification shall render synthetic outputs with an independent PDF viewer or renderer.
+
+---
+
+## FR-2026-08-04-10
+
+| Property | Value |
+|----------|-------|
+| Title | Support complete Unicode replacement in unbounded PDF content |
+| Owner | |
+| Status | Proposed |
+| Source | Implementation review |
+| Date Added | 2026-08-04 |
+| Related Requirements | FR-2026-08-04-09 |
+
+### Description
+
+For changed, unbounded PDF page-content and Form-XObject text where the active source font cannot safely encode the replacement, the pipeline shall embed and select a portable static Unicode fallback that renders the complete replacement text for the requested target language. It shall not silently substitute unsupported characters with unrelated glyphs. If no safe fallback is available, it shall retain the source operand and report that item as unsupported.
+
+### Rationale
+
+The implemented ASCII fallback is suitable for local masking and redaction but not for general translation.
+
+### Notes
+
+Automated tests shall use synthetic non-ASCII replacements and verify embedded fallback resources, parser-loadable output, and visual rendering in an independent PDF viewer or renderer.

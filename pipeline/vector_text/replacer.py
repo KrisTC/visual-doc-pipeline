@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ElementTree
 
 from PIL import Image
 from pipeline.vector_text.common import VectorReplacementResult
+from pipeline.text_replacement import TextReplacementProvider
 
 
 _EMR_EXTTEXTOUTA = 83
@@ -17,6 +18,9 @@ _EMR_EXTTEXTOUTW = 84
 _EMR_STRETCHDIBITS = 81
 _META_EXTTEXTOUT = 0x0A32
 _META_TEXTOUT = 0x0521
+_META_CREATEFONTINDIRECT = 0x02FB
+_META_SELECTOBJECT = 0x012D
+_META_DELETEOBJECT = 0x01F0
 _META_STRETCHDIB = 0x0F43
 _META_PLACEABLE_KEY = b"\xd7\xcd\xc6\x9a"
 _ETO_CLIPPED = 0x0004
@@ -30,18 +34,39 @@ def replace_vector_text(
     replace_text: Callable[[str], str],
     source_language: str,
     replace_image: Callable[[Image.Image], int] | None = None,
+    *,
+    document_text_layout: str = "preserve-source-formatting",
+    replacement_provider: TextReplacementProvider | None = None,
+    target_language: str | None = None,
 ) -> VectorReplacementResult:
     """Replace editable vector text for ``extension`` without OCR or rasterization."""
     normalised_extension = extension.lower()
     if normalised_extension == ".svg":
         from pipeline.vector_text.svg import replace_svg
-        return replace_svg(data, replace_text, replace_image)
+        return replace_svg(
+            data,
+            replace_text,
+            replace_image,
+            document_text_layout=document_text_layout,
+            replacement_provider=replacement_provider,
+            source_language=source_language,
+            target_language=target_language,
+        )
     if normalised_extension == ".emf":
         from pipeline.vector_text.emf import replace_emf
-        return replace_emf(data, replace_text, replace_image)
+        return replace_emf(
+            data, replace_text, replace_image,
+            document_text_layout=document_text_layout,
+            replacement_provider=replacement_provider,
+            source_language=source_language, target_language=target_language,
+        )
     if normalised_extension == ".wmf":
         from pipeline.vector_text.wmf import replace_wmf
-        return replace_wmf(data, replace_text, source_language, replace_image)
+        return replace_wmf(
+            data, replace_text, source_language, replace_image,
+            document_text_layout=document_text_layout,
+            replacement_provider=replacement_provider, target_language=target_language,
+        )
     raise ValueError(f"Unsupported vector graphic extension: {extension}")
 
 
@@ -132,6 +157,11 @@ def _replace_emf_text(
     data: bytes,
     replace_text: Callable[[str], str],
     replace_image: Callable[[Image.Image], int] | None,
+    *,
+    document_text_layout: str = "preserve-source-formatting",
+    replacement_provider: TextReplacementProvider | None = None,
+    source_language: str = "",
+    target_language: str | None = None,
 ) -> VectorReplacementResult:
     if len(data) < 8:
         raise ValueError("Invalid EMF image.")
@@ -150,7 +180,11 @@ def _replace_emf_text(
         record = data[offset : offset + record_size]
         if record_type in {_EMR_EXTTEXTOUTA, _EMR_EXTTEXTOUTW}:
             record, changed, editable = _replace_emf_exttext_record(
-                record, record_type, replace_text
+                record, record_type, replace_text,
+                document_text_layout=document_text_layout,
+                replacement_provider=replacement_provider,
+                source_language=source_language,
+                target_language=target_language,
             )
             replaced_items += changed
             has_editable_text = has_editable_text or editable
@@ -246,6 +280,11 @@ def _replace_emf_exttext_record(
     record: bytes,
     record_type: int,
     replace_text: Callable[[str], str],
+    *,
+    document_text_layout: str = "preserve-source-formatting",
+    replacement_provider: TextReplacementProvider | None = None,
+    source_language: str = "",
+    target_language: str | None = None,
 ) -> tuple[bytes, int, bool]:
     emr_text_offset = 36
     string_length_offset = emr_text_offset + 8
@@ -268,6 +307,35 @@ def _replace_emf_exttext_record(
     except UnicodeDecodeError as error:
         raise ValueError("Unsupported EMF text encoding.") from error
     replacement = replace_text(source_text)
+    fitted_scale = 1.0
+    if (
+        document_text_layout in {"preserve-basic-layout", "preserve-basic-layout-source-font"}
+        and replacement_provider is not None
+        and target_language is not None
+    ):
+        # EMR_EXTTEXTOUT stores a finite clipping rectangle when ETO_CLIPPED
+        # is present.  The record's X/Y scale is the only local, safe way to
+        # change text size without altering the selected GDI font object.
+        options = struct.unpack_from("<I", record, emr_text_offset + 16)[0]
+        if options & _ETO_CLIPPED:
+            left, top, right, bottom = struct.unpack_from("<iiii", record, emr_text_offset + 20)
+            width, height = abs(right - left), abs(bottom - top)
+            if width and height:
+                from pipeline.bounded_text_layout import (
+                    BoundedTextBox, BoundedTextParagraph, BoundedTextRun,
+                    noto_typefaces, replace_and_fit_text_box,
+                )
+                box = BoundedTextBox(width * 9_525, height * 9_525, 0, 0, 0, 0, None,
+                    (BoundedTextParagraph("left", None, None, None, None, 0, None, None,
+                                          None, None, None,
+                                          (BoundedTextRun(source_text, None, "sans-serif", 12.0,
+                                                          False, False, "none", None),)),))
+                fitted = replace_and_fit_text_box(
+                    box, replacement_provider, source_language, target_language, noto_typefaces(),
+                    preserve_source_font_family=True,
+                )
+                replacement = fitted.text_box.paragraphs[0].runs[0].text
+                fitted_scale = fitted.font_scale
     try:
         replacement_bytes = replacement.encode(encoding)
     except UnicodeEncodeError as error:
@@ -276,6 +344,10 @@ def _replace_emf_exttext_record(
     updated = bytearray(record[:string_offset] + replacement_bytes + record[string_end:])
     byte_delta = len(replacement_bytes) - string_size
     struct.pack_into("<I", updated, string_length_offset, replacement_character_count)
+    if fitted_scale != 1.0:
+        for scale_offset in (28, 32):
+            scale = struct.unpack_from("<f", record, scale_offset)[0]
+            struct.pack_into("<f", updated, scale_offset, (scale or 1.0) * fitted_scale)
     old_dx_offset = struct.unpack_from("<I", record, dx_offset_offset)[0]
     if old_dx_offset and replacement_character_count == character_count:
         if old_dx_offset > string_offset:
@@ -295,6 +367,10 @@ def _replace_wmf_text(
     replace_text: Callable[[str], str],
     source_language: str,
     replace_image: Callable[[Image.Image], int] | None,
+    *,
+    document_text_layout: str = "preserve-source-formatting",
+    replacement_provider: TextReplacementProvider | None = None,
+    target_language: str | None = None,
 ) -> VectorReplacementResult:
     header_offset = 22 if data.startswith(_META_PLACEABLE_KEY) else 0
     if len(data) < header_offset + 4:
@@ -311,6 +387,9 @@ def _replace_wmf_text(
     has_editable_text = False
     replaced_image_regions = 0
     has_embedded_bitmaps = False
+    occupied_handles: set[int] = set()
+    font_records: dict[int, bytes] = {}
+    selected_font: int | None = None
     encoding = "cp932" if source_language.lower().replace("_", "-").startswith("ja") else "latin-1"
     while offset < len(data):
         if offset + 6 > len(data):
@@ -320,6 +399,19 @@ def _replace_wmf_text(
         if record_words < 3 or offset + record_size > len(data):
             raise ValueError("Invalid WMF record size.")
         record = data[offset : offset + record_size]
+        if record_function == _META_CREATEFONTINDIRECT:
+            handle = _wmf_next_handle(occupied_handles)
+            occupied_handles.add(handle)
+            font_records[handle] = record
+        elif record_function == _META_SELECTOBJECT and len(record) >= 8:
+            selected = struct.unpack_from("<H", record, 6)[0]
+            selected_font = selected if selected in font_records else None
+        elif record_function == _META_DELETEOBJECT and len(record) >= 8:
+            handle = struct.unpack_from("<H", record, 6)[0]
+            occupied_handles.discard(handle)
+            font_records.pop(handle, None)
+            if selected_font == handle:
+                selected_font = None
         if record_function == _META_TEXTOUT:
             record, changed, editable = _replace_wmf_textout_record(
                 record, replace_text, encoding
@@ -327,11 +419,34 @@ def _replace_wmf_text(
             replaced_items += changed
             has_editable_text = has_editable_text or editable
         elif record_function == _META_EXTTEXTOUT:
-            record, changed, editable = _replace_wmf_exttextout_record(
-                record, replace_text, encoding
+            fitted = _wmf_fitted_exttextout(
+                record, encoding, document_text_layout, replacement_provider,
+                source_language, target_language,
             )
+            clone_handle: int | None = None
+            if fitted is not None and selected_font is not None and selected_font in font_records:
+                replacement, scale = fitted
+                clone = _wmf_scaled_font_record(font_records[selected_font], scale)
+                clone_handle = _wmf_next_handle(occupied_handles)
+                occupied_handles.add(clone_handle)
+                records.append(clone)
+                records.append(_wmf_select_object_record(clone_handle))
+                record, changed, editable = _replace_wmf_exttextout_record(
+                    record, replace_text, encoding, replacement_override=replacement
+                )
+            else:
+                record, changed, editable = _replace_wmf_exttextout_record(
+                    record, replace_text, encoding
+                )
             replaced_items += changed
             has_editable_text = has_editable_text or editable
+            if clone_handle is not None and selected_font is not None:
+                records.append(record)
+                records.append(_wmf_select_object_record(selected_font))
+                records.append(_wmf_delete_object_record(clone_handle))
+                occupied_handles.discard(clone_handle)
+                offset += record_size
+                continue
         elif record_function == _META_STRETCHDIB and replace_image is not None:
             record, replaced_regions, has_bitmap = _replace_wmf_stretchdib_record(record, replace_image)
             replaced_image_regions += replaced_regions
@@ -345,6 +460,62 @@ def _replace_wmf_text(
     if has_editable_text:
         struct.pack_into("<I", result, header_offset + 6, len(result) // 2)
     return VectorReplacementResult(bytes(result), replaced_items, has_editable_text, replaced_image_regions, has_embedded_bitmaps)
+
+
+def _wmf_fitted_exttextout(
+    record: bytes, encoding: str, document_text_layout: str,
+    provider: TextReplacementProvider | None, source_language: str, target_language: str | None,
+) -> tuple[str, float] | None:
+    if (document_text_layout not in {"preserve-basic-layout", "preserve-basic-layout-source-font"}
+            or provider is None or target_language is None or len(record) < 22):
+        return None
+    string_length = struct.unpack_from("<H", record, 10)[0]
+    options = struct.unpack_from("<H", record, 12)[0]
+    if not options & _ETO_CLIPPED:
+        return None
+    left, top, right, bottom = struct.unpack_from("<hhhh", record, 14)
+    width, height = abs(right - left), abs(bottom - top)
+    string_start = 22
+    string_end = string_start + string_length
+    if not width or not height or string_end > len(record):
+        return None
+    source_text = _decode_wmf_text(record[string_start:string_end], encoding)
+    if not source_text.strip():
+        return None
+    from pipeline.bounded_text_layout import (
+        BoundedTextBox, BoundedTextParagraph, BoundedTextRun, noto_typefaces, replace_and_fit_text_box,
+    )
+    box = BoundedTextBox(width * 9_525, height * 9_525, 0, 0, 0, 0, None,
+        (BoundedTextParagraph("left", None, None, None, None, 0, None, None, None, None, None,
+                              (BoundedTextRun(source_text, None, "sans-serif", 12.0, False, False, "none", None),)),))
+    fitted = replace_and_fit_text_box(box, provider, source_language, target_language, noto_typefaces(),
+                                      preserve_source_font_family=True)
+    return fitted.text_box.paragraphs[0].runs[0].text, fitted.font_scale
+
+
+def _wmf_next_handle(occupied: set[int]) -> int:
+    handle = 0
+    while handle in occupied:
+        handle += 1
+    return handle
+
+
+def _wmf_scaled_font_record(record: bytes, scale: float) -> bytes:
+    if len(record) < 10:
+        return record
+    output = bytearray(record)
+    height = struct.unpack_from("<h", output, 6)[0]
+    if height:
+        struct.pack_into("<h", output, 6, max(-32768, min(32767, round(height * scale))))
+    return bytes(output)
+
+
+def _wmf_select_object_record(handle: int) -> bytes:
+    return struct.pack("<IHH", 4, _META_SELECTOBJECT, handle)
+
+
+def _wmf_delete_object_record(handle: int) -> bytes:
+    return struct.pack("<IHH", 4, _META_DELETEOBJECT, handle)
 
 
 def _replace_wmf_stretchdib_record(record: bytes, replace_image: Callable[[Image.Image], int]) -> tuple[bytes, int, bool]:
@@ -405,6 +576,8 @@ def _replace_wmf_exttextout_record(
     record: bytes,
     replace_text: Callable[[str], str],
     encoding: str,
+    *,
+    replacement_override: str | None = None,
 ) -> tuple[bytes, int, bool]:
     if len(record) < 14:
         raise ValueError("Invalid WMF ExtTextOut record.")
@@ -417,7 +590,9 @@ def _replace_wmf_exttextout_record(
     if string_length == 0:
         return record, 0, False
     source_text = _decode_wmf_text(record[string_start:string_end], encoding)
-    replacement_bytes = _encode_wmf_text(replace_text(source_text), encoding)
+    replacement_bytes = _encode_wmf_text(
+        replacement_override if replacement_override is not None else replace_text(source_text), encoding
+    )
     updated = bytearray(record[:string_start])
     updated.extend(replacement_bytes)
     if len(replacement_bytes) % 2:

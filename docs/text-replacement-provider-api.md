@@ -55,9 +55,11 @@ The generic contract test checks only the stable result shape. Each provider mus
 
 The local visual evaluator discovers all of these providers. Each supports every language pair, returns confidence `1.0`, and preserves filename inputs unchanged:
 
+For ordinary text, the masking providers preserve every Unicode whitespace character exactly, as determined by Python `str.isspace()`. This includes spaces with language-specific semantics, such as non-breaking and ideographic spaces, as well as tabs and line breaks. This retains source word-boundary and wrapping behaviour.
+
 | Provider | Ordinary text result |
 |---|---|
 | `identity` | Original text unchanged. |
-| `character_mask` | One `#` per Python character. |
-| `double_character_mask` | Two `#` characters per Python character. |
-| `half_character_mask` | Half as many `#` characters, rounded down, with at least one. |
+| `character_mask` | One `#` per non-whitespace Python character. |
+| `double_character_mask` | Two `#` characters per non-whitespace Python character. |
+| `half_character_mask` | For each contiguous non-whitespace sequence, half as many `#` characters, rounded down, with at least one. |

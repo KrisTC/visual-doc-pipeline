@@ -11,6 +11,7 @@ import unittest
 from PIL import Image
 
 from pipeline.vector_text import replace_vector_text
+from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
 
 
 def _mask(text: str) -> str:
@@ -18,6 +19,23 @@ def _mask(text: str) -> str:
 
 
 class VectorTextReplacerTests(unittest.TestCase):
+    # Verifies FR-2026-08-04-07.
+    def test_fits_svg_text_only_when_an_explicit_clip_rectangle_exists(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return TextReplacementResult("A substantially longer replacement", 1.0)
+
+        result = replace_vector_text(
+            b'''<svg xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="box"><rect width="40" height="20"/></clipPath></defs><text clip-path="url(#box)" font-family="Source Sans" font-size="20">old</text><text font-size="20">free</text></svg>''',
+            ".svg", _mask, "en", document_text_layout="preserve-basic-layout",
+            replacement_provider=_Provider(), target_language="en",
+        )
+
+        self.assertIn(b"A substantially longer replacement", result.data)
+        self.assertIn(b"Noto Sans JP", result.data)
+        self.assertLess(float(result.data.split(b'font-size="')[1].split(b"px")[0]), 20.0)
+        self.assertIn(b"####", result.data)
+
     # Verifies FR-2026-08-03-05.
     def test_replaces_svg_text_and_retains_vector_structure(self) -> None:
         result = replace_vector_text(

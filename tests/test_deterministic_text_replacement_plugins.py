@@ -22,30 +22,29 @@ class DeterministicTextReplacementProviderTests(unittest.TestCase):
         self.assertEqual({}, result.extra)
 
     # Verifies FR-2026-08-02-11.
-    def test_double_character_mask_doubles_python_character_length(self) -> None:
-        input_text = "Héllo 世界"
+    def test_double_character_mask_doubles_non_whitespace_characters(self) -> None:
+        input_text = "Hé\u00a0世界\u3000next\tline\nlast"
 
         result = DoubleCharacterMaskProvider().replace(
             TextReplacementRequest(input_text, False, "ja", "en")
         )
 
-        self.assertEqual("#" * (2 * len(input_text)), result.text)
-        self.assertEqual(2 * len(input_text), len(result.text))
+        self.assertEqual("####\u00a0####\u3000########\t########\n########", result.text)
+        self.assertEqual("\u00a0\u3000\t\n", "".join(char for char in result.text if char.isspace()))
 
     # Verifies FR-2026-08-02-11.
-    def test_half_character_mask_uses_flooring_and_a_minimum_of_one(self) -> None:
-        input_text = "Héllo 世界"
+    def test_half_character_mask_halves_each_word_and_preserves_unicode_whitespace(self) -> None:
+        input_text = "Héllo\u00a0世界\u3000next\tline\nlast"
 
         result = HalfCharacterMaskProvider().replace(
             TextReplacementRequest(input_text, False, "ja", "en")
         )
-        empty_result = HalfCharacterMaskProvider().replace(
-            TextReplacementRequest("", False, "ja", "en")
+        whitespace_only_result = HalfCharacterMaskProvider().replace(
+            TextReplacementRequest(" \u00a0\u3000\t\n", False, "ja", "en")
         )
 
-        self.assertEqual("#" * (len(input_text) // 2), result.text)
-        self.assertEqual(1, len(empty_result.text))
-        self.assertEqual("#", empty_result.text)
+        self.assertEqual("##\u00a0#\u3000##\t##\n##", result.text)
+        self.assertEqual(" \u00a0\u3000\t\n", whitespace_only_result.text)
 
     # Verifies FR-2026-08-02-11.
     def test_providers_preserve_filenames_unchanged(self) -> None:

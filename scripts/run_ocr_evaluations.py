@@ -42,7 +42,7 @@ from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
 from scripts.prepare_ocr_evaluation_inputs import prepare_evaluation_inputs
-from scripts.run_text_replacement_evaluations import _load_default_typeface
+from scripts.run_ocr_text_replacement_evaluations import _load_default_typeface
 
 
 BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
@@ -61,6 +61,7 @@ TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
 TEXT_CLIP_CONTEXT_PIXELS = 20
 TEXT_REPLACEMENT_MINIMUM_CONFIDENCE = 0.65
+EXCLUDED_EVALUATION_PROVIDERS = frozenset({"no_ocr"})
 
 
 @dataclass
@@ -169,7 +170,12 @@ def evaluate_ocr_inputs(
     result = EvaluationRunResult()
     providers_to_run: list[tuple[str, Path]] = []
 
-    for provider_name in provider_factory.provider_names:
+    provider_names = tuple(
+        name
+        for name in provider_factory.provider_names
+        if name not in EXCLUDED_EVALUATION_PROVIDERS
+    )
+    for provider_name in provider_names:
         provider_root = _provider_output_root(output_root, provider_name)
         if _provider_output_is_current(provider_root, checksum):
             result.skipped_providers += 1
@@ -218,7 +224,7 @@ def evaluate_ocr_inputs(
         )
 
     replacement_typeface: skia.Typeface | None = None
-    for provider_name in provider_factory.provider_names:
+    for provider_name in provider_names:
         provider_root = _provider_output_root(output_root, provider_name)
         if _text_replacement_output_is_current(provider_root, checksum):
             continue

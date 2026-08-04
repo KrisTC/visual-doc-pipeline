@@ -2,15 +2,18 @@
 
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
+from pipeline.text_replacement_plugins._masking import half_mask_non_whitespace_sequences
 
 
 class HalfCharacterMaskProvider:
-    """Return at least one hash and otherwise half as many as the ordinary input."""
+    """Halve ordinary non-whitespace sequences while retaining whitespace unchanged."""
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        """Return a minimum-one, half-length hash string while retaining filenames."""
+        """Return half masks while retaining filenames and whitespace unchanged."""
         replacement = (
-            request.text if request.is_filename else "#" * max(1, len(request.text) // 2)
+            request.text
+            if request.is_filename
+            else half_mask_non_whitespace_sequences(request.text)
         )
         return TextReplacementResult(text=replacement, confidence=1.0)
 

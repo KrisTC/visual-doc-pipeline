@@ -10,14 +10,14 @@ from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvid
 
 class CharacterMaskProviderTests(unittest.TestCase):
     # Verifies FR-2026-08-02-06.
-    def test_masks_each_non_filename_character_with_a_hash(self) -> None:
-        input_text = "Héllo 世界"
+    def test_masks_each_non_whitespace_character_and_preserves_unicode_whitespace(self) -> None:
+        input_text = "Héllo\u00a0世界\u3000next\tline\nlast"
 
         result = CharacterMaskProvider().replace(
             TextReplacementRequest(input_text, False, "en", "ja")
         )
 
-        self.assertEqual("#" * len(input_text), result.text)
+        self.assertEqual("#####\u00a0##\u3000####\t####\n####", result.text)
         self.assertEqual(len(input_text), len(result.text))
         self.assertEqual(1.0, result.confidence)
         self.assertEqual({}, result.extra)

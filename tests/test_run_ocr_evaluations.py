@@ -72,6 +72,24 @@ class FakeOcrProvider:
 
 
 class RunOcrEvaluationsTests(unittest.TestCase):
+    # Verifies FR-2026-08-04-02.
+    def test_excludes_the_no_ocr_provider_from_automatic_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            image_path = input_root / "en" / "image.png"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (2, 2), "red").save(image_path)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"no_ocr": lambda: provider})
+
+            result = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            self.assertEqual(0, result.processed_images)
+            self.assertEqual(0, provider.calls)
+            self.assertFalse((output_root / "no_ocr").exists())
+
     # Verifies FR-2026-08-02-05.
     def test_prepares_standard_samples_before_evaluating(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

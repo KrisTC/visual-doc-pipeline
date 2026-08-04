@@ -8,14 +8,26 @@ from io import BytesIO
 from pathlib import Path
 import os
 import sys
-from typing import Protocol
+from typing import Protocol, cast
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from PIL import Image
 # pypdf publishes no PEP 561 metadata for its generic object model.
 from pypdf import PdfReader, PdfWriter
+# pypdf's CMap helper is the library's own decoder for composite PDF fonts.
+from pypdf._cmap import get_encoding
 # These pypdf values cross a dynamic PDF-object boundary.
-from pypdf.generic import ArrayObject, ContentStream, TextStringObject
+from pypdf.generic import (
+    ArrayObject,
+    ByteStringObject,
+    BooleanObject,
+    ContentStream,
+    DecodedStreamObject,
+    DictionaryObject,
+    NameObject,
+    NumberObject,
+    TextStringObject,
+)
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 from tqdm import tqdm
@@ -35,6 +47,14 @@ from pipeline.folder_replacement.bitmap import (
     replace_bitmap_file as _process_bitmap_file,
     replace_image as _process_bitmap_image,
 )
+from pipeline.bounded_text_layout import (
+    BoundedTextBox,
+    BoundedTextParagraph,
+    BoundedTextRun,
+    noto_typefaces,
+    replace_and_fit_text_box,
+)
+from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 
 
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
@@ -82,6 +102,7 @@ def replace_input_folder(
     source_language: str,
     target_language: str,
     typeface: skia.Typeface,
+    document_text_layout: str = "preserve-source-formatting",
     show_progress: bool = True,
     progress_factory: ProgressFactory | None = None,
 ) -> FolderReplacementResult:
@@ -96,6 +117,15 @@ def replace_input_folder(
         raise ValueError("A folder replacement run requires a non-empty source language.")
     if not target_language.strip():
         raise ValueError("A folder replacement run requires a non-empty target language.")
+    if document_text_layout not in {
+        "preserve-source-formatting",
+        "preserve-basic-layout",
+        "preserve-basic-layout-source-font",
+    }:
+        raise ValueError(
+            "Document text layout must be 'preserve-source-formatting', "
+            "'preserve-basic-layout', or 'preserve-basic-layout-source-font'."
+        )
     if not _provider_supports_language(ocr_provider, source_language):
         raise ValueError(
             f"The selected OCR provider does not support source language {source_language!r}."
@@ -161,6 +191,9 @@ def replace_input_folder(
                         target_language,
                         typeface,
                     ),
+                    document_text_layout=document_text_layout,
+                    replacement_provider=text_replacement_provider,
+                    target_language=target_language,
                 )
                 temporary_destination.write_bytes(vector_result.data)
                 result.replaced_native_text_items += vector_result.replaced_text_items
@@ -178,6 +211,7 @@ def replace_input_folder(
                     target_language,
                     typeface,
                     work_completed,
+                    document_text_layout=document_text_layout,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -196,6 +230,7 @@ def replace_input_folder(
                     target_language,
                     typeface,
                     work_completed,
+                    document_text_layout=document_text_layout,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -345,6 +380,9 @@ def _replace_office_file(
     target_language: str,
     typeface: skia.Typeface,
     work_completed: Callable[[str], None],
+    *,
+    replace_native_xml: bool = True,
+    skip_native_xml_part: Callable[[str], bool] | None = None,
 ) -> tuple[int, int, int]:
     native_items = 0
     image_regions = 0
@@ -391,7 +429,11 @@ def _replace_office_file(
                     retained_vectors += 1
                     print(f"Retained vector without editable text: {source}", file=sys.stderr)
                 work_completed(f"vector graphic {vector_graphic_index}")
-            elif entry.filename.endswith(".xml"):
+            elif (
+                replace_native_xml
+                and entry.filename.endswith(".xml")
+                and not (skip_native_xml_part and skip_native_xml_part(entry.filename))
+            ):
                 data, replaced = replace_office_xml_text(
                     data, replacement_provider, source_language, target_language
                 )
@@ -445,6 +487,8 @@ def _replace_pdf_file(
     target_language: str,
     typeface: skia.Typeface,
     work_completed: Callable[[str], None],
+    *,
+    document_text_layout: str = "preserve-source-formatting",
 ) -> tuple[int, int]:
     reader = PdfReader(source)
     writer = PdfWriter()
@@ -460,6 +504,8 @@ def _replace_pdf_file(
             source_language,
             target_language,
             seen_forms,
+            static_font=document_text_layout == "preserve-basic-layout",
+            source_font=document_text_layout == "preserve-basic-layout-source-font",
         )
         native_items += _replace_pdf_annotations(
             page,
@@ -469,6 +515,7 @@ def _replace_pdf_file(
             target_language,
             seen_forms,
             seen_annotations,
+            document_text_layout,
         )
     acro_form = writer._root_object.get("/AcroForm")
     if acro_form is not None:
@@ -480,6 +527,7 @@ def _replace_pdf_file(
             target_language,
             seen_forms,
             seen_annotations,
+            document_text_layout,
         )
     work_completed("native text")
     image_regions = 0
@@ -520,6 +568,7 @@ def _replace_pdf_annotations(
     target_language: str,
     seen_forms: set[int],
     seen_annotations: set[int],
+    document_text_layout: str,
 ) -> int:
     annotations = getattr(page, "get", lambda _key, _default=None: None)("/Annots")
     if annotations is None:
@@ -532,6 +581,12 @@ def _replace_pdf_annotations(
             if identifier in seen_annotations:
                 continue
             seen_annotations.add(identifier)
+        if document_text_layout != "preserve-source-formatting" and annotation.get("/Subtype") == "/FreeText" and _pdf_rect(annotation) is not None:
+            replaced_items += _replace_pdf_bounded_dictionary_text(
+                annotation, "/Contents", replacement_provider, source_language, target_language, writer,
+                embed_noto=document_text_layout == "preserve-basic-layout",
+            )
+            continue
         replaced_items += _replace_pdf_dictionary_text(
             annotation, replacement_provider, source_language, target_language
         )
@@ -556,6 +611,7 @@ def _replace_pdf_form_fields(
     target_language: str,
     seen_forms: set[int],
     seen_annotations: set[int],
+    document_text_layout: str,
 ) -> int:
     get_object = getattr(field, "get_object", None)
     dictionary = get_object() if callable(get_object) else field
@@ -567,9 +623,15 @@ def _replace_pdf_form_fields(
         if identifier in seen_annotations:
             return 0
         seen_annotations.add(identifier)
-    replaced_items = _replace_pdf_dictionary_text(
+    if document_text_layout != "preserve-source-formatting" and _pdf_rect(dictionary) is not None and isinstance(dictionary.get("/V"), TextStringObject):
+        replaced_items = _replace_pdf_bounded_dictionary_text(
+            dictionary, "/V", replacement_provider, source_language, target_language, writer,
+            embed_noto=document_text_layout == "preserve-basic-layout",
+        )
+    else:
+        replaced_items = _replace_pdf_dictionary_text(
         dictionary, replacement_provider, source_language, target_language
-    )
+        )
     appearance = dictionary.get("/AP")
     if appearance is not None:
         replaced_items += _replace_pdf_appearance_streams(
@@ -593,6 +655,7 @@ def _replace_pdf_form_fields(
                 target_language,
                 seen_forms,
                 seen_annotations,
+                document_text_layout,
             )
     return replaced_items
 
@@ -624,6 +687,147 @@ def _replace_pdf_dictionary_text(
         )
         replaced_items += 1
     return replaced_items
+
+
+def _pdf_rect(dictionary: object) -> tuple[float, float] | None:
+    """Return the finite width/height of a widget or FreeText rectangle."""
+    get_value = getattr(dictionary, "get", None)
+    rectangle = get_value("/Rect") if callable(get_value) else None
+    if not isinstance(rectangle, ArrayObject) or len(rectangle) != 4:
+        return None
+    try:
+        left, bottom, right, top = (float(value) for value in rectangle)
+    except (TypeError, ValueError):
+        return None
+    width, height = abs(right - left), abs(top - bottom)
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _replace_pdf_bounded_dictionary_text(
+    dictionary: object,
+    key: str,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    writer: PdfWriter,
+    *,
+    embed_noto: bool,
+) -> int:
+    """Fit a form/FreeText value and make its portable-size setting explicit.
+
+    Page-content text is intentionally excluded: its drawing operators do not
+    identify a stable text rectangle.  Widget viewers use ``/DA`` to generate
+    an appearance when an existing appearance is stale, so we retain its
+    selected source face while supplying the Noto-measured size.
+    """
+    get_value = getattr(dictionary, "get", None)
+    set_value = getattr(dictionary, "__setitem__", None)
+    if not callable(get_value) or not callable(set_value):
+        return 0
+    source_text = get_value(key)
+    bounds = _pdf_rect(dictionary)
+    if not isinstance(source_text, TextStringObject) or bounds is None or not str(source_text).strip():
+        return 0
+    size, face = _pdf_default_appearance(get_value("/DA"))
+    box = BoundedTextBox(
+        round(bounds[0] * 12_700), round(bounds[1] * 12_700), 0, 0, 0, 0, None,
+        (BoundedTextParagraph("left", None, None, None, None, 0, None, None, None, None,
+                              None, (BoundedTextRun(str(source_text), face, "sans-serif", size,
+                                                    False, False, "none", None),)),),
+    )
+    fitted = replace_and_fit_text_box(
+        box, replacement_provider, source_language, target_language, noto_typefaces(),
+        preserve_source_font_family=True,
+    )
+    run = fitted.text_box.paragraphs[0].runs[0]
+    set_value(NameObject(key), TextStringObject(run.text))
+    font_size = run.font_size_points or size
+    if embed_noto:
+        font_name, font_reference = _pdf_embedded_noto_font(writer, "sans-serif", bool(run.bold))
+        set_value(NameObject("/DA"), TextStringObject(f"/{font_name} {font_size:.4f} Tf 0 g"))
+        _pdf_write_appearance(dictionary, font_name, font_reference, run.text, font_size, bounds)
+    else:
+        set_value(NameObject("/DA"), TextStringObject(f"/{face} {font_size:.4f} Tf 0 g"))
+        set_value(NameObject("/AP"), DictionaryObject())
+        set_value(NameObject("/NeedAppearances"), BooleanObject(True))
+    return 1
+
+
+def _pdf_default_appearance(value: object) -> tuple[float, str]:
+    tokens = str(value or "/Helv 12 Tf").split()
+    for index, token in enumerate(tokens):
+        if token == "Tf" and index >= 2:
+            try:
+                return max(0.75, float(tokens[index - 1])), tokens[index - 2].lstrip("/")
+            except ValueError:
+                break
+    return 12.0, "Helv"
+
+
+def _pdf_embedded_noto_font(
+    writer: PdfWriter, classification: str, bold: bool
+) -> tuple[str, object]:
+    """Create an Identity-H Type0 font whose CIDs are static-font glyph IDs."""
+    family, _path = static_noto_font(classification, bold)
+    resource_name = "PipelineNotoBold" if bold else "PipelineNoto"
+    postscript_name = "NotoSansJP-Thin" if classification == "sans-serif" else family.replace(" ", "")
+    cached = getattr(writer, "_pipeline_layout_fonts", None)
+    if cached is None:
+        cached = {}
+        setattr(writer, "_pipeline_layout_fonts", cached)
+    key = (classification, bold)
+    if key in cached:
+        return resource_name, cached[key]
+    font_stream = DecodedStreamObject()
+    font_data = static_noto_bytes(classification, bold)
+    font_stream.set_data(font_data)
+    font_stream.update({NameObject("/Length1"): NumberObject(len(font_data))})
+    descriptor = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/FontDescriptor"),
+        NameObject("/FontName"): NameObject(f"/{postscript_name}"),
+        NameObject("/Flags"): NumberObject(4),
+        NameObject("/FontBBox"): ArrayObject([NumberObject(-1000), NumberObject(-1000), NumberObject(3000), NumberObject(3000)]),
+        NameObject("/ItalicAngle"): NumberObject(0), NameObject("/Ascent"): NumberObject(1000),
+        NameObject("/Descent"): NumberObject(-300), NameObject("/CapHeight"): NumberObject(700),
+        NameObject("/StemV"): NumberObject(80), NameObject("/FontFile2"): writer._add_object(font_stream),
+    }))
+    descendant = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/CIDFontType2"),
+        NameObject("/BaseFont"): NameObject(f"/{postscript_name}"),
+        NameObject("/CIDSystemInfo"): DictionaryObject({NameObject("/Registry"): TextStringObject("Adobe"), NameObject("/Ordering"): TextStringObject("Identity"), NameObject("/Supplement"): NumberObject(0)}),
+        NameObject("/FontDescriptor"): descriptor, NameObject("/CIDToGIDMap"): NameObject("/Identity"),
+        NameObject("/DW"): NumberObject(1000),
+    }))
+    reference = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+        NameObject("/BaseFont"): NameObject(f"/{postscript_name}"), NameObject("/Encoding"): NameObject("/Identity-H"),
+        NameObject("/DescendantFonts"): ArrayObject([descendant]),
+    }))
+    cached[key] = reference
+    return resource_name, reference
+
+
+def _pdf_write_appearance(
+    dictionary: object, font_name: str, font_reference: object, text: str,
+    font_size: float, bounds: tuple[float, float],
+) -> None:
+    """Regenerate a simple clipped appearance with the embedded static face."""
+    face = noto_typefaces()["sans-serif"]
+    glyphs = skia.Font(face).textToGlyphs(text)
+    encoded = "".join(f"{glyph:04X}" for glyph in glyphs)
+    width, height = bounds
+    appearance = DecodedStreamObject()
+    appearance.set_data(
+        f"q 0 0 {width:.4f} {height:.4f} re W n BT /{font_name} {font_size:.4f} Tf 0 g 0 {max(0.0, height - font_size):.4f} Td <{encoded}> Tj ET Q".encode("ascii")
+    )
+    appearance.update({
+        NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Form"),
+        NameObject("/BBox"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(width), NumberObject(height)]),
+        NameObject("/Resources"): DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject(f"/{font_name}"): font_reference})}),
+    })
+    set_value = getattr(dictionary, "__setitem__", None)
+    if callable(set_value):
+        set_value(NameObject("/AP"), DictionaryObject({NameObject("/N"): appearance}))
 
 
 def _replace_pdf_appearance_streams(
@@ -669,6 +873,9 @@ def _replace_pdf_content_text(
     source_language: str,
     target_language: str,
     seen_forms: set[int],
+    *,
+    static_font: bool = False,
+    source_font: bool = False,
 ) -> int:
     get_contents = getattr(content_owner, "get_contents", None)
     replace_contents = getattr(content_owner, "replace_contents", None)
@@ -676,11 +883,22 @@ def _replace_pdf_content_text(
     if contents is None:
         return 0
     content_stream = ContentStream(contents, writer)
+    static_font_name: str | None = None
+    fallback_font_name: str | None = None
+    if static_font:
+        static_font_name, static_font_reference = _pdf_content_fallback_font(writer)
+        _pdf_add_font_resource(content_owner, static_font_name, static_font_reference)
+    elif source_font:
+        fallback_font_name, fallback_font_reference = _pdf_content_fallback_font(writer)
+        _pdf_add_font_resource(content_owner, fallback_font_name, fallback_font_reference)
     replaced_items = _replace_pdf_operations(
         content_stream,
         replacement_provider,
         source_language,
         target_language,
+        _pdf_font_resources(content_owner),
+        static_font_name=static_font_name,
+        fallback_font_name=fallback_font_name,
     )
     if replaced_items:
         if callable(replace_contents):
@@ -713,6 +931,8 @@ def _replace_pdf_content_text(
             source_language,
             target_language,
             seen_forms,
+            static_font=static_font,
+            source_font=source_font,
         )
     return replaced_items
 
@@ -722,9 +942,20 @@ def _replace_pdf_operations(
     replacement_provider: TextReplacementProvider,
     source_language: str,
     target_language: str,
+    font_resources: dict[str, object],
+    *,
+    static_font_name: str | None = None,
+    fallback_font_name: str | None = None,
 ) -> int:
     replaced_items = 0
+    current_font: tuple[object, object] | None = None
+    operations: list[tuple[list[object], bytes]] = []
     for operands, operator in content_stream.operations:
+        if operator == b"Tf" and len(operands) >= 2:
+            current_font = (operands[0], operands[1])
+            operations.append((operands, operator))
+            continue
+        replacement_text: str | None = None
         string_indexes: tuple[int, ...]
         if operator == b"Tj" or operator == b"'":
             string_indexes = (0,)
@@ -732,23 +963,276 @@ def _replace_pdf_operations(
             string_indexes = (2,)
         elif operator == b"TJ":
             if operands and isinstance(operands[0], ArrayObject):
+                replaced_operation = False
+                used_fallback = False
+                replacements: list[tuple[int, str]] = []
                 for index, value in enumerate(operands[0]):
-                    if isinstance(value, TextStringObject):
-                        operands[0][index] = TextStringObject(
-                            _replace_native_text(
-                                str(value), replacement_provider, source_language, target_language
-                            )
+                    text = _pdf_text_operand_value(value, current_font, font_resources)
+                    if text is not None:
+                        replacement = _replace_native_text(text, replacement_provider, source_language, target_language)
+                        if replacement == text:
+                            continue
+                        operand, needs_fallback = _pdf_replacement_text_operand(
+                            replacement,
+                            value,
+                            current_font,
+                            font_resources,
+                            static_font_name,
+                            fallback_font_name,
                         )
+                        operands[0][index] = operand
                         replaced_items += 1
+                        replaced_operation = True
+                        used_fallback = used_fallback or needs_fallback
+                        replacements.append((index, replacement))
+                if used_fallback and fallback_font_name is not None and static_font_name is None:
+                    for index, replacement in replacements:
+                        operands[0][index] = _pdf_text_operand(replacement, fallback_font_name)
+                replacement_text = "" if replaced_operation else None
+            operation_font = static_font_name or (fallback_font_name if used_fallback else None)
+            if replacement_text is not None and operation_font is not None:
+                font_size = current_font[1] if current_font is not None else NumberObject(12)
+                operations.append(([NameObject(f"/{operation_font}"), font_size], b"Tf"))
+                operations.append((operands, operator))
+                if current_font is not None:
+                    operations.append(([current_font[0], current_font[1]], b"Tf"))
+            else:
+                operations.append((operands, operator))
             continue
         else:
+            operations.append((operands, operator))
             continue
+        used_fallback = False
         for index in string_indexes:
-            if index < len(operands) and isinstance(operands[index], TextStringObject):
-                operands[index] = TextStringObject(
-                    _replace_native_text(
-                        str(operands[index]), replacement_provider, source_language, target_language
-                    )
+            if index >= len(operands):
+                continue
+            text = _pdf_text_operand_value(operands[index], current_font, font_resources)
+            if text is not None:
+                replacement = _replace_native_text(text, replacement_provider, source_language, target_language)
+                if replacement == text:
+                    continue
+                operand, needs_fallback = _pdf_replacement_text_operand(
+                    replacement,
+                    operands[index],
+                    current_font,
+                    font_resources,
+                    static_font_name,
+                    fallback_font_name,
                 )
+                operands[index] = operand
                 replaced_items += 1
+                replacement_text = replacement
+                used_fallback = used_fallback or needs_fallback
+        operation_font = static_font_name or (fallback_font_name if replacement_text is not None and used_fallback else None)
+        if replacement_text is not None and operation_font is not None:
+            font_size = current_font[1] if current_font is not None else NumberObject(12)
+            operations.append(([NameObject(f"/{operation_font}"), font_size], b"Tf"))
+            operations.append((operands, operator))
+            if current_font is not None:
+                operations.append(([current_font[0], current_font[1]], b"Tf"))
+        else:
+            operations.append((operands, operator))
+    content_stream.operations = operations
     return replaced_items
+
+
+def _pdf_font_resources(content_owner: object) -> dict[str, object]:
+    """Resolve the font resources usable by one page or Form XObject."""
+    get_value = getattr(content_owner, "get", None)
+    if not callable(get_value):
+        return {}
+    resources = get_value("/Resources")
+    if resources is None:
+        return {}
+    fonts = resources.get_object().get("/Font")
+    if fonts is None:
+        return {}
+    return {
+        str(name): font.get_object()
+        for name, font in fonts.get_object().items()
+    }
+
+
+def _pdf_text_operand_value(
+    value: object,
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+) -> str | None:
+    """Decode a text-show operand, including Type0 glyph bytes with ToUnicode."""
+    if not isinstance(value, (TextStringObject, ByteStringObject)):
+        return None
+    font = _pdf_composite_font(current_font, font_resources)
+    if font is None:
+        return str(value) if isinstance(value, TextStringObject) else None
+    raw = _pdf_operand_bytes(value)
+    if raw is None:
+        return str(value) if isinstance(value, TextStringObject) else None
+    try:
+        return _pdf_decode_composite_bytes(raw, font)
+    except (LookupError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def _pdf_decode_composite_bytes(raw: bytes, font: DictionaryObject) -> str | None:
+    """Decode one Type0 string using its actual ToUnicode code lengths."""
+    cached = getattr(font, "_pipeline_tounicode_bytes", None)
+    if cached is None:
+        _encoding, character_map = get_encoding(font)
+        codes: dict[bytes, str] = {}
+        for character_code, unicode_text in character_map.items():
+            for codec in ("latin-1", "utf-16-be"):
+                try:
+                    encoded = character_code.encode(codec, "surrogatepass")
+                except UnicodeEncodeError:
+                    continue
+                if encoded:
+                    codes.setdefault(encoded, unicode_text)
+        cached = tuple(sorted(codes.items(), key=lambda item: len(item[0]), reverse=True))
+        setattr(font, "_pipeline_tounicode_bytes", cached)
+    result: list[str] = []
+    cursor = 0
+    while cursor < len(raw):
+        match = next(
+            ((code, value) for code, value in cached if raw.startswith(code, cursor)),
+            None,
+        )
+        if match is None:
+            return None
+        code, value = match
+        result.append(value)
+        cursor += len(code)
+    return "".join(result)
+
+
+def _pdf_replacement_text_operand(
+    text: str,
+    source_value: object,
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+    static_font_name: str | None,
+    fallback_font_name: str | None,
+) -> tuple[TextStringObject | ByteStringObject, bool]:
+    """Encode a replacement for its source font, or select the safe fallback."""
+    if static_font_name is not None:
+        return _pdf_text_operand(text, static_font_name), False
+    if (
+        isinstance(source_value, TextStringObject)
+        and _pdf_source_font_supports_text(text, current_font, font_resources)
+    ):
+        # pypdf already serializes ordinary PDF text strings in the source
+        # content syntax. Retain the source face only when its ToUnicode map
+        # confirms that the replacement characters have glyphs in the subset.
+        return _pdf_text_operand(text, None), False
+    if fallback_font_name is not None:
+        # A Type0 font's ToUnicode map is a decoding aid, not a dependable
+        # unicode-to-CID encoder.  Reversing it can select a blank glyph.
+        return _pdf_text_operand(text, fallback_font_name), True
+    return _pdf_text_operand(text, None), False
+
+
+def _pdf_composite_font(
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+) -> DictionaryObject | None:
+    if current_font is None:
+        return None
+    font = font_resources.get(str(current_font[0]))
+    if not isinstance(font, DictionaryObject) or font.get("/Subtype") != "/Type0":
+        return None
+    return font
+
+
+def _pdf_source_font_supports_text(
+    text: str,
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+) -> bool:
+    """Return whether an active simple font can safely show ``text``.
+
+    A subsetted simple font can declare WinAnsi while omitting a glyph such as
+    ``#``. Its ToUnicode map is the available evidence of the subset's glyphs.
+    Composite Type0 fonts have no dependable Unicode-to-CID encoder here.
+    """
+    if current_font is None:
+        return True
+    font = font_resources.get(str(current_font[0]))
+    if not isinstance(font, DictionaryObject):
+        return True
+    if font.get("/Subtype") == "/Type0":
+        return False
+    if font.get("/ToUnicode") is None:
+        return True
+    try:
+        _encoding, character_map = get_encoding(font)
+    except (LookupError, ValueError):
+        return False
+    supported_characters = {
+        character
+        for mapped_text in character_map.values()
+        if isinstance(mapped_text, str)
+        for character in mapped_text
+    }
+    return all(character in supported_characters for character in text)
+
+
+def _pdf_operand_bytes(value: TextStringObject | ByteStringObject) -> bytes | None:
+    if isinstance(value, ByteStringObject):
+        return bytes(value)
+    original_bytes = getattr(value, "original_bytes", None)
+    return bytes(original_bytes) if isinstance(original_bytes, bytes) else None
+
+
+def _pdf_text_operand(text: str, static_font_name: str | None) -> TextStringObject | ByteStringObject:
+    if static_font_name is None:
+        return TextStringObject(text)
+    if static_font_name == "PipelineFallback":
+        return ByteStringObject(text.encode("latin-1", "replace"))
+    return ByteStringObject(_pdf_static_glyph_bytes(text))
+
+
+def _pdf_static_glyph_bytes(text: str) -> bytes:
+    _family, path = static_noto_font("sans-serif", False)
+    typeface = skia.Typeface.MakeFromFile(str(path))
+    if typeface is None:
+        raise RuntimeError("Could not load the committed static Noto Sans face for PDF output.")
+    return b"".join(glyph.to_bytes(2, "big") for glyph in skia.Font(typeface).textToGlyphs(text))
+
+
+def _pdf_add_font_resource(content_owner: object, font_name: str, font_reference: object) -> None:
+    get_value = getattr(content_owner, "get", None)
+    if not callable(get_value):
+        return
+    resources = get_value("/Resources")
+    if resources is None:
+        resources_dictionary = DictionaryObject()
+        set_value = getattr(content_owner, "__setitem__", None)
+        if not callable(set_value):
+            return
+        set_value(NameObject("/Resources"), resources_dictionary)
+    else:
+        resources_dictionary = resources.get_object()
+    fonts = resources_dictionary.get("/Font")
+    if fonts is None:
+        fonts = DictionaryObject()
+        resources_dictionary[NameObject("/Font")] = fonts
+    font_dictionary = fonts.get_object()
+    if isinstance(font_dictionary, DictionaryObject):
+        font_dictionary[NameObject(f"/{font_name}")] = font_reference
+
+
+def _pdf_content_fallback_font(writer: PdfWriter) -> tuple[str, object]:
+    """Return PDF's guaranteed ASCII face for arbitrary unbounded text runs.
+
+    Page-content text has no reliably extractable rectangle or font encoding.
+    The fallback is deliberately limited to the ASCII-safe replacement path
+    (masking and redaction); bounded PDF containers continue to embed Noto.
+    """
+    name = "PipelineFallback"
+    cached = getattr(writer, "_pipeline_content_fallback_font", None)
+    if cached is None:
+        cached = writer._add_object(DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Courier"), NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        }))
+        setattr(writer, "_pipeline_content_fallback_font", cached)
+    return name, cached
