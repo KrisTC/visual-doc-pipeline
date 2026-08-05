@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
+from copy import deepcopy
 from dataclasses import dataclass, replace
 import os
 from pathlib import Path
@@ -68,6 +69,7 @@ _RUN_PROPERTY_CHILD_ORDER = (
     "blipFill",
     "pattFill",
     "grpFill",
+    "ln",
     "effectLst",
     "effectDag",
     "highlight",
@@ -346,14 +348,6 @@ def _replace_slide_text_frames(
         text_shape = cast(_TextShape, shape)
         if not _has_text(text_shape):
             continue
-        if _is_wordart(text_shape):
-            replaced += _replace_text_frame_source_formatting(
-                text_shape.text_frame,
-                replacement,
-                source_language,
-                target_language,
-            )
-            continue
         text_box = _text_box(text_shape, slide_layout)
         fit_box = (
             source_occupied_text_box(text_box, typefaces)
@@ -517,40 +511,6 @@ def _has_text(shape: "_TextShape") -> bool:
 def _has_explicit_no_autofit(text_frame: TextFrame) -> bool:
     """Whether the source, rather than our output, explicitly disables autofit."""
     return text_frame._element.bodyPr.find(qn("a:noAutofit")) is not None
-
-
-def _is_wordart(shape: "_TextShape") -> bool:
-    """Whether fitted rewriting would discard WordArt text styling.
-
-    The bounded-text writer intentionally creates new runs. It cannot safely
-    reproduce DrawingML WordArt transforms or run paint/effect definitions, so
-    these shapes retain source formatting while their text is replaced in place.
-    """
-    text_body = cast(_XmlElement, shape.text_frame._element)
-    body_properties = text_body.find(qn("a:bodyPr"))
-    if body_properties is not None and body_properties.find(qn("a:prstTxWarp")) is not None:
-        return True
-    unsupported_run_properties = {
-        qn("a:noFill"),
-        qn("a:solidFill"),
-        qn("a:gradFill"),
-        qn("a:blipFill"),
-        qn("a:pattFill"),
-        qn("a:grpFill"),
-        qn("a:effectLst"),
-        qn("a:effectDag"),
-        qn("a:highlight"),
-        qn("a:uLnTx"),
-        qn("a:uLn"),
-        qn("a:uFillTx"),
-        qn("a:uFill"),
-    }
-    return any(
-        child.tag in unsupported_run_properties
-        for properties in text_body.iter()
-        if properties.tag in {qn("a:rPr"), qn("a:defRPr"), qn("a:endParaRPr")}
-        for child in properties
-    )
 
 
 def _text_box(shape: "_TextShape", slide_layout: object) -> BoundedTextBox:
@@ -783,6 +743,10 @@ def _write_explicit_text_frame(
 
 
 def _write_paragraph(paragraph: _Paragraph, explicit: BoundedTextParagraph) -> None:
+    source_run_properties = _dominant_source_run_properties(paragraph)
+    source_end_properties = cast(
+        _XmlElement | None, paragraph._p.find(qn("a:endParaRPr"))
+    )
     paragraph_properties = paragraph._p.get_or_add_pPr()
     paragraph_properties.set("lvl", str(explicit.level))
     paragraph_properties.set("algn", _drawing_alignment(explicit.alignment))
@@ -803,13 +767,49 @@ def _write_paragraph(paragraph: _Paragraph, explicit: BoundedTextParagraph) -> N
     for run in explicit.runs:
         destination_run = paragraph.add_run()
         destination_run.text = run.text
-        _write_run_properties(destination_run._r.get_or_add_rPr(), run)
+        destination_properties = destination_run._r.get_or_add_rPr()
+        _copy_xml_properties(destination_properties, source_run_properties)
+        _write_run_properties(destination_properties, run)
     end_properties = paragraph._p.get_or_add_endParaRPr()
     empty_style = explicit.runs[0] if explicit.runs else BoundedTextRun(
         "", "Noto Sans JP", "sans-serif", explicit.empty_line_font_size_points, False, False, "none", 0
     )
+    _copy_xml_properties(end_properties, source_end_properties)
     _write_run_properties(end_properties, empty_style)
     _reorder_children(paragraph_properties, _PARAGRAPH_PROPERTY_CHILD_ORDER)
+
+
+def _dominant_source_run_properties(paragraph: _Paragraph) -> _XmlElement | None:
+    """Return the direct properties of the run selected by the shared core.
+
+    ``replace_and_fit_text_box`` emits one replacement run for a populated
+    paragraph, using its dominant source run. The PPTX writer mirrors that
+    selection so it can retain advanced DrawingML formatting outside the
+    shared metric model.
+    """
+    source_runs = tuple(paragraph.runs)
+    if not source_runs:
+        return None
+    dominant_run = max(
+        source_runs,
+        key=lambda run: sum(not character.isspace() for character in run.text),
+    )
+    return cast(_XmlElement | None, dominant_run._r.find(qn("a:rPr")))
+
+
+def _copy_xml_properties(destination: object, source: _XmlElement | None) -> None:
+    """Clone direct DrawingML properties without retaining source text nodes."""
+    destination_element = cast(_XmlElement, destination)
+    for name in tuple(destination_element.attrib):
+        destination_element.attrib.pop(name)
+    for child in tuple(destination_element):
+        destination_element.remove(child)
+    if source is None:
+        return
+    for name, value in source.attrib.items():
+        destination_element.set(name, value)
+    for child in source:
+        destination_element.append(deepcopy(child))
 
 
 def _write_spacing(
@@ -848,10 +848,6 @@ def _write_bullet(properties: object, paragraph: BoundedTextParagraph) -> None:
 def _write_run_properties(properties: object, run: BoundedTextRun) -> None:
     element = cast("_XmlElement", properties)
     element.set("sz", str(_ooxml_font_size_centipoints(run.font_size_points or 18.0)))
-    element.set("b", "1" if run.bold else "0")
-    element.set("i", "1" if run.italic else "0")
-    element.set("u", _drawing_underline(run.underline))
-    element.set("baseline", str(run.baseline or 0))
     for tag in ("a:latin", "a:ea"):
         child = element.find(qn(tag))
         if child is None:
@@ -893,12 +889,6 @@ def _reorder_children(element: object, order: tuple[str, ...]) -> None:
 
 def _drawing_alignment(value: str | None) -> str:
     return {"left": "l", "center": "ctr", "right": "r", "justify": "just"}.get(value or "left", "l")
-
-
-def _drawing_underline(value: str | None) -> str:
-    return {"single": "sng", "double": "dbl", "none": "none", "false": "none"}.get(
-        value or "none", "none"
-    )
 
 
 def _set_optional_integer(element: object, name: str, value: int | None) -> None:

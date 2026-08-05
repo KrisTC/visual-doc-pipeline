@@ -1483,3 +1483,79 @@ Native-text evaluation may process many presentations and render every eligible 
 ### Notes
 
 PowerPoint temporary lock files remain ineligible and shall not contribute to a progress bar's total. Existing one-line skipped-presentation reporting shall remain visible and later presentations shall continue processing.
+
+---
+
+## FR-2026-08-05-01
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve advanced PPTX text styling during fitted replacement |
+| Owner | |
+| Status | Implemented |
+| Source | User clarification and local output diagnosis |
+| Date Added | 2026-08-05 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-04-06, FR-2026-08-04-11 |
+
+### Description
+
+For editable PowerPoint slide-shape text frames, WordArt shall not be a special
+text-container category. An editable `p:sp` text frame with DrawingML text
+effects, fills, outlines, or an `a:prstTxWarp` preset text transform shall use
+the same bounded-text eligibility, extraction, replacement, fitting, and
+writing path as every other editable slide-shape text frame. The presence of
+one of those properties shall not cause a fallback to
+`preserve-source-formatting`.
+
+In `preserve-source-formatting`, the existing direct OOXML text replacement
+shall continue to retain all source text styling. In either fitted layout mode,
+the PPTX writer shall preserve the dominant source run's advanced direct
+formatting when it writes the one replacement run for a non-empty paragraph.
+It shall retain all compatible `a:rPr` and `a:endParaRPr` attributes and child
+elements, including text fill, outline, effects, highlight, underline paint,
+language, and hyperlinks, except where an explicitly fitted property replaces
+the source value. It shall also retain the shape and text-body's existing
+non-text styling and transform markup, including `p:spPr`, `a:bodyPr`, and
+`a:prstTxWarp`.
+
+The fitted rewrite may change the replacement text, the explicit fitted font
+size, the written Latin and East-Asian typeface references, and the existing
+required explicit text-frame layout settings such as disabled autofit. In
+`preserve-basic-layout`, it shall write the selected Noto typeface references.
+In `preserve-basic-layout-source-font`, it shall retain resolved source
+typeface references where available. Both modes shall retain the same
+Noto-based deterministic measurement and fitting calculation.
+
+Advanced text styling may alter the visual occupied bounds or make the fitted
+output appear imperfect. This is an accepted best-effort limitation; it is not
+a reason to bypass fitting. A PPTX text frame may fall back to direct
+source-formatting replacement only when it has no finite reliable text
+rectangle or cannot be safely rewritten while retaining package validity.
+
+This requirement supersedes FR-2026-08-04-11 only where that requirement
+treats WordArt as a separate container or permits fallback because of WordArt
+styling. The SmartArt requirements remain unchanged: the handler shall
+continue to replace canonical reachable diagram-data text, rather than fitting
+or rewriting generated SmartArt drawing shapes.
+
+### Rationale
+
+Modern PowerPoint WordArt uses ordinary editable DrawingML text with presets
+and styling. Treating those properties as an unsupported container excludes
+many ordinary coloured or styled text boxes from the fitted modes and makes
+`preserve-basic-layout` unexpectedly retain source fonts. Retaining advanced
+styling while changing only the fitted typography preserves more of the
+presentation design and keeps the two fitted modes distinguishable. Exact
+visual metric equivalence is not required because the output remains editable.
+
+### Notes
+
+Automated tests shall use synthetic PPTX files only. They shall verify that
+ordinary coloured text and text with `a:prstTxWarp`, fill, outline, shadow or
+other effects, highlight, underline paint, language, and hyperlink markup are
+fitted in both fitted modes while retaining that markup and the shape geometry.
+They shall verify that basic layout writes Noto faces, source-font layout
+retains the resolved source faces, and both modes produce the same replacement
+text, fitting scale, and explicit autofit result. Existing SmartArt tests shall
+continue to verify canonical diagram-data replacement exactly once without
+rewriting generated diagram shapes. Tests must use synthetic data only.

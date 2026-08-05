@@ -20,6 +20,7 @@ from openpyxl.worksheet.table import Table
 from pptx import Presentation
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE
 from pptx.oxml import parse_xml
+from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 # pypdf does not publish PEP 561 metadata for its generic object model.
 from pypdf import PdfReader, PdfWriter
@@ -330,7 +331,7 @@ class FolderReplacementTests(unittest.TestCase):
             self._assert_valid_drawingml_font_sizes(slide_xml)
             self._assert_drawingml_paragraph_property_order(slide_xml)
 
-    # Verifies FR-2026-08-04-11.
+    # Verifies FR-2026-08-04-11 and FR-2026-08-05-01.
     def test_pptx_replaces_reachable_smartart_data_and_editable_wordart(self) -> None:
         for layout_mode in (
             "preserve-source-formatting",
@@ -348,6 +349,8 @@ class FolderReplacementTests(unittest.TestCase):
                 wordart = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1))
                 wordart.name = "editable-wordart"
                 wordart.text = "WordArt source"
+                wordart.text_frame.paragraphs[0].runs[0].font.name = "Source WordArt Font"
+                wordart.text_frame.paragraphs[0].runs[0].font.size = Pt(24)
                 wordart.text_frame._element.bodyPr.set("anchor", "ctr")
                 wordart.text_frame._element.bodyPr.append(
                     parse_xml(
@@ -369,6 +372,38 @@ class FolderReplacementTests(unittest.TestCase):
                         "</a:effectLst>"
                     )
                 )
+                coloured_text = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(4), Inches(1))
+                coloured_text.name = "coloured-text"
+                coloured_text.text = "Coloured source"
+                coloured_run = coloured_text.text_frame.paragraphs[0].runs[0]
+                coloured_run.font.name = "Source Coloured Font"
+                coloured_run.font.size = Pt(24)
+                coloured_run.hyperlink.address = "https://example.invalid"
+                run_properties = coloured_run._r.get_or_add_rPr()
+                for markup in (
+                    '<a:solidFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                    '<a:srgbClr val="112233"/></a:solidFill>',
+                    '<a:ln xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" w="12700">'
+                    '<a:solidFill><a:srgbClr val="445566"/></a:solidFill></a:ln>',
+                    '<a:effectLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                    '<a:outerShdw blurRad="40000" dist="20000" dir="5400000"/></a:effectLst>',
+                    '<a:highlight xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                    '<a:srgbClr val="778899"/></a:highlight>',
+                    '<a:uLn xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                    '<a:solidFill><a:srgbClr val="AABBCC"/></a:solidFill></a:uLn>',
+                    '<a:uFill xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                    '<a:solidFill><a:srgbClr val="DDEEFF"/></a:solidFill></a:uFill>',
+                ):
+                    run_properties.append(parse_xml(markup))
+                run_properties.set("lang", "en-GB")
+                end_properties = coloured_text.text_frame.paragraphs[0]._p.get_or_add_endParaRPr()
+                end_properties.set("lang", "en-GB")
+                end_properties.append(
+                    parse_xml(
+                        '<a:highlight xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                        '<a:srgbClr val="AABBCC"/></a:highlight>'
+                    )
+                )
                 presentation.save(str(source))
                 self._add_reachable_smartart_data_part(source)
 
@@ -382,11 +417,12 @@ class FolderReplacementTests(unittest.TestCase):
                 )
 
                 self.assertEqual(1, result.processed_files)
-                self.assertGreaterEqual(result.replaced_native_text_items, 3)
+                self.assertGreaterEqual(result.replaced_native_text_items, 4)
                 requested_texts = [request.text for request in provider.requests]
                 self.assertEqual(1, requested_texts.count("SmartArt first"))
                 self.assertEqual(1, requested_texts.count("SmartArt second"))
                 self.assertEqual(1, requested_texts.count("WordArt source"))
+                self.assertEqual(1, requested_texts.count("Coloured source"))
                 output = output_root / "deck.pptx"
                 loaded = Presentation(str(output))
                 output_wordart = next(
@@ -394,7 +430,39 @@ class FolderReplacementTests(unittest.TestCase):
                     for shape in loaded.slides[0].shapes
                     if shape.name == "editable-wordart"
                 )
+                output_coloured_text = next(
+                    shape
+                    for shape in loaded.slides[0].shapes
+                    if shape.name == "coloured-text"
+                )
                 self.assertEqual("Replaced", output_wordart.text)
+                self.assertEqual("Replaced", output_coloured_text.text)
+                expected_wordart_font = (
+                    "Noto Sans JP"
+                    if layout_mode == "preserve-basic-layout"
+                    else "Source WordArt Font"
+                )
+                expected_coloured_font = (
+                    "Noto Sans JP"
+                    if layout_mode == "preserve-basic-layout"
+                    else "Source Coloured Font"
+                )
+                self.assertEqual(
+                    expected_wordart_font,
+                    output_wordart.text_frame.paragraphs[0].runs[0].font.name,
+                )
+                self.assertEqual(
+                    expected_coloured_font,
+                    output_coloured_text.text_frame.paragraphs[0].runs[0].font.name,
+                )
+                if layout_mode != "preserve-source-formatting":
+                    self.assertEqual(MSO_AUTO_SIZE.NONE, output_wordart.text_frame.auto_size)
+                    self.assertEqual(MSO_AUTO_SIZE.NONE, output_coloured_text.text_frame.auto_size)
+                output_end_properties = (
+                    output_coloured_text.text_frame.paragraphs[0]._p.endParaRPr
+                )
+                self.assertIsNotNone(output_end_properties.find(qn("a:highlight")))
+                self.assertEqual("en-GB", output_end_properties.get("lang"))
                 with ZipFile(output) as archive:
                     smartart_data = archive.read("ppt/diagrams/data1.xml")
                     slide_xml = archive.read("ppt/slides/slide1.xml")
@@ -405,6 +473,17 @@ class FolderReplacementTests(unittest.TestCase):
                 self.assertIn(b"prstTxWarp", slide_xml)
                 self.assertIn(b"pattFill", slide_xml)
                 self.assertIn(b'anchor="ctr"', slide_xml)
+                for expected_markup in (
+                    b"solidFill",
+                    b"ln w=\"12700\"",
+                    b"effectLst",
+                    b"highlight",
+                    b"uLn",
+                    b"uFill",
+                    b'lang="en-GB"',
+                    b"hlinkClick",
+                ):
+                    self.assertIn(expected_markup, slide_xml)
 
     # Verifies FR-2026-08-04-05.
     def test_pptx_no_autofit_uses_source_width_and_natural_height(self) -> None:
