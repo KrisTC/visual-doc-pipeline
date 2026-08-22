@@ -1590,3 +1590,146 @@ retains the resolved source faces, and both modes produce the same replacement
 text, fitting scale, and explicit autofit result. Existing SmartArt tests shall
 continue to verify canonical diagram-data replacement exactly once without
 rewriting generated diagram shapes. Tests must use synthetic data only.
+
+---
+
+## FR-2026-08-22-01
+
+| Property | Value |
+|----------|-------|
+| Title | Run repeatable preset folder-replacement development scenarios |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-04-02, FR-2026-08-04-03, FR-2026-08-04-06, FR-2026-08-04-07 |
+
+### Description
+
+The project shall provide a separate development-only command that runs
+repeatable visible-text-replacement scenarios over sample-data language
+folders. It shall be a command-line wrapper around
+`scripts/run_folder_replacement.py`; it shall construct and invoke that
+command once for each scenario, and shall not invoke the folder-processing API
+directly. It shall not change the command-line contract or generic input/output
+behaviour of `scripts/run_folder_replacement.py`.
+
+The command shall be named `scripts/run_development_folder_replacement.py`.
+It shall accept one `SOURCE_FOLDER` positional argument that is relative to
+`sample-data/`, is neither absolute nor escaping, and ends in a BCP 47
+language-directory name. It shall derive the source-language option from that
+final directory name. This permits multiple sample-data use-case hierarchies
+without accepting arbitrary source or output paths. Its `--help` output shall
+describe the source-selection rule and every supported option.
+
+The command shall expose text-replacement provider, OCR provider,
+document-text-layout mode, and target-language options directly; it shall not
+define presets. A selected option shall accept one value or a comma-separated
+collection of values. The literal value `all` shall expand to every discovered
+text-replacement provider or OCR provider, and to every defined
+document-text-layout mode. The target-language option shall accept exactly one
+BCP 47 value and shall default to `en`; it shall not accept comma-separated
+values or `all`. When one or more expandable options select multiple values,
+the command shall run their Cartesian product, producing one separately
+identifiable scenario for every combination.
+
+For an input selected as `SOURCE_FOLDER` and a target language `TARGET`, the
+command shall write outputs below
+`outputs/evaluations/folder-replacement-development/`, preserving the parent
+path of `SOURCE_FOLDER` relative to `sample-data/` and using a
+`SOURCE_LANGUAGE-TARGET` directory in place of the source-language leaf. It
+shall create one `vN` revision directory below that root, where `N` is the next
+positive integer not already allocated there. All scenario combinations for one
+invocation and one source/target-language root shall share that revision.
+Every generated scenario output shall identify its effective option values in
+its directory hierarchy or another immediately adjacent, human-readable
+artifact, so visual review can unambiguously associate each output with its
+replacement provider, OCR provider, layout mode, target language, and inferred
+source language. Each scenario shall be stored below its revision directory in
+a deterministic option hierarchy that identifies its text-replacement provider,
+OCR provider, and document-text-layout mode, followed by the source file's path
+relative to `SOURCE_FOLDER`. The revision directory shall contain a
+`manifest.json` file that records the complete effective invocation, every
+scenario combination, and an optional user comment. The command shall accept an
+optional `--comment` value and record it in that manifest without using it in a
+directory or file name.
+
+The command shall validate the selected source folder and option values before
+processing. It shall retain the main pipeline's provider validation, per-file
+failure isolation, and exit-status semantics. It shall preserve the repository's
+confidential-sample-data boundary:
+confidential source data and derived results shall remain local evaluation
+artifacts and shall not be copied into committed code, tests, fixtures,
+documentation, examples, prompts, logs, issue descriptions, or commit
+messages. This requirement supersedes the local-provider restriction in
+FR-2026-08-03-03 only for this development command: it may invoke every
+discovered provider, including a cloud-backed provider. The user is responsible
+for selecting and using providers and associated accounts that are approved for
+the selected documents.
+
+Automated tests shall use synthetic temporary sample-data and output trees only.
+They shall verify inferred source language, output-tree mirroring, preset
+absence, comma-separated selected-value collections, per-option all-options
+expansion, Cartesian-product scenario creation, non-overwriting revision
+allocation, effective-configuration identification, manifest content and
+optional comments, validation failures, and delegation to the established
+folder-replacement command. Tests shall not use sample data.
+
+### Rationale
+
+Repeatedly entering long folder-replacement commands makes it difficult to run
+consistent before-and-after comparisons while pipeline behaviour changes. A
+bounded development runner makes the common sample-data scenarios concise,
+repeatable, and easy to review across languages and option combinations while
+leaving the general-purpose pipeline command unchanged.
+
+### Notes
+
+This is a development and manual-review tool. Its outputs are local generated
+artifacts and shall remain ignored by Git. It does not alter the existing
+folder-replacement command, its defaults, or its supported arbitrary-folder
+workflow.
+
+---
+
+## FR-2026-08-22-02
+
+| Property | Value |
+|----------|-------|
+| Title | Filter folder-replacement input files by glob pattern |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-22-01 |
+
+### Description
+
+The general folder-replacement command and development folder-replacement
+command shall each accept an optional repeatable `--include PATTERN` option to
+restrict processing to selected source files. Each option value shall accept a
+single glob pattern or a comma-separated collection of glob patterns.
+
+Patterns shall match source file paths relative to the command's selected input
+folder. A supported file shall be processed when it matches at least one
+include pattern. When no `--include` option is supplied, the commands shall
+retain their current behaviour and process every supported file. Files that do
+not match an include pattern shall be skipped without generating output.
+
+If no supported source files match the include patterns, the command shall
+complete successfully with zero processed files.
+
+### Rationale
+
+Development and diagnosis often need to focus on one document type or a small
+set of files. Glob-based inclusion avoids repeatedly processing unrelated
+documents while retaining the general recursive-folder workflow.
+
+### Notes
+
+The development command shall pass its selected include patterns to every
+underlying folder-replacement scenario. Its manifest shall record the effective
+include patterns. Automated tests shall use synthetic input trees and verify
+single patterns, comma-separated and repeated patterns, relative-path matching,
+unchanged no-filter behaviour, excluded-output absence, and successful
+zero-match runs.

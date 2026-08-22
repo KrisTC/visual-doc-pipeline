@@ -28,7 +28,11 @@ from pypdf.generic import ArrayObject, ContentStream, DecodedStreamObject, Dicti
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
-from pipeline.folder_replacement import FolderReplacementResult, replace_input_folder
+from pipeline.folder_replacement import (
+    FolderReplacementResult,
+    parse_include_patterns,
+    replace_input_folder,
+)
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.bounded_text_layout import noto_typefaces
@@ -114,6 +118,58 @@ class _RecordedProgress:
 
 
 class FolderReplacementTests(unittest.TestCase):
+    # Verifies FR-2026-08-22-02.
+    def test_include_patterns_select_relative_supported_paths(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            selected_directory = input_root / "selected"
+            selected_directory.mkdir(parents=True)
+            self._write_png(selected_directory / "keep.png")
+            self._write_png(input_root / "skip.png")
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                include_patterns=("selected/*.png",),
+            )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(1, result.ignored_files)
+            self.assertTrue((output_root / "selected" / "keep.png").is_file())
+            self.assertFalse((output_root / "skip.png").exists())
+
+    # Verifies FR-2026-08-22-02.
+    def test_include_patterns_allow_comma_separated_repeated_values_and_zero_matches(self) -> None:
+        self.assertEqual(
+            ("*.png", "nested/*.pdf", "*.docx"),
+            parse_include_patterns(("*.png,nested/*.pdf", "*.docx")),
+        )
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            parse_include_patterns(("*.png,",))
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            self._write_png(input_root / "source.png")
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                include_patterns=("*.pdf",),
+            )
+
+            self.assertEqual(0, result.processed_files)
+            self.assertEqual(1, result.ignored_files)
+            self.assertFalse(output_root.exists())
+
     # Verifies FR-2026-08-04-07.
     def test_xlsx_drawing_layout_writes_schema_ordered_run_properties(self) -> None:
         drawing = b'''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:sp><xdr:spPr><a:xfrm><a:ext cx="914400" cy="457200"/></a:xfrm></xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"><a:latin typeface="Source Sans"/></a:rPr><a:t>Original</a:t></a:r><a:endParaRPr/></a:p></xdr:txBody></xdr:sp></xdr:wsDr>'''
@@ -1326,6 +1382,7 @@ class FolderReplacementTests(unittest.TestCase):
         show_progress: bool = False,
         progress_factory: ProgressFactory | None = None,
         document_text_layout: str = "preserve-source-formatting",
+        include_patterns: tuple[str, ...] = (),
     ) -> FolderReplacementResult:
         typeface = skia.Typeface.MakeFromFile(str(FONT_PATH))
         if typeface is None:
@@ -1339,6 +1396,7 @@ class FolderReplacementTests(unittest.TestCase):
             target_language="en",
             typeface=typeface,
             document_text_layout=document_text_layout,
+            include_patterns=include_patterns,
             show_progress=show_progress,
             progress_factory=progress_factory,
         )

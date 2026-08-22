@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
-from pipeline.folder_replacement import replace_input_folder
+from pipeline.folder_replacement import parse_include_patterns, replace_input_folder
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr import OcrProvider, OcrProviderFactory
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
@@ -109,6 +109,13 @@ def _argument_parser() -> argparse.ArgumentParser:
         metavar="LAYOUT",
         default=DEFAULT_DOCUMENT_TEXT_LAYOUT,
         help="Layout mode; see below.",
+    )
+    command_options.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Include matching relative source paths; may repeat or use commas.",
     )
 
     parser.add_argument_group(
@@ -218,6 +225,7 @@ def main() -> int:
     parser = _argument_parser()
     arguments = parser.parse_args()
     _validate_roots(arguments, parser)
+    include_patterns = _parse_include_patterns(arguments.include, parser)
     ocr_provider = _create_ocr_provider(arguments.ocr, parser)
     replacement_provider = _create_text_replacement_provider(arguments.text_replacement, parser)
     result = replace_input_folder(
@@ -229,6 +237,7 @@ def main() -> int:
         target_language=arguments.target_language,
         typeface=_load_default_typeface(),
         document_text_layout=arguments.document_text_layout,
+        include_patterns=include_patterns,
     )
     print(
         "Folder replacement complete: "
@@ -254,6 +263,17 @@ def _validate_roots(arguments: argparse.Namespace, parser: argparse.ArgumentPars
     resolved_output = output_folder.resolve()
     if resolved_output == resolved_input or resolved_output.is_relative_to(resolved_input):
         parser.error("Output folder must not be the input folder or a directory below it.")
+
+
+def _parse_include_patterns(
+    option_values: list[str], parser: argparse.ArgumentParser
+) -> tuple[str, ...]:
+    """Parse and validate repeated command-line include-pattern values."""
+    try:
+        return parse_include_patterns(option_values)
+    except ValueError as error:
+        parser.error(str(error))
+        raise AssertionError("argparse.error exits the process")
 
 
 def _create_ocr_provider(name: str, parser: argparse.ArgumentParser) -> OcrProvider:

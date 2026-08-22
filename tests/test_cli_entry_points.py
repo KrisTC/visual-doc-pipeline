@@ -42,6 +42,10 @@ class CliEntryPointTests(unittest.TestCase):
     def test_folder_replacement_help_runs_as_a_direct_script(self) -> None:
         self._assert_help_succeeds("run_folder_replacement.py")
 
+    # Verifies FR-2026-08-22-01.
+    def test_development_folder_replacement_help_runs_as_a_direct_script(self) -> None:
+        self._assert_help_succeeds("run_development_folder_replacement.py")
+
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_lists_plugin_choices_and_defaults(self) -> None:
         completed_process = self._run_help("run_folder_replacement.py")
@@ -154,6 +158,30 @@ class CliEntryPointTests(unittest.TestCase):
                 document_xml = archive.read("word/document.xml").decode("utf-8")
             self.assertIn("####", document_xml)
             self.assertIn("0 OCR image region(s)", completed_process.stdout)
+
+    # Verifies FR-2026-08-22-02.
+    def test_folder_replacement_include_option_filters_source_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_folder = root / "input"
+            output_folder = root / "output"
+            input_folder.mkdir()
+            Image.new("RGB", (4, 3), "red").save(input_folder / "source.png")
+            (input_folder / "skip.docx").write_bytes(b"not selected")
+
+            completed_process = self._run_folder_replacement(
+                input_folder,
+                output_folder,
+                "--ocr",
+                "no_ocr",
+                "--include",
+                "*.png",
+            )
+
+            self.assertEqual(0, completed_process.returncode, completed_process.stderr)
+            self.assertTrue((output_folder / "source.png").is_file())
+            self.assertFalse((output_folder / "skip.docx").exists())
+            self.assertIn("1 processed, 1 ignored, 0 failed", completed_process.stdout)
 
     # Verifies FR-2026-08-04-03.
     def test_folder_replacement_reports_anticipated_argument_errors_without_tracebacks(self) -> None:

@@ -47,6 +47,7 @@ from pipeline.folder_replacement.bitmap import (
     replace_bitmap_file as _process_bitmap_file,
     replace_image as _process_bitmap_image,
 )
+from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
@@ -103,6 +104,7 @@ def replace_input_folder(
     target_language: str,
     typeface: skia.Typeface,
     document_text_layout: str = "preserve-source-formatting",
+    include_patterns: tuple[str, ...] = (),
     show_progress: bool = True,
     progress_factory: ProgressFactory | None = None,
 ) -> FolderReplacementResult:
@@ -140,8 +142,11 @@ def replace_input_folder(
         if extension not in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS:
             result.ignored_files += 1
             continue
+        relative_source_path = source_path.relative_to(input_root)
+        if not matches_include_patterns(relative_source_path, include_patterns):
+            result.ignored_files += 1
+            continue
         try:
-            relative_source_path = source_path.relative_to(input_root)
             print(f"Processing: {relative_source_path}")
             if show_progress:
                 make_progress = progress_factory or _make_progress_bar
