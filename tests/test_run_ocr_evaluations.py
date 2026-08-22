@@ -283,7 +283,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 "collection/en/nested/success.png.text-replacements/provider-0001.png"
             )
             self.assertIn(
-                f'<option value="{first_preview_path}">character_mask</option>',
+                f'<option value="{first_preview_path}">argos_translate</option>',
                 replacement_viewer,
             )
             self.assertIn(

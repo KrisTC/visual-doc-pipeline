@@ -90,21 +90,27 @@ The initial document libraries are `pypdf` (PDF), `python-pptx` (PowerPoint), `p
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
-| Related Requirements | FR-2026-08-01-01 |
+| Related Requirements | FR-2026-08-01-01, TR-2026-08-01-01 |
 
 ### Description
 
-The project shall store automated tests in a top-level `tests/` directory. It shall provide an executable Bash script at `scripts/run-tests.sh` that discovers and runs the complete test suite.
+The project shall store automated tests in a top-level `tests/` directory. It shall provide platform test runners that discover and run the complete test suite:
+
+- an executable Bash script at `scripts/run-tests.sh` for macOS and Linux
+- a PowerShell script at `scripts/run-tests.ps1` for Windows
+
+Both runners shall invoke the same test discovery command and shall be runnable from the repository root after the environment has been synchronised with uv.
 
 ### Rationale
 
-A single test location and test command make regression checks easy to find and run consistently.
+A single test location and equivalent per-platform test commands make regression checks easy to find and run consistently on macOS, Linux, and Windows.
 
 ### Notes
 
-The runner shall use the project's synchronised virtual environment and Python's standard-library `unittest` discovery.
+Both runners shall use uv to execute Python from the project's synchronised environment (`uv run`) and Python's standard-library `unittest` discovery against `tests/` with the pattern `test_*.py`. They shall exit with the underlying test-process exit code. Direct hard-coded paths into `.venv/bin` or `.venv/Scripts` shall not be required by the runners, so the same approach works across platforms.
 
 ---
+
 
 ## TR-2026-08-01-04
 

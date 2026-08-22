@@ -5,6 +5,9 @@ sample-data/confidential/*
 outputs/results/*
 outputs/evaluations/*
 
+# Resumable reviewed dependency-artifact downloads
+.dependency-artifact-cache/
+
 # Python
 .venv/
 __pycache__/

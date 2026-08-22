@@ -1,0 +1,19 @@
+# Locally reviewed non-default-registry wheel artifacts.
+
+[[artifact]]
+requirement = "SR-2026-08-21-01"
+distribution = "paddlepaddle-gpu"
+version = "3.3.1"
+url = "https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp313-cp313-linux_x86_64.whl"
+sha256 = "d3116dac42e3bfa024aed3a4f8344dd46df28695d7b35ce5ffff964a50d21aed"
+size = 2021397999
+wheel_tags = "cp313-cp313-linux_x86_64"
+
+[[artifact]]
+requirement = "SR-2026-08-21-01"
+distribution = "paddlepaddle-gpu"
+version = "3.3.1"
+url = "https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.3.1-cp313-cp313-win_amd64.whl"
+sha256 = "dbcbe299e8af3c8b45bede6eff58f473dec5cb333ebefda5d5ac7dc0ebb78fdd"
+size = 579382278
+wheel_tags = "cp313-cp313-win_amd64"

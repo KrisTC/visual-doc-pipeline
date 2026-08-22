@@ -119,6 +119,37 @@ For every non-skipped rotated case, the contract test shall verify that the prov
 
 ---
 
+## FR-2026-08-21-01
+
+| Property | Value |
+|----------|-------|
+| Title | PaddleOCR Windows and accelerator runtime support |
+| Owner | |
+| Status | Implemented |
+| Source | User request following Windows PaddleOCR runtime failure |
+| Date Added | 2026-08-21 |
+| Related Requirements | FR-2026-08-01-02, TR-2026-08-01-01, SR-2026-08-01-01, SR-2026-08-21-01 |
+
+### Description
+
+The PaddleOCR provider shall select its execution device automatically after PaddleOCR has initialized. It shall use NVIDIA GPU 0 when the installed PaddlePaddle runtime is CUDA-enabled and reports an available GPU; otherwise it shall use CPU. GPU acceleration is an opportunistic performance improvement, not a separately guaranteed CI target.
+
+When automatic-engine initialization or inference fails, the provider shall retry the request once with an explicit CPU engine. A failure from that CPU retry shall raise `OcrProviderError` without further fallback.
+
+On Windows CPU inference, the provider shall disable PaddleOCR's OneDNN/MKLDNN execution path and use Paddle's ordinary CPU execution mode. This workaround shall not apply to GPU inference or non-Windows CPU inference.
+
+### Rationale
+
+PaddleOCR documents NVIDIA GPU acceleration and the project now provides a Windows test runner. The pinned Windows CPU runtime fails in OneDNN execution, while the same test input succeeds with OneDNN disabled. Automatic GPU selection preserves available performance improvements without making GPU hardware mandatory.
+
+### Notes
+
+The provider shall not add a device-selection command-line option in this feature. Its automatic GPU choice depends on the PaddlePaddle distribution and the locally installed NVIDIA driver and CUDA runtime. The current CPU-only environment remains valid and shall select CPU. A CUDA-enabled PaddlePaddle distribution may be adopted only when it can comply with the repository's uv lockfile, PyPI-only, no-source-build, and dependency-cooldown policies. The provider shall not import PaddlePaddle separately to probe device availability before PaddleOCR initializes.
+
+Automated tests shall mock Paddle runtime availability and engine behavior to verify device selection, the Windows CPU OneDNN setting, and the single GPU-to-CPU fallback without requiring CUDA hardware. GPU inference verification remains an optional local check on compatible hardware.
+
+---
+
 ## FR-2026-08-01-03
 
 | Property | Value |

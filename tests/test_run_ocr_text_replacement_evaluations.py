@@ -48,7 +48,8 @@ class TextReplacementEvaluationTests(unittest.TestCase):
                 "table { background: white; border-collapse: collapse; width: auto; }", page
             )
             self.assertIn(
-                "<th>Region</th><th>Original text image</th><th>character_mask</th>"
+                "<th>Region</th><th>Original text image</th><th>argos_translate</th>"
+                "<th>character_mask</th>"
                 "<th>double_character_mask</th><th>half_character_mask</th><th>identity</th>",
                 page,
             )

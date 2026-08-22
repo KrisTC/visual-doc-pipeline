@@ -9,7 +9,8 @@ dependencies = [
     "numpy",
     "openpyxl",
     "paddleocr==3.7.0",
-    "paddlepaddle==3.3.1",
+    "paddlepaddle==3.3.1; sys_platform != 'win32'",
+    "paddlepaddle-gpu==3.3.1; sys_platform == 'win32'",
     "pillow",
     "pypdf",
     "python-docx",
@@ -28,8 +29,16 @@ dev = [
 [tool.uv]
 exclude-newer = "7 days"
 no-build = true
-no-sources = true
 package = false
+
+[tool.uv.sources]
+paddlepaddle-gpu = { index = "paddle-cu126" }
+
+[[tool.uv.index]]
+name = "paddle-cu126"
+url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+explicit = true
+exclude-newer = false
 
 [[tool.uv.index]]
 name = "pypi"

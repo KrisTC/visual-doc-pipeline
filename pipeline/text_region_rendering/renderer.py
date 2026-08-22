@@ -191,6 +191,8 @@ def replace_text_regions(
     """
     _validate_image(image)
     _validate_target_language(target_language)
+    if not replacements:
+        return
     _draw_on_image(
         image,
         lambda canvas: _replace_text_regions_on_canvas(canvas, replacements, typeface),
