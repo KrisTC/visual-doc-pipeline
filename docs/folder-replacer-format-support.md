@@ -62,6 +62,16 @@ Office documents are processed as packages rather than flat files. Visible Wordp
 
 PDF processing includes page content and reusable Form XObjects, annotation and AcroForm values and appearance streams, and raster image XObjects, including those within Form XObjects. A PDF with an inline image that cannot safely be rewritten fails as one file; later inputs continue.
 
+## DOCX Word smoke test
+
+When changing DOCX fitted-text or embedded-font handling, generate a DOCX from
+the synthetic folder-replacement test fixture and open it in a desktop version
+of Microsoft Word. Confirm that Word displays no repair prompt, save the file
+without changing it, and confirm that Word does not create a recovery or repair
+log. This is a manual compatibility check; the automated suite separately
+validates the OPC relationships, content types, font deobfuscation, and font
+parsing without relying on a locally installed Word application.
+
 ## Vector graphics
 
 Vector graphics retain vector content whenever possible. The handlers update supported editable text records directly and send only an already-contained raster payload through the shared bitmap path.

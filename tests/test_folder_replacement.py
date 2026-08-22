@@ -10,10 +10,12 @@ import re
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from uuid import UUID
 import xml.etree.ElementTree as ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image
+from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, Protection
 from openpyxl.worksheet.table import Table
@@ -35,7 +37,9 @@ from pipeline.folder_replacement import (
 )
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
 from pipeline.folder_replacement.xlsx import _replace_drawing
+from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
 from pipeline.bounded_text_layout import noto_typefaces
+from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
@@ -778,33 +782,160 @@ class FolderReplacementTests(unittest.TestCase):
                     output_archive.read("xl/tables/table1.xml"),
                 )
 
-    # Verifies FR-2026-08-04-07.
-    def test_docx_basic_layout_fits_drawing_text_but_not_flowing_text(self) -> None:
+    # Verifies FR-2026-08-04-07 and FR-2026-08-22-03.
+    def test_docx_basic_layout_fits_drawing_text_and_embeds_conformant_fonts(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"
             output_root = root / "output"
             input_root.mkdir()
             source = input_root / "document.docx"
-            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
-                archive.writestr(
-                    "word/document.xml",
-                    """<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                    xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
-                    <w:body><w:p><w:r><w:t>Flow text</w:t></w:r></w:p><w:p><w:r><w:drawing><wp:inline>
-                    <wp:extent cx="914400" cy="457200"/><w:txbxContent><w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>Box text</w:t></w:r></w:p></w:txbxContent>
-                    </wp:inline></w:drawing></w:r></w:p></w:body></w:document>""",
-                )
+            self._write_complete_docx(source)
             self._run(
                 input_root, output_root, _EmptyOcrProvider(),
                 _RecordingReplacementProvider(replacement_text="Long replacement text " * 20),
                 document_text_layout="preserve-basic-layout",
             )
-            with ZipFile(output_root / "document.docx") as archive:
+            output = output_root / "document.docx"
+            Document(str(output))
+            with ZipFile(output) as archive:
                 data = archive.read("word/document.xml")
+                font_table = ElementTree.fromstring(archive.read("word/fontTable.xml"))
+                font_relationships = ElementTree.fromstring(
+                    archive.read("word/_rels/fontTable.xml.rels")
+                )
+                content_types = ElementTree.fromstring(archive.read("[Content_Types].xml"))
+                settings = ElementTree.fromstring(archive.read("word/settings.xml"))
+                self._assert_word_run_property_order(ElementTree.fromstring(data))
+                targets = {item.get("Id"): item.get("Target") for item in font_relationships}
+                embedded_font_ids: set[str] = set()
+                namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+                relationships_namespace = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+                font_sources = {
+                    "Noto Sans JP": "sans-serif",
+                    "Noto Serif JP": "serif",
+                    "Noto Sans Mono": "fixed-width",
+                }
+                for family, classification in font_sources.items():
+                    entries = [
+                        item for item in font_table.findall(f"{namespace}font")
+                        if item.get(f"{namespace}name") == family
+                    ]
+                    self.assertEqual(1, len(entries))
+                    if family != "Noto Sans JP":
+                        expected_metadata = self._sfnt_font_metadata(
+                            static_noto_bytes(classification, False)
+                        )
+                        metadata_names = [
+                            child.tag.rsplit("}", 1)[-1]
+                            for child in entries[0]
+                        ]
+                        self.assertEqual(
+                            [
+                                "panose1", "charset", "family", "pitch", "sig",
+                                "embedRegular", "embedBold",
+                            ],
+                            metadata_names,
+                        )
+                        for child in entries[0][:5]:
+                            self.assertEqual(
+                                expected_metadata[child.tag.rsplit("}", 1)[-1]],
+                                {
+                                    key.rsplit("}", 1)[-1]: value
+                                    for key, value in child.attrib.items()
+                                },
+                            )
+                    for style in ("embedRegular", "embedBold"):
+                        embedding = entries[0].find(f"{namespace}{style}")
+                        self.assertIsNotNone(embedding)
+                        assert embedding is not None
+                        relationship_id = embedding.get(f"{relationships_namespace}id")
+                        font_key = embedding.get(f"{namespace}fontKey")
+                        self.assertIsNotNone(relationship_id)
+                        self.assertIsNotNone(font_key)
+                        assert relationship_id is not None and font_key is not None
+                        self.assertNotIn(relationship_id, embedded_font_ids)
+                        embedded_font_ids.add(relationship_id)
+                        target = targets[relationship_id]
+                        recovered = bytearray(archive.read(f"word/{target}"))
+                        standard_key = UUID(font_key.strip("{}")).bytes[::-1]
+                        for offset in range(min(32, len(recovered))):
+                            recovered[offset] ^= standard_key[offset % 16]
+                        self.assertEqual(
+                            bytes(recovered),
+                            static_noto_bytes(classification, style == "embedBold"),
+                        )
+                        self.assertIsNotNone(
+                            skia.Typeface.MakeFromData(skia.Data.MakeWithCopy(bytes(recovered)))
+                        )
+                self.assertEqual(6, len(embedded_font_ids))
+                self.assertEqual(
+                    1,
+                    sum(item.get("Extension") == "odttf" for item in content_types),
+                )
+                self.assertEqual(
+                    1,
+                    sum(item.get("PartName") == "/word/fontTable.xml" for item in content_types),
+                )
+                content_type_names = [item.tag.rsplit("}", 1)[-1] for item in content_types]
+                first_override = content_type_names.index("Override")
+                self.assertNotIn("Default", content_type_names[first_override:])
+                setting_names = [item.tag.rsplit("}", 1)[-1] for item in settings]
+                self.assertEqual(
+                    [
+                        "writeProtection", "zoom", "embedTrueTypeFonts",
+                        "bordersDoNotSurroundHeader",
+                    ],
+                    setting_names,
+                )
             self.assertIn(b"Noto Sans JP", data)
-            self.assertIn("word/fonts/pipeline-sans-serif-regular.odttf", archive.namelist())
             self.assertIn(b"Long replacement text", data)
+            generated_property_names = {
+                child.tag.rsplit("}", 1)[-1]
+                for properties in ElementTree.fromstring(data).findall(
+                    ".//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}txbxContent"
+                    "//{http://schemas.openxmlformats.org/wordprocessingml/2006/main}rPr"
+                )
+                for child in properties
+            }
+            self.assertTrue({"b", "i", "u"}.issubset(generated_property_names))
+
+            corrupted = root / "corrupted.docx"
+            with ZipFile(output) as source_archive, ZipFile(corrupted, "w", ZIP_DEFLATED) as corrupted_archive:
+                corrupted_part = "word/fonts/pipeline-sans-serif-regular.odttf"
+                for entry in source_archive.infolist():
+                    payload = source_archive.read(entry.filename)
+                    if entry.filename == corrupted_part:
+                        payload = b"bad font" + payload[8:]
+                    corrupted_archive.writestr(entry, payload)
+            with ZipFile(corrupted) as corrupted_archive:
+                parts = {
+                    entry.filename: corrupted_archive.read(entry.filename)
+                    for entry in corrupted_archive.infolist()
+                }
+            with self.assertRaisesRegex(ValueError, "not a loadable OpenType font"):
+                _validate_docx_embedded_fonts(parts)
+
+            missing_setting_parts = parts.copy()
+            settings = ElementTree.fromstring(missing_setting_parts["word/settings.xml"])
+            setting = settings.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}embedTrueTypeFonts")
+            self.assertIsNotNone(setting)
+            assert setting is not None
+            settings.remove(setting)
+            missing_setting_parts["word/settings.xml"] = ElementTree.tostring(settings)
+            with self.assertRaisesRegex(ValueError, "embedded-font setting is missing"):
+                _validate_docx_embedded_fonts(missing_setting_parts)
+
+            misplaced_setting_parts = parts.copy()
+            settings = ElementTree.fromstring(misplaced_setting_parts["word/settings.xml"])
+            setting = settings.find("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}embedTrueTypeFonts")
+            self.assertIsNotNone(setting)
+            assert setting is not None
+            settings.remove(setting)
+            settings.append(setting)
+            misplaced_setting_parts["word/settings.xml"] = ElementTree.tostring(settings)
+            with self.assertRaisesRegex(ValueError, "not in CT_Settings order"):
+                _validate_docx_embedded_fonts(misplaced_setting_parts)
 
     # Verifies FR-2026-08-03-08.
     def test_preserves_compatibility_prefix_required_by_rewritten_office_xml(self) -> None:
@@ -1222,6 +1353,73 @@ class FolderReplacementTests(unittest.TestCase):
         Image.new("RGB", (30, 20), "white").save(path, "PNG")
 
     @staticmethod
+    def _write_complete_docx(path: Path) -> None:
+        """Write a complete synthetic DOCX package with a bounded text box."""
+        with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "[Content_Types].xml",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/fontTable.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml"/>
+</Types>''',
+            )
+            archive.writestr(
+                "_rels/.rels",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdOfficeDocument" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>''',
+            )
+            archive.writestr(
+                "word/_rels/document.xml.rels",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdExistingFontTable" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable" Target="fontTable.xml"/>
+  <Relationship Id="rIdExistingSettings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings" Target="settings.xml"/>
+</Relationships>''',
+            )
+            archive.writestr(
+                "word/settings.xml",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:writeProtection/><w:zoom/><w:bordersDoNotSurroundHeader/>
+</w:settings>''',
+            )
+            archive.writestr(
+                "word/fontTable.xml",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:fonts xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:font w:name="Noto Sans JP"><w:altName w:val="Synthetic Noto"/></w:font>
+</w:fonts>''',
+            )
+            archive.writestr(
+                "word/document.xml",
+                b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+ xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+  <w:body>
+    <w:p><w:r><w:t>Flow text</w:t></w:r></w:p>
+    <w:p><w:r><w:drawing><wp:inline>
+      <wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="Synthetic text box"/>
+      <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+        <wps:wsp><wps:txbx><w:txbxContent>
+          <w:p><w:r><w:rPr><w:b/><w:sz w:val="48"/></w:rPr><w:t>Bold text</w:t></w:r></w:p>
+          <w:p><w:r><w:rPr><w:i/><w:sz w:val="48"/></w:rPr><w:t>Italic text</w:t></w:r></w:p>
+          <w:p><w:r><w:rPr><w:sz w:val="48"/><w:u w:val="single"/></w:rPr><w:t>Underlined text</w:t></w:r></w:p>
+        </w:txbxContent></wps:txbx></wps:wsp>
+      </a:graphicData></a:graphic>
+    </wp:inline></w:drawing></w:r></w:p>
+    <w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>
+  </w:body>
+</w:document>''',
+            )
+
+    @staticmethod
     def _add_reachable_smartart_data_part(path: Path) -> None:
         """Add synthetic canonical SmartArt labels linked from the first slide."""
         content_types_namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -1361,6 +1559,56 @@ class FolderReplacementTests(unittest.TestCase):
                 sorted(child_names, key=lambda name: ranks.get(name, len(ranks))),
                 child_names,
             )
+
+    def _assert_word_run_property_order(self, root: ElementTree.Element) -> None:
+        """Verify the WordprocessingML ``CT_RPr`` child order."""
+        namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        order = (
+            "rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps",
+            "strike", "dstrike", "outline", "shadow", "emboss", "imprint", "noProof",
+            "snapToGrid", "vanish", "webHidden", "color", "spacing", "w", "kern",
+            "position", "sz", "szCs", "highlight", "u", "effect", "bdr", "shd",
+            "fitText", "vertAlign", "rtl", "cs", "em", "lang", "eastAsianLayout",
+            "specVanish", "oMath",
+        )
+        ranks = {name: index for index, name in enumerate(order)}
+        for properties in root.iter(f"{namespace}rPr"):
+            child_names = [child.tag.removeprefix(namespace) for child in properties]
+            self.assertEqual(
+                sorted(child_names, key=lambda name: ranks.get(name, len(ranks))),
+                child_names,
+            )
+
+    @staticmethod
+    def _sfnt_font_metadata(data: bytes) -> dict[str, dict[str, str]]:
+        table_count = int.from_bytes(data[4:6], "big")
+        tables = {
+            data[12 + index * 16:16 + index * 16].decode("ascii"):
+            int.from_bytes(data[20 + index * 16:24 + index * 16], "big")
+            for index in range(table_count)
+        }
+        os2, post = tables["OS/2"], tables["post"]
+        family_class = int.from_bytes(data[os2 + 30:os2 + 32], "big") >> 8
+        family = {**{value: "roman" for value in range(1, 8)}, 8: "swiss", 9: "decorative", 10: "script"}.get(family_class, "auto")
+        code_pages = int.from_bytes(data[os2 + 78:os2 + 82], "big")
+        charset = next(
+            (value for bit, value in ((17, "80"), (18, "81"), (19, "82"), (20, "86"), (21, "88"), (0, "00")) if code_pages & (1 << bit)),
+            "00",
+        )
+        return {
+            "panose1": {"val": data[os2 + 32:os2 + 42].hex().upper()},
+            "charset": {"val": charset},
+            "family": {"val": family},
+            "pitch": {"val": "fixed" if int.from_bytes(data[post + 12:post + 16], "big") else "variable"},
+            "sig": {
+                "usb0": data[os2 + 42:os2 + 46].hex().upper(),
+                "usb1": data[os2 + 46:os2 + 50].hex().upper(),
+                "usb2": data[os2 + 50:os2 + 54].hex().upper(),
+                "usb3": data[os2 + 54:os2 + 58].hex().upper(),
+                "csb0": data[os2 + 78:os2 + 82].hex().upper(),
+                "csb1": data[os2 + 82:os2 + 86].hex().upper(),
+            },
+        }
 
     def _assert_valid_drawingml_font_sizes(self, data: bytes) -> None:
         """Verify explicit run sizes stay within the OOXML DrawingML range."""

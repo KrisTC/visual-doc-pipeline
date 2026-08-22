@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid5
 from zipfile import ZIP_DEFLATED, ZipFile
 import xml.etree.ElementTree as ElementTree
 
@@ -35,6 +35,29 @@ _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_RELATIONSHIPS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
 _NS = {"w": _W, "wp": _WP, "wps": _WPS, "a": _A}
+_SETTINGS_BEFORE_EMBED_TRUE_TYPE_FONTS = frozenset({
+    "writeProtection", "view", "zoom", "removePersonalInformation",
+    "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
+    "printPostScriptOverText", "printFractionalCharacterWidth", "printFormsData",
+})
+_FONT_CHILD_ORDER = {
+    name: index
+    for index, name in enumerate((
+        "altName", "panose1", "charset", "family", "notTrueType", "pitch", "sig",
+        "embedRegular", "embedBold", "embedItalic", "embedBoldItalic",
+    ))
+}
+_FAMILY_CLASS_VALUES = {
+    **{value: "roman" for value in range(1, 8)},
+    8: "swiss",
+    9: "decorative",
+    10: "script",
+}
+_CODE_PAGE_CHARSETS = (
+    (17, "80"), (18, "81"), (19, "82"), (20, "86"), (21, "88"),
+    (0, "00"), (1, "EE"), (2, "CC"), (3, "A1"), (4, "A2"), (5, "A3"),
+    (6, "A4"), (7, "A5"), (8, "CC"), (16, "A2"),
+)
 
 
 def replace_docx_file(
@@ -156,11 +179,11 @@ def _write_paragraph(element: ElementTree.Element, paragraph: BoundedTextParagra
             family, _path = static_noto_font(run.font_classification, run.bold)
         for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
             fonts.set(_tag(_W, attribute), family)
+        if run.bold: ElementTree.SubElement(properties, _tag(_W, "b"))
+        if run.italic: ElementTree.SubElement(properties, _tag(_W, "i"))
         size = str(max(2, round((run.font_size_points or 18.0) * 2)))
         ElementTree.SubElement(properties, _tag(_W, "sz"), {_tag(_W, "val"): size})
         ElementTree.SubElement(properties, _tag(_W, "szCs"), {_tag(_W, "val"): size})
-        if run.bold: ElementTree.SubElement(properties, _tag(_W, "b"))
-        if run.italic: ElementTree.SubElement(properties, _tag(_W, "i"))
         if run.underline not in {None, "none"}: ElementTree.SubElement(properties, _tag(_W, "u"), {_tag(_W, "val"): "single"})
         text = ElementTree.SubElement(destination, _tag(_W, "t")); text.text = run.text
 
@@ -188,16 +211,31 @@ def _embed_docx_static_fonts(path: Path) -> None:
     relationships_name = "word/_rels/fontTable.xml.rels"
     relationships = _xml_or_new(parts.get(relationships_name), _tag(_PACKAGE_RELATIONSHIPS, "Relationships"))
     additions: dict[str, bytes] = {}
+    relationship_ids = {relationship.get("Id", "") for relationship in relationships}
     for index, (classification, bold) in enumerate(
         ((classification, bold) for classification in ("sans-serif", "serif", "fixed-width") for bold in (False, True)),
         start=1,
     ):
         family, _path = static_noto_font(classification, bold)
+        font = next(
+            (
+                item
+                for item in font_table.findall(_tag(_W, "font"))
+                if item.get(_tag(_W, "name")) == family
+            ),
+            None,
+        )
+        if font is None:
+            font = ElementTree.SubElement(font_table, _tag(_W, "font"), {_tag(_W, "name"): family})
+            _add_font_substitution_metadata(font, static_noto_bytes(classification, bold))
+        embedding_tag = _tag(_W, "embedBold" if bold else "embedRegular")
+        if font.find(embedding_tag) is not None:
+            continue
         key = uuid5(NAMESPACE_URL, f"visual-doc-pipeline/{classification}/{bold}")
-        relationship_id = f"rIdPipeline{index}"
+        relationship_id = _next_pipeline_relationship_id(relationship_ids, index)
+        relationship_ids.add(relationship_id)
         filename = f"fonts/pipeline-{classification}-{'bold' if bold else 'regular'}.odttf"
-        font = ElementTree.SubElement(font_table, _tag(_W, "font"), {_tag(_W, "name"): family})
-        embed = ElementTree.SubElement(font, _tag(_W, "embedBold" if bold else "embedRegular"))
+        embed = ElementTree.SubElement(font, embedding_tag)
         embed.set(_tag(_R, "id"), relationship_id)
         embed.set(_tag(_W, "fontKey"), "{" + str(key).upper() + "}")
         ElementTree.SubElement(relationships, _tag(_PACKAGE_RELATIONSHIPS, "Relationship"), {
@@ -210,6 +248,9 @@ def _embed_docx_static_fonts(path: Path) -> None:
     additions[relationships_name] = _serialize_with_compatibility_bindings(relationships, {})
     _ensure_docx_font_table_relationship(parts, additions)
     _ensure_docx_font_content_type(parts, additions)
+    _ensure_docx_font_embedding_setting(parts, additions)
+    output_parts = parts | additions
+    _validate_docx_embedded_fonts(output_parts)
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         seen: set[str] = set()
@@ -230,12 +271,235 @@ def _xml_or_new(data: bytes | None, tag: str) -> ElementTree.Element:
     return ElementTree.Element(tag)
 
 
-def _obfuscate_font(data: bytes, key: object) -> bytes:
-    value = getattr(key, "bytes_le")
+def _obfuscate_font(data: bytes, key: UUID) -> bytes:
+    value = key.bytes[::-1]
     output = bytearray(data)
     for index in range(min(32, len(output))):
         output[index] ^= value[index % 16]
     return bytes(output)
+
+
+def _add_font_substitution_metadata(font: ElementTree.Element, data: bytes) -> None:
+    for name, attributes in _font_substitution_metadata(data):
+        ElementTree.SubElement(font, _tag(_W, name), {_tag(_W, key): value for key, value in attributes.items()})
+
+
+def _font_substitution_metadata(data: bytes) -> tuple[tuple[str, dict[str, str]], ...]:
+    tables = _sfnt_tables(data)
+    os2 = tables.get("OS/2")
+    post = tables.get("post")
+    if os2 is None or post is None or os2 + 86 > len(data) or post + 16 > len(data):
+        raise ValueError("Embedded DOCX font has no usable SFNT substitution metadata.")
+    family_class = int.from_bytes(data[os2 + 30:os2 + 32], "big") >> 8
+    code_page_range = int.from_bytes(data[os2 + 78:os2 + 82], "big")
+    charset = next(
+        (value for bit, value in _CODE_PAGE_CHARSETS if code_page_range & (1 << bit)),
+        "00",
+    )
+    return (
+        ("panose1", {"val": data[os2 + 32:os2 + 42].hex().upper()}),
+        ("charset", {"val": charset}),
+        ("family", {"val": _FAMILY_CLASS_VALUES.get(family_class, "auto")}),
+        ("pitch", {"val": "fixed" if int.from_bytes(data[post + 12:post + 16], "big") else "variable"}),
+        (
+            "sig",
+            {
+                "usb0": data[os2 + 42:os2 + 46].hex().upper(),
+                "usb1": data[os2 + 46:os2 + 50].hex().upper(),
+                "usb2": data[os2 + 50:os2 + 54].hex().upper(),
+                "usb3": data[os2 + 54:os2 + 58].hex().upper(),
+                "csb0": data[os2 + 78:os2 + 82].hex().upper(),
+                "csb1": data[os2 + 82:os2 + 86].hex().upper(),
+            },
+        ),
+    )
+
+
+def _sfnt_tables(data: bytes) -> dict[str, int]:
+    if len(data) < 12:
+        raise ValueError("Embedded DOCX font is not a valid SFNT file.")
+    table_count = int.from_bytes(data[4:6], "big")
+    if len(data) < 12 + table_count * 16:
+        raise ValueError("Embedded DOCX font has an incomplete SFNT table directory.")
+    tables: dict[str, int] = {}
+    for index in range(table_count):
+        start = 12 + index * 16
+        name = data[start:start + 4].decode("ascii")
+        offset = int.from_bytes(data[start + 8:start + 12], "big")
+        length = int.from_bytes(data[start + 12:start + 16], "big")
+        if offset + length > len(data):
+            raise ValueError("Embedded DOCX font has an invalid SFNT table range.")
+        tables[name] = offset
+    return tables
+
+
+def _next_pipeline_relationship_id(existing: set[str], index: int) -> str:
+    candidate_index = index
+    while True:
+        candidate = f"rIdPipelineFont{candidate_index}"
+        if candidate not in existing:
+            return candidate
+        candidate_index += 1
+
+
+def _validate_docx_embedded_fonts(parts: dict[str, bytes]) -> None:
+    """Verify every pipeline-added Word font is reachable and decodes as a font."""
+    font_table = _required_xml_part(parts, "word/fontTable.xml")
+    font_relationships = _required_xml_part(parts, "word/_rels/fontTable.xml.rels")
+    document_relationships = _required_xml_part(parts, "word/_rels/document.xml.rels")
+    content_types = _required_xml_part(parts, "[Content_Types].xml")
+    _validate_font_table_relationship(document_relationships)
+    _validate_font_content_types(content_types)
+    _validate_font_embedding_settings(parts, document_relationships, content_types)
+    _validate_font_table_order(font_table)
+    targets = _relationship_targets(font_relationships)
+    seen_relationship_ids: set[str] = set()
+    family_entries: dict[str, int] = {}
+    for font in font_table.findall(_tag(_W, "font")):
+        family = font.get(_tag(_W, "name"))
+        if family is not None:
+            family_entries[family] = family_entries.get(family, 0) + 1
+    for font in font_table.findall(_tag(_W, "font")):
+        family = font.get(_tag(_W, "name"))
+        for embedding_name in ("embedRegular", "embedBold", "embedItalic", "embedBoldItalic"):
+            embed = font.find(_tag(_W, embedding_name))
+            if embed is None:
+                continue
+            relationship_id = embed.get(_tag(_R, "id"), "")
+            if not relationship_id.startswith("rIdPipelineFont"):
+                continue
+            if not family or family_entries[family] > 1:
+                raise ValueError(f"Embedded DOCX font family is duplicated or unnamed: {family!r}.")
+            if relationship_id in seen_relationship_ids:
+                raise ValueError(f"DOCX embedded font relationship ID is duplicated: {relationship_id}.")
+            seen_relationship_ids.add(relationship_id)
+            key_text = embed.get(_tag(_W, "fontKey"))
+            if key_text is None:
+                raise ValueError(f"DOCX embedded font {relationship_id} has no font key.")
+            try:
+                key = UUID(key_text.strip("{}"))
+            except ValueError as error:
+                raise ValueError(f"DOCX embedded font {relationship_id} has an invalid font key.") from error
+            target = targets.get(relationship_id)
+            if target is None or not target.startswith("fonts/"):
+                raise ValueError(f"DOCX embedded font {relationship_id} has an invalid target.")
+            part_name = f"word/{target}"
+            if part_name not in parts:
+                raise ValueError(f"DOCX embedded font {relationship_id} has no font part.")
+            recovered = _obfuscate_font(parts[part_name], key)
+            recovered_typeface = skia.Typeface.MakeFromData(skia.Data.MakeWithCopy(recovered))
+            if recovered_typeface is None:
+                raise ValueError(f"DOCX embedded font {relationship_id} is not a loadable OpenType font.")
+            if recovered_typeface.getFamilyName() != family:
+                raise ValueError(f"DOCX embedded font {relationship_id} does not match its font-table family.")
+
+
+def _required_xml_part(parts: dict[str, bytes], name: str) -> ElementTree.Element:
+    data = parts.get(name)
+    if data is None:
+        raise ValueError(f"DOCX font embedding requires package part {name}.")
+    try:
+        return ElementTree.fromstring(data)
+    except ElementTree.ParseError as error:
+        raise ValueError(f"DOCX font embedding package part is invalid XML: {name}.") from error
+
+
+def _relationship_targets(relationships: ElementTree.Element) -> dict[str, str]:
+    targets: dict[str, str] = {}
+    for relationship in relationships:
+        identifier = relationship.get("Id")
+        target = relationship.get("Target")
+        if identifier is None or target is None:
+            continue
+        if identifier in targets:
+            raise ValueError(f"DOCX font relationship ID is duplicated: {identifier}.")
+        targets[identifier] = target
+    return targets
+
+
+def _validate_font_table_relationship(relationships: ElementTree.Element) -> None:
+    font_tables = [
+        relationship
+        for relationship in relationships
+        if relationship.get("Type") == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/fontTable"
+    ]
+    if len(font_tables) != 1 or font_tables[0].get("Target") != "fontTable.xml":
+        raise ValueError("DOCX font table relationship is missing or invalid.")
+
+
+def _validate_font_content_types(content_types: ElementTree.Element) -> None:
+    font_defaults = [
+        item
+        for item in content_types
+        if item.get("Extension") == "odttf"
+    ]
+    font_tables = [
+        item
+        for item in content_types
+        if item.get("PartName") == "/word/fontTable.xml"
+    ]
+    if len(font_defaults) != 1 or font_defaults[0].get("ContentType") != "application/vnd.openxmlformats-officedocument.obfuscatedFont":
+        raise ValueError("DOCX obfuscated-font content type is missing or invalid.")
+    if len(font_tables) != 1 or font_tables[0].get("ContentType") != "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml":
+        raise ValueError("DOCX font-table content type is missing or invalid.")
+    first_override = next(
+        (
+            index
+            for index, item in enumerate(content_types)
+            if item.tag == _tag(_CONTENT_TYPES, "Override")
+        ),
+        len(content_types),
+    )
+    if any(
+        item.tag == _tag(_CONTENT_TYPES, "Default")
+        for item in tuple(content_types)[first_override:]
+    ):
+        raise ValueError("DOCX content-type defaults must precede overrides.")
+
+
+def _validate_font_table_order(font_table: ElementTree.Element) -> None:
+    for font in font_table.findall(_tag(_W, "font")):
+        child_names = [child.tag.rsplit("}", 1)[-1] for child in font]
+        if child_names != sorted(
+            child_names, key=lambda name: _FONT_CHILD_ORDER.get(name, len(_FONT_CHILD_ORDER))
+        ):
+            raise ValueError("DOCX font-table properties are not in CT_Font order.")
+
+
+def _validate_font_embedding_settings(
+    parts: dict[str, bytes], document_relationships: ElementTree.Element,
+    content_types: ElementTree.Element,
+) -> None:
+    settings = _required_xml_part(parts, "word/settings.xml")
+    settings_relationships = [
+        relationship
+        for relationship in document_relationships
+        if relationship.get("Type")
+        == "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings"
+    ]
+    if len(settings_relationships) != 1 or settings_relationships[0].get("Target") != "settings.xml":
+        raise ValueError("DOCX settings relationship is missing or invalid.")
+    settings_content_types = [
+        item
+        for item in content_types
+        if item.get("PartName") == "/word/settings.xml"
+    ]
+    if len(settings_content_types) != 1 or settings_content_types[0].get("ContentType") != (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml"
+    ):
+        raise ValueError("DOCX settings content type is missing or invalid.")
+    embedding_settings = settings.findall(_tag(_W, "embedTrueTypeFonts"))
+    if len(embedding_settings) != 1 or embedding_settings[0].attrib or len(embedding_settings[0]):
+        raise ValueError("DOCX embedded-font setting is missing or invalid.")
+    setting_index = list(settings).index(embedding_settings[0])
+    if any(
+        child.tag.rsplit("}", 1)[-1] not in _SETTINGS_BEFORE_EMBED_TRUE_TYPE_FONTS
+        for child in list(settings)[:setting_index]
+    ) or any(
+        child.tag.rsplit("}", 1)[-1] in _SETTINGS_BEFORE_EMBED_TRUE_TYPE_FONTS
+        for child in list(settings)[setting_index + 1:]
+    ):
+        raise ValueError("DOCX embedded-font setting is not in CT_Settings order.")
 
 
 def _ensure_docx_font_table_relationship(parts: dict[str, bytes], additions: dict[str, bytes]) -> None:
@@ -256,11 +520,68 @@ def _ensure_docx_font_content_type(parts: dict[str, bytes], additions: dict[str,
         return
     root = _xml_or_new(parts[name], _tag(_CONTENT_TYPES, "Types"))
     if not any(item.get("Extension") == "odttf" for item in root):
-        ElementTree.SubElement(root, _tag(_CONTENT_TYPES, "Default"), {
+        font_default = ElementTree.Element(_tag(_CONTENT_TYPES, "Default"), {
             "Extension": "odttf", "ContentType": "application/vnd.openxmlformats-officedocument.obfuscatedFont",
         })
+        first_override = next(
+            (
+                index
+                for index, item in enumerate(root)
+                if item.tag == _tag(_CONTENT_TYPES, "Override")
+            ),
+            len(root),
+        )
+        root.insert(first_override, font_default)
     if not any(item.get("PartName") == "/word/fontTable.xml" for item in root):
         ElementTree.SubElement(root, _tag(_CONTENT_TYPES, "Override"), {
             "PartName": "/word/fontTable.xml", "ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",
+        })
+    additions[name] = _serialize_with_compatibility_bindings(root, {})
+
+
+def _ensure_docx_font_embedding_setting(parts: dict[str, bytes], additions: dict[str, bytes]) -> None:
+    name = "word/settings.xml"
+    root = _xml_or_new(parts.get(name), _tag(_W, "settings"))
+    if root.find(_tag(_W, "embedTrueTypeFonts")) is None:
+        insertion_index = next(
+            (
+                index
+                for index, child in enumerate(root)
+                if child.tag.rsplit("}", 1)[-1]
+                not in _SETTINGS_BEFORE_EMBED_TRUE_TYPE_FONTS
+            ),
+            len(root),
+        )
+        root.insert(insertion_index, ElementTree.Element(_tag(_W, "embedTrueTypeFonts")))
+    additions[name] = _serialize_with_compatibility_bindings(root, {"w": _W})
+    _ensure_docx_settings_relationship(parts, additions)
+    _ensure_docx_settings_content_type(parts, additions)
+
+
+def _ensure_docx_settings_relationship(parts: dict[str, bytes], additions: dict[str, bytes]) -> None:
+    name = "word/_rels/document.xml.rels"
+    root = _xml_or_new(additions.get(name, parts.get(name)), _tag(_PACKAGE_RELATIONSHIPS, "Relationships"))
+    if not any(item.get("Type", "").endswith("/settings") for item in root):
+        existing_ids = {item.get("Id", "") for item in root}
+        relationship_id = "rIdPipelineSettings"
+        index = 1
+        while relationship_id in existing_ids:
+            relationship_id = f"rIdPipelineSettings{index}"
+            index += 1
+        ElementTree.SubElement(root, _tag(_PACKAGE_RELATIONSHIPS, "Relationship"), {
+            "Id": relationship_id,
+            "Type": "http://schemas.openxmlformats.org/officeDocument/2006/relationships/settings",
+            "Target": "settings.xml",
+        })
+    additions[name] = _serialize_with_compatibility_bindings(root, {})
+
+
+def _ensure_docx_settings_content_type(parts: dict[str, bytes], additions: dict[str, bytes]) -> None:
+    name = "[Content_Types].xml"
+    root = _xml_or_new(additions.get(name, parts.get(name)), _tag(_CONTENT_TYPES, "Types"))
+    if not any(item.get("PartName") == "/word/settings.xml" for item in root):
+        ElementTree.SubElement(root, _tag(_CONTENT_TYPES, "Override"), {
+            "PartName": "/word/settings.xml",
+            "ContentType": "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
         })
     additions[name] = _serialize_with_compatibility_bindings(root, {})
