@@ -14,6 +14,7 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    SourceTypefaceReference,
     noto_typefaces,
     replace_and_fit_text_box,
 )
@@ -77,31 +78,36 @@ def _fit_clipped_text(
     preserve_source_font: bool,
 ) -> tuple[int, set[tuple[str, bool]], set[int]]:
     clips = _clip_rectangles(root)
+    parents = {child: parent for parent in root.iter() for child in parent}
+    css = _SvgCss(root, parents)
     typefaces = noto_typefaces()
     count = 0
     embedded: set[tuple[str, bool]] = set()
     elements: set[int] = set()
     for element in root.iter():
-        if _name(element.tag) != "text" or list(element):
+        if _name(element.tag) != "text" or list(element) or _inside_foreign_object(element, parents):
             continue
         text = element.text or ""
         clip = _clip_for(element, clips)
         if not text.strip() or clip is None:
             continue
         width, height = clip
-        family = _attribute(element, "font-family")
+        family = css.property_for(element, "font-family")
         classification = _classification(family)
-        bold = _attribute(element, "font-weight") in {"bold", "700", "800", "900"}
-        size_px = _length(_attribute(element, "font-size")) or 16.0
+        bold = css.property_for(element, "font-weight") in {"bold", "700", "800", "900"}
+        italic = css.property_for(element, "font-style") in {"italic", "oblique"}
+        size_px = _length(css.property_for(element, "font-size")) or 16.0
+        references = _svg_source_typefaces(family)
         box = BoundedTextBox(
             round(width * _PX_TO_EMU), round(height * _PX_TO_EMU), 0, 0, 0, 0, None,
             (BoundedTextParagraph("left", None, None, None, None, 0, None, None, None, None,
                                   None, (BoundedTextRun(text, family, classification, size_px * 0.75,
-                                                        bold, False, "none", None),)),),
+                                                        bold, italic, "none", None, references),)),),
         )
         fitted = replace_and_fit_text_box(
             box, provider, source, target, typefaces,
             preserve_source_font_family=preserve_source_font,
+            measure_source_fonts=preserve_source_font,
         )
         run = fitted.text_box.paragraphs[0].runs[0]
         element.text = run.text
@@ -113,6 +119,17 @@ def _fit_clipped_text(
         count += 1
         elements.add(id(element))
     return count, embedded, elements
+
+
+def _inside_foreign_object(
+    element: ElementTree.Element, parents: dict[ElementTree.Element, ElementTree.Element]
+) -> bool:
+    current: ElementTree.Element | None = element
+    while current is not None:
+        if _name(current.tag) == "foreignObject":
+            return True
+        current = parents.get(current)
+    return False
 
 
 def _clip_rectangles(root: ElementTree.Element) -> dict[str, tuple[float, float]]:
@@ -144,6 +161,107 @@ def _attribute(element: ElementTree.Element, name: str) -> str | None:
         if separator and key.strip() == name:
             return value.strip()
     return None
+
+
+def _svg_source_typefaces(family: str | None) -> tuple[SourceTypefaceReference, ...]:
+    """Return ordered per-script CSS candidates without treating generics as host faces."""
+    candidates = _css_font_families(family)
+    references: list[SourceTypefaceReference] = []
+    for script in ("latin", "eastAsian", "complex"):
+        for candidate in candidates:
+            references.append(SourceTypefaceReference(script, candidate))
+    return tuple(references)
+
+
+def _css_font_families(value: str | None) -> tuple[str, ...]:
+    if not value or "var(" in value.lower():
+        return ()
+    families: list[str] = []
+    for raw in value.split(","):
+        family = raw.strip().strip("'\"")
+        if not family or any(token in family for token in ("(", ")", ";")):
+            continue
+        generic = {"serif", "monospace", "sans-serif"}
+        if family.lower() in generic:
+            # The common resolver's committed Noto fallback classification is
+            # the explicit generic-family policy; no host generic is accepted.
+            families.append(family.lower())
+        else:
+            families.append(family)
+    return tuple(families)
+
+
+class _SvgCss:
+    """Small contained-only CSS cascade for SVG typography properties."""
+
+    def __init__(self, root: ElementTree.Element, parents: dict[ElementTree.Element, ElementTree.Element]) -> None:
+        self._parents = parents
+        self._rules: list[tuple[tuple[str, ...], dict[str, str], int, int]] = []
+        order = 0
+        for style in root.iter():
+            if _name(style.tag) != "style" or not style.text:
+                continue
+            for selector_text, declarations in re.findall(r"([^{}@]+)\{([^{}]*)\}", style.text):
+                values = _css_declarations(declarations)
+                if not values:
+                    continue
+                for selector in selector_text.split(","):
+                    tokens = tuple(token for token in selector.strip().split() if token)
+                    if tokens and all(_simple_selector(token) for token in tokens):
+                        self._rules.append((tokens, values, _selector_specificity(tokens), order))
+                        order += 1
+
+    def property_for(self, element: ElementTree.Element, name: str) -> str | None:
+        inherited = self.property_for(self._parents[element], name) if element in self._parents else None
+        best: tuple[int, int, str] | None = None
+        for tokens, values, specificity, order in self._rules:
+            if name in values and _matches_selector(element, tokens, self._parents):
+                candidate = (specificity, order, values[name])
+                if best is None or candidate[:2] >= best[:2]:
+                    best = candidate
+        value = inherited if best is None else best[2]
+        inline = _attribute(element, name)
+        return inline if inline is not None and "var(" not in inline.lower() else value
+
+
+def _css_declarations(text: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for declaration in text.split(";"):
+        key, separator, value = declaration.partition(":")
+        key, value = key.strip(), value.strip()
+        if separator and key in {"font-family", "font-weight", "font-style", "font-size", "clip-path"} and "var(" not in value.lower():
+            result[key] = value
+    return result
+
+
+def _simple_selector(value: str) -> bool:
+    return bool(re.fullmatch(r"(?:[A-Za-z_][\w-]*)?(?:[.#][A-Za-z_][\w-]*)*", value))
+
+
+def _selector_specificity(tokens: tuple[str, ...]) -> int:
+    return sum(100 * token.count("#") + 10 * token.count(".") + (1 if token[:1].isalpha() else 0) for token in tokens)
+
+
+def _matches_selector(element: ElementTree.Element, tokens: tuple[str, ...], parents: dict[ElementTree.Element, ElementTree.Element]) -> bool:
+    current: ElementTree.Element | None = element
+    for token in reversed(tokens):
+        while current is not None and not _matches_simple_selector(current, token):
+            current = parents.get(current)
+        if current is None:
+            return False
+        current = parents.get(current)
+    return True
+
+
+def _matches_simple_selector(element: ElementTree.Element, selector: str) -> bool:
+    name = re.match(r"^[A-Za-z_][\w-]*", selector)
+    if name and _name(element.tag) != name.group(0):
+        return False
+    identifier = re.search(r"#([A-Za-z_][\w-]*)", selector)
+    if identifier and element.get("id") != identifier.group(1):
+        return False
+    classes = set((element.get("class") or "").split())
+    return all(class_name in classes for class_name in re.findall(r"\.([A-Za-z_][\w-]*)", selector))
 
 
 def _length(value: str | None) -> float | None:

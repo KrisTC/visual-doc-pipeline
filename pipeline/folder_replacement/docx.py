@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from io import BytesIO
 from pathlib import Path
+from dataclasses import dataclass
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zipfile import ZIP_DEFLATED, ZipFile
 import xml.etree.ElementTree as ElementTree
@@ -15,9 +16,11 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    SourceTypefaceReference,
     noto_typefaces,
     replace_and_fit_text_box,
 )
+from pipeline.pptx_theme_fonts import PptxThemeFonts, theme_fonts_from_xml
 from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
@@ -87,10 +90,11 @@ def _replace_docx_parts(path: Path, provider: TextReplacementProvider, source: s
     changed: dict[str, bytes] = {}
     count = 0
     faces = noto_typefaces()
+    font_resolver = _DocxFontResolver.from_parts({entry.filename: data for entry, data in entries})
     for entry, data in entries:
         if not entry.filename.startswith("word/") or not entry.filename.endswith(".xml"):
             continue
-        updated, changed_count = _replace_docx_xml(data, provider, source, target, faces, preserve_font)
+        updated, changed_count = _replace_docx_xml(data, provider, source, target, faces, preserve_font, font_resolver)
         changed[entry.filename] = updated
         count += changed_count
     output = BytesIO()
@@ -102,7 +106,7 @@ def _replace_docx_parts(path: Path, provider: TextReplacementProvider, source: s
 
 
 def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: str, target: str,
-    faces: dict[str, skia.Typeface], preserve_font: bool) -> tuple[bytes, int]:
+    faces: dict[str, skia.Typeface], preserve_font: bool, font_resolver: "_DocxFontResolver") -> tuple[bytes, int]:
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError:
@@ -112,12 +116,12 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
     count = 0
     for textbox in root.findall(".//w:txbxContent", _NS):
         bounds = _textbox_bounds(textbox, parents)
-        paragraphs = tuple(_paragraph(paragraph) for paragraph in textbox.findall("w:p", _NS))
+        paragraphs = tuple(_paragraph(paragraph, font_resolver) for paragraph in textbox.findall("w:p", _NS))
         if bounds is None or not any(run.text.strip() for paragraph in paragraphs for run in paragraph.runs):
             continue
         box = BoundedTextBox(*bounds, 0, 0, 0, 0, None, paragraphs)
         fitted = replace_and_fit_text_box(box, provider, source, target, faces,
-            preserve_source_font_family=preserve_font)
+            preserve_source_font_family=preserve_font, measure_source_fonts=preserve_font)
         for element in textbox.iter(_tag(_W, "t")):
             fitted_text.add(element)
         for destination, explicit in zip(textbox.findall("w:p", _NS), fitted.text_box.paragraphs, strict=True):
@@ -147,23 +151,155 @@ def _textbox_bounds(textbox: ElementTree.Element, parents: dict[ElementTree.Elem
     return None
 
 
-def _paragraph(element: ElementTree.Element) -> BoundedTextParagraph:
-    runs = tuple(_run(run) for run in element.findall("w:r", _NS))
+def _paragraph(element: ElementTree.Element, font_resolver: "_DocxFontResolver") -> BoundedTextParagraph:
+    runs = tuple(_run(run, element, font_resolver) for run in element.findall("w:r", _NS))
     properties = element.find("w:pPr", _NS)
     alignment = None if properties is None else properties.find("w:jc", _NS)
     return BoundedTextParagraph("left" if alignment is None else {"center": "center", "right": "right", "both": "justify"}.get(alignment.get("val", ""), "left"), None, None, None, None, 0, None, None, None, None, None, runs)
 
 
-def _run(element: ElementTree.Element) -> BoundedTextRun:
+def _run(
+    element: ElementTree.Element, paragraph: ElementTree.Element, font_resolver: "_DocxFontResolver"
+) -> BoundedTextRun:
     properties = element.find("w:rPr", _NS)
     fonts = None if properties is None else properties.find("w:rFonts", _NS)
     size = None if properties is None else properties.find("w:sz", _NS)
-    family = None if fonts is None else fonts.get(_tag(_W, "ascii")) or fonts.get(_tag(_W, "hAnsi"))
+    text = "".join(text.text or "" for text in element.iter(_tag(_W, "t")))
+    references = font_resolver.references_for(element, paragraph, text)
+    family = next((item.original_family for item in references if item.script == "latin"), None)
     size_points = None if size is None else float(size.get(_tag(_W, "val"), "36")) / 2
-    return BoundedTextRun("".join(text.text or "" for text in element.iter(_tag(_W, "t"))), family, _classification(family), size_points,
+    return BoundedTextRun(text, family, _classification(family), size_points,
         properties is not None and properties.find("w:b", _NS) is not None,
         properties is not None and properties.find("w:i", _NS) is not None,
-        "single" if properties is not None and properties.find("w:u", _NS) is not None else "none", None)
+        "single" if properties is not None and properties.find("w:u", _NS) is not None else "none", None, references)
+
+
+@dataclass(frozen=True, slots=True)
+class _DocxFontResolver:
+    defaults: tuple[SourceTypefaceReference, ...]
+    styles: dict[str, tuple[str | None, tuple[SourceTypefaceReference, ...]]]
+    theme: PptxThemeFonts | None
+
+    @classmethod
+    def from_parts(cls, parts: dict[str, bytes]) -> "_DocxFontResolver":
+        styles_root = _xml(parts.get("word/styles.xml"))
+        defaults: tuple[SourceTypefaceReference, ...] = ()
+        styles: dict[str, tuple[str | None, tuple[SourceTypefaceReference, ...]]] = {}
+        if styles_root is not None:
+            default_properties = styles_root.find("w:docDefaults/w:rPrDefault/w:rPr", _NS)
+            defaults = _word_source_typefaces(default_properties, None, "")
+            for style in styles_root.findall("w:style", _NS):
+                style_id = style.get(_tag(_W, "styleId"))
+                if not style_id:
+                    continue
+                based_on = style.find("w:basedOn", _NS)
+                parent = None if based_on is None else based_on.get(_tag(_W, "val"))
+                properties = style.find("w:rPr", _NS)
+                styles[style_id] = (parent, _word_source_typefaces(properties, None, ""))
+        theme = _docx_theme(parts)
+        return cls(defaults, styles, theme)
+
+    def references_for(
+        self, run: ElementTree.Element, paragraph: ElementTree.Element, text: str
+    ) -> tuple[SourceTypefaceReference, ...]:
+        references = self.defaults
+        paragraph_properties = paragraph.find("w:pPr", _NS)
+        paragraph_style = None if paragraph_properties is None else paragraph_properties.find("w:pStyle", _NS)
+        if paragraph_style is not None:
+            references = _merge_word_typefaces(references, self._style_references(paragraph_style.get(_tag(_W, "val"))))
+        run_properties = run.find("w:rPr", _NS)
+        run_style = None if run_properties is None else run_properties.find("w:rStyle", _NS)
+        if run_style is not None:
+            references = _merge_word_typefaces(references, self._style_references(run_style.get(_tag(_W, "val"))))
+        return _resolve_word_theme_typefaces(
+            _merge_word_typefaces(references, _word_source_typefaces(run_properties, None, text)), self.theme, text
+        )
+
+    def _style_references(self, style_id: str | None) -> tuple[SourceTypefaceReference, ...]:
+        references: tuple[SourceTypefaceReference, ...] = ()
+        seen: set[str] = set()
+        while style_id and style_id not in seen:
+            seen.add(style_id)
+            style = self.styles.get(style_id)
+            if style is None:
+                break
+            style_id, direct = style
+            references = _merge_word_typefaces(direct, references)
+        return references
+
+
+def _xml(data: bytes | None) -> ElementTree.Element | None:
+    if data is None:
+        return None
+    try:
+        return ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return None
+
+
+def _docx_theme(parts: dict[str, bytes]) -> PptxThemeFonts | None:
+    relationships = _xml(parts.get("word/_rels/document.xml.rels"))
+    if relationships is None:
+        return None
+    for relationship in relationships:
+        if relationship.tag != _tag(_PACKAGE_RELATIONSHIPS, "Relationship") or relationship.get("TargetMode") == "External":
+            continue
+        if not (relationship.get("Type") or "").endswith("/theme"):
+            continue
+        target = relationship.get("Target")
+        if target:
+            return theme_fonts_from_xml(parts.get("word/" + target.lstrip("/").replace("../", "")))
+    return None
+
+
+def _word_source_typefaces(
+    properties: ElementTree.Element | None, _theme: PptxThemeFonts | None, _text: str
+) -> tuple[SourceTypefaceReference, ...]:
+    fonts = None if properties is None else properties.find("w:rFonts", _NS)
+    if fonts is None:
+        return ()
+    values = {
+        "latin": fonts.get(_tag(_W, "ascii")) or fonts.get(_tag(_W, "hAnsi")) or fonts.get(_tag(_W, "asciiTheme")) or fonts.get(_tag(_W, "hAnsiTheme")),
+        "eastAsian": fonts.get(_tag(_W, "eastAsia")) or fonts.get(_tag(_W, "eastAsiaTheme")),
+        "complex": fonts.get(_tag(_W, "cs")) or fonts.get(_tag(_W, "cstheme")),
+    }
+    return tuple(SourceTypefaceReference(script, value) for script, value in values.items() if value)
+
+
+def _resolve_word_theme_typefaces(
+    references: tuple[SourceTypefaceReference, ...], theme: PptxThemeFonts | None, text: str
+) -> tuple[SourceTypefaceReference, ...]:
+    aliases = {
+        "majorAscii": "+mj-lt", "majorHAnsi": "+mj-lt", "majorEastAsia": "+mj-ea", "majorBidi": "+mj-cs",
+        "minorAscii": "+mn-lt", "minorHAnsi": "+mn-lt", "minorEastAsia": "+mn-ea", "minorBidi": "+mn-cs",
+    }
+    return tuple(
+        SourceTypefaceReference(
+            item.script, item.original_family,
+            None if theme is None else theme.resolve(aliases.get(item.original_family or "", item.original_family), item.script, text),
+        )
+        for item in references
+    )
+
+
+def _merge_word_typefaces(
+    inherited: tuple[SourceTypefaceReference, ...], direct: tuple[SourceTypefaceReference, ...]
+) -> tuple[SourceTypefaceReference, ...]:
+    values = {item.script: item for item in inherited}
+    values.update({item.script: item for item in direct})
+    return tuple(values[script] for script in ("latin", "eastAsian", "complex") if script in values)
+
+
+def _write_word_font_reference(fonts: ElementTree.Element, reference: SourceTypefaceReference) -> None:
+    value = reference.original_family or "Noto Sans JP"
+    theme = value.startswith("major") or value.startswith("minor")
+    attributes = {
+        "latin": ("asciiTheme", "hAnsiTheme") if theme else ("ascii", "hAnsi"),
+        "eastAsian": ("eastAsiaTheme",) if theme else ("eastAsia",),
+        "complex": ("cstheme",) if theme else ("cs",),
+    }[reference.script]
+    for attribute in attributes:
+        fonts.set(_tag(_W, attribute), value)
 
 
 def _write_paragraph(element: ElementTree.Element, paragraph: BoundedTextParagraph) -> None:
@@ -174,11 +310,14 @@ def _write_paragraph(element: ElementTree.Element, paragraph: BoundedTextParagra
         destination = ElementTree.SubElement(element, _tag(_W, "r"))
         properties = ElementTree.SubElement(destination, _tag(_W, "rPr"))
         fonts = ElementTree.SubElement(properties, _tag(_W, "rFonts"))
-        family = run.font_family or "Noto Sans JP"
-        if family.startswith("Noto "):
-            family, _path = static_noto_font(run.font_classification, run.bold)
-        for attribute in ("ascii", "hAnsi", "eastAsia", "cs"):
-            fonts.set(_tag(_W, attribute), family)
+        references = run.source_typefaces
+        if not references:
+            family = run.font_family or "Noto Sans JP"
+            if family.startswith("Noto "):
+                family, _path = static_noto_font(run.font_classification, run.bold)
+            references = (SourceTypefaceReference("latin", family),)
+        for reference in references:
+            _write_word_font_reference(fonts, reference)
         if run.bold: ElementTree.SubElement(properties, _tag(_W, "b"))
         if run.italic: ElementTree.SubElement(properties, _tag(_W, "i"))
         size = str(max(2, round((run.font_size_points or 18.0) * 2)))

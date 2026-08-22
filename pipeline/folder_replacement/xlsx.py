@@ -25,9 +25,11 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    SourceTypefaceReference,
     noto_typefaces,
     replace_and_fit_text_box,
 )
+from pipeline.pptx_theme_fonts import PptxThemeFonts, resolve_theme_typefaces, theme_fonts_from_xml
 from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
@@ -93,6 +95,7 @@ def replace_xlsx_file(
         # XLSX has no interoperable, package-level embedded-font path.  Keep
         # the source face and apply the shared Noto-derived fitted size.
         preserve_source_font_family=True,
+        measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
     )
     completed("native text layout")
     return native_items, image_regions, retained_vectors
@@ -114,13 +117,15 @@ def _replace_xlsx_cells(
     target_language: str,
     *,
     preserve_source_font_family: bool,
+    measure_source_fonts: bool,
 ) -> int:
     """Fit explicitly bounded cells and retain all unknown package parts byte-for-byte."""
     with ZipFile(path) as archive:
         entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
     parts = {entry.filename: data for entry, data in entries}
     shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
-    styles = _Styles(parts.get("xl/styles.xml"))
+    theme = _workbook_theme(parts)
+    styles = _Styles(parts.get("xl/styles.xml"), theme)
     typefaces = noto_typefaces()
     table_headers = _table_header_cells(parts)
     replacements = 0
@@ -137,6 +142,7 @@ def _replace_xlsx_cells(
             target_language,
             typefaces,
             preserve_source_font_family,
+            measure_source_fonts,
             table_headers.get(name, frozenset()),
         )
         changed_parts[name] = updated
@@ -146,7 +152,7 @@ def _replace_xlsx_cells(
             continue
         updated, count = _replace_drawing(
             data, replacement, source_language, target_language, typefaces,
-            preserve_source_font_family,
+            preserve_source_font_family, measure_source_fonts, theme,
         )
         changed_parts[name] = updated
         replacements += count
@@ -171,6 +177,7 @@ def _replace_worksheet(
     target_language: str,
     typefaces: dict[str, skia.Typeface],
     preserve_source_font_family: bool,
+    measure_source_fonts: bool,
     table_headers: frozenset[str],
 ) -> tuple[bytes, int]:
     try:
@@ -232,6 +239,7 @@ def _replace_worksheet(
             target_language,
             typefaces,
             preserve_source_font_family=preserve_source_font_family,
+            measure_source_fonts=measure_source_fonts,
         )
         explicit_run = fitted.text_box.paragraphs[0].runs[0]
         _write_cell_text(cell, explicit_run.text)
@@ -304,6 +312,24 @@ def _part_relationships(parts: dict[str, bytes], part_name: str) -> dict[str, st
     return relationships
 
 
+def _workbook_theme(parts: dict[str, bytes]) -> PptxThemeFonts | None:
+    relationships_name = "xl/_rels/workbook.xml.rels"
+    data = parts.get(relationships_name)
+    if data is None:
+        return None
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return None
+    for relationship in root.findall(f"{{{_PACKAGE_RELATIONSHIPS_NAMESPACE}}}Relationship"):
+        if relationship.get("TargetMode") == "External" or not (relationship.get("Type") or "").endswith("/theme"):
+            continue
+        target = relationship.get("Target")
+        if target:
+            return theme_fonts_from_xml(parts.get(_resolve_part_target("xl/workbook.xml", target)))
+    return None
+
+
 def _resolve_part_target(part_name: str, target: str) -> str:
     """Resolve a package-relative relationship target without filesystem access."""
     if target.startswith("/"):
@@ -318,6 +344,8 @@ def _replace_drawing(
     target_language: str,
     typefaces: dict[str, skia.Typeface],
     preserve_source_font_family: bool,
+    measure_source_fonts: bool = False,
+    theme: PptxThemeFonts | None = None,
 ) -> tuple[bytes, int]:
     """Fit SpreadsheetDrawing shape text against its ``a:xfrm/a:ext`` box."""
     try:
@@ -336,7 +364,7 @@ def _replace_drawing(
             width, height = int(extent.get("cx", "0")), int(extent.get("cy", "0"))
         except ValueError:
             continue
-        paragraphs = tuple(_drawing_paragraph(paragraph) for paragraph in body.findall("a:p", _NS))
+        paragraphs = tuple(_drawing_paragraph(paragraph, theme) for paragraph in body.findall("a:p", _NS))
         if width <= 0 or height <= 0 or not any(run.text.strip() for paragraph in paragraphs for run in paragraph.runs):
             continue
         body_properties = body.find("a:bodyPr", _NS)
@@ -349,6 +377,7 @@ def _replace_drawing(
         fitted = replace_and_fit_text_box(
             box, provider, source_language, target_language, typefaces,
             preserve_source_font_family=preserve_source_font_family,
+            measure_source_fonts=measure_source_fonts,
         )
         for element in body.iter(_a_tag("t")):
             fitted_text.add(element)
@@ -364,25 +393,38 @@ def _replace_drawing(
     return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), count
 
 
-def _drawing_paragraph(element: ElementTree.Element) -> BoundedTextParagraph:
+def _drawing_paragraph(element: ElementTree.Element, theme: PptxThemeFonts | None) -> BoundedTextParagraph:
     properties = element.find("a:pPr", _NS)
     alignment = None if properties is None else properties.get("algn")
-    runs = tuple(_drawing_run(run) for run in element.findall("a:r", _NS))
+    runs = tuple(_drawing_run(run, theme) for run in element.findall("a:r", _NS))
     return BoundedTextParagraph(alignment or "left", None, None, None, None, 0, None, None,
                                 None, None, None, runs)
 
 
-def _drawing_run(element: ElementTree.Element) -> BoundedTextRun:
+def _drawing_run(element: ElementTree.Element, theme: PptxThemeFonts | None) -> BoundedTextRun:
     properties = element.find("a:rPr", _NS)
-    latin = None if properties is None else properties.find("a:latin", _NS)
-    family = None if latin is None else latin.get("typeface")
+    references = _drawing_source_typefaces(properties, theme, "".join(item.text or "" for item in element.iter(_a_tag("t"))))
+    family = next((item.original_family for item in references if item.script == "latin"), None)
     size = _finite_float(None if properties is None else properties.get("sz"))
     return BoundedTextRun(
         "".join(item.text or "" for item in element.iter(_a_tag("t"))), family,
         _font_classification(family), None if size is None else size / 100.0,
         properties is not None and properties.get("b") == "1", properties is not None and properties.get("i") == "1",
-        "single" if properties is not None and properties.get("u") not in {None, "none"} else "none", None,
+        "single" if properties is not None and properties.get("u") not in {None, "none"} else "none", None, references,
     )
+
+
+def _drawing_source_typefaces(
+    properties: ElementTree.Element | None, theme: PptxThemeFonts | None, text: str
+) -> tuple[SourceTypefaceReference, ...]:
+    if properties is None:
+        return ()
+    references: list[SourceTypefaceReference] = []
+    for script, tag in (("latin", "latin"), ("eastAsian", "ea"), ("complex", "cs")):
+        element = properties.find(_a_tag(tag))
+        if element is not None and element.get("typeface"):
+            references.append(SourceTypefaceReference(script, element.get("typeface")))
+    return resolve_theme_typefaces(tuple(references), theme, text)
 
 
 def _write_drawing_paragraph(element: ElementTree.Element, paragraph: BoundedTextParagraph) -> None:
@@ -394,9 +436,9 @@ def _write_drawing_paragraph(element: ElementTree.Element, paragraph: BoundedTex
     for run in paragraph.runs:
         destination = ElementTree.Element(_a_tag("r"))
         properties = ElementTree.SubElement(destination, _a_tag("rPr"))
-        ElementTree.SubElement(properties, _a_tag("latin"), {"typeface": run.font_family or "Noto Sans JP"})
-        ElementTree.SubElement(properties, _a_tag("ea"), {"typeface": run.font_family or "Noto Sans JP"})
-        ElementTree.SubElement(properties, _a_tag("cs"), {"typeface": run.font_family or "Noto Sans JP"})
+        references = run.source_typefaces or (SourceTypefaceReference("latin", run.font_family or "Noto Sans JP"),)
+        for item in references:
+            ElementTree.SubElement(properties, _a_tag({"latin": "latin", "eastAsian": "ea", "complex": "cs"}[item.script]), {"typeface": item.original_family or "Noto Sans JP"})
         properties.set("sz", str(max(100, round((run.font_size_points or 18.0) * 100))))
         if run.bold: properties.set("b", "1")
         if run.italic: properties.set("i", "1")
@@ -428,6 +470,7 @@ def replace_run_text(run: BoundedTextRun, text: str) -> BoundedTextRun:
         italic=run.italic,
         underline=run.underline,
         baseline=run.baseline,
+        source_typefaces=run.source_typefaces,
     )
 
 
@@ -554,10 +597,11 @@ def _finite_float(value: str | None) -> float | None:
 class _Styles:
     """Mutable styles.xml subset used to attach explicit fitted cell formatting."""
 
-    def __init__(self, data: bytes | None) -> None:
+    def __init__(self, data: bytes | None, theme: PptxThemeFonts | None = None) -> None:
         self._data = data
         self._root = ElementTree.fromstring(data) if data is not None else None
         self.changed = False
+        self._theme = theme
 
     @property
     def can_write_explicit_fit(self) -> bool:
@@ -569,15 +613,23 @@ class _Styles:
 
     def run_for(self, cell: ElementTree.Element) -> BoundedTextRun:
         font = self._font_for(cell)
+        scheme = None if font is None else font.find(_tag("scheme"))
+        scheme_value = None if scheme is None else scheme.get("val")
+        alias = {"major": "+mj-lt", "minor": "+mn-lt"}.get(scheme_value or "")
+        references = () if alias is None or _font_name(font) else (
+            SourceTypefaceReference("latin", scheme_value, self._theme.resolve(alias, "latin") if self._theme else None),
+        )
+        family = _font_name(font)
         return BoundedTextRun(
             text="",
-            font_family=_font_name(font),
-            font_classification=_font_classification(_font_name(font)),
+            font_family=family,
+            font_classification=_font_classification(family),
             font_size_points=_font_size(font),
             bold=font is not None and font.find(_tag("b")) is not None,
             italic=font is not None and font.find(_tag("i")) is not None,
             underline="single" if font is not None and font.find(_tag("u")) is not None else "none",
             baseline=_font_baseline(font),
+            source_typefaces=references,
         )
 
     def alignment_for(self, cell: ElementTree.Element) -> str:
@@ -597,7 +649,8 @@ class _Styles:
         if fonts is None or cell_xfs is None or source_xf is None:
             return
         font = deepcopy(source_font) if source_font is not None else ElementTree.Element(_tag("font"))
-        _set_font_value(font, "name", "val", run.font_family or "Noto Sans JP")
+        if not run.source_typefaces:
+            _set_font_value(font, "name", "val", run.font_family or "Noto Sans JP")
         _set_font_value(font, "sz", "val", f"{run.font_size_points or 18.0:.4f}")
         fonts.append(font)
         fonts.set("count", str(len(fonts)))

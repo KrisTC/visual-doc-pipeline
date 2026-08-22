@@ -651,6 +651,12 @@ class FolderReplacementTests(unittest.TestCase):
             unnamed_source.name = "unnamed-source"
             unnamed_source.text = "Fallback font"
             unnamed_source.text_frame.paragraphs[0].runs[0].font.size = Pt(24)
+            themed_source = slide.shapes.add_textbox(Inches(1), Inches(3), Inches(3), Inches(1))
+            themed_source.name = "themed-source"
+            themed_source.text = "Theme source font"
+            themed_run = themed_source.text_frame.paragraphs[0].runs[0]
+            themed_run.font.name = "+mj-lt"
+            themed_run.font.size = Pt(24)
             presentation.save(str(source))
 
             self._run(
@@ -665,6 +671,7 @@ class FolderReplacementTests(unittest.TestCase):
             output_shapes = output_presentation.slides[0].shapes
             output_named = next(shape for shape in output_shapes if shape.name == "named-source")
             output_unnamed = next(shape for shape in output_shapes if shape.name == "unnamed-source")
+            output_themed = next(shape for shape in output_shapes if shape.name == "themed-source")
             self.assertEqual(
                 "Source Presentation Font",
                 output_named.text_frame.paragraphs[0].runs[0].font.name,
@@ -672,6 +679,10 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(
                 "Noto Sans JP",
                 output_unnamed.text_frame.paragraphs[0].runs[0].font.name,
+            )
+            self.assertEqual(
+                "+mj-lt",
+                output_themed.text_frame.paragraphs[0].runs[0].font.name,
             )
             self.assertEqual(MSO_AUTO_SIZE.NONE, output_named.text_frame.auto_size)
 

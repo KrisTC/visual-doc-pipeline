@@ -39,6 +39,21 @@ class BoundedTextRun:
     italic: bool | None
     underline: str | None
     baseline: int | None
+    source_typefaces: tuple["SourceTypefaceReference", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceTypefaceReference:
+    """One original DrawingML-like script slot and its measurement family.
+
+    ``original_family`` remains the value to write back to the document.  A
+    format adapter may fill ``resolved_family`` for a theme or other indirect
+    reference; the shared layout code never resolves document packaging.
+    """
+
+    script: str
+    original_family: str | None
+    resolved_family: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +95,38 @@ class FittedTextBox:
     text_box: BoundedTextBox
     font_scale: float
     fit_status: str
+    font_selections: tuple["SourceFontSelection", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFontSelection:
+    """The measurement face selected for one source run."""
+
+    source: str
+    requested_family: str | None
+    measured_family: str
+    fallback_reason: str | None
+    original_reference: str | None = None
+    resolved_family: str | None = None
+    script: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedTypefaceCandidate:
+    """A document adapter's already-decoded, in-memory embedded face."""
+
+    family: str
+    style: skia.FontStyle
+    typeface: skia.Typeface
+
+
+@dataclass(frozen=True, slots=True)
+class SourceFontMeasurement:
+    """A run-keyed layout model and the faces selected to measure it."""
+
+    text_box: BoundedTextBox
+    typefaces: dict[str, skia.Typeface]
+    selections: tuple[SourceFontSelection, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +164,162 @@ def noto_typefaces() -> dict[str, skia.Typeface]:
     return typefaces
 
 
+def source_font_measurement(
+    text_box: BoundedTextBox,
+    typefaces: dict[str, skia.Typeface] | None = None,
+    *,
+    embedded_faces: tuple[EmbeddedTypefaceCandidate, ...] = (),
+    font_manager: skia.FontMgr | None = None,
+) -> SourceFontMeasurement:
+    """Resolve exact embedded or installed faces for measurement only.
+
+    Document adapters pass only safely decoded in-memory embedded candidates;
+    this shared boundary neither knows package formats nor opens document paths.
+    """
+    selected_typefaces = dict(typefaces or noto_typefaces())
+    manager = font_manager or skia.FontMgr.RefDefault()
+    selections: list[SourceFontSelection] = []
+    paragraphs: list[BoundedTextParagraph] = []
+    for paragraph_index, paragraph in enumerate(text_box.paragraphs):
+        runs: list[BoundedTextRun] = []
+        for run_index, run in enumerate(paragraph.runs):
+            for segment_index, segment in enumerate(_source_font_segments(run)):
+                typeface, selection = _source_typeface(
+                    segment, selected_typefaces, embedded_faces, manager
+                )
+                key = f"source-face-{paragraph_index}-{run_index}-{segment_index}"
+                selected_typefaces[key] = typeface
+                selections.append(selection)
+                runs.append(replace(segment, font_classification=key))
+        paragraphs.append(replace(paragraph, runs=tuple(runs)))
+    return SourceFontMeasurement(
+        replace(text_box, paragraphs=tuple(paragraphs)), selected_typefaces, tuple(selections)
+    )
+
+
+def _source_typeface(
+    run: BoundedTextRun,
+    noto_faces: dict[str, skia.Typeface],
+    embedded_faces: tuple[EmbeddedTypefaceCandidate, ...],
+    font_manager: skia.FontMgr,
+) -> tuple[skia.Typeface, SourceFontSelection]:
+    fallback = noto_faces[_classification(run)]
+    references = run.source_typefaces or (SourceTypefaceReference("latin", run.font_family),)
+    last_selection: SourceFontSelection | None = None
+    requested_style = _source_font_style(run)
+    for reference in references:
+        requested_family = reference.resolved_family or reference.original_family
+        if not requested_family or requested_family.startswith("+"):
+            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "unresolved-source-family", reference.original_family, reference.resolved_family, reference.script)
+            continue
+        for candidate in embedded_faces:
+            if _same_family(candidate.family, requested_family) and _same_style(candidate.style, requested_style) and _same_family(candidate.typeface.getFamilyName(), requested_family) and _glyphs_available(candidate.typeface, run.text):
+                return candidate.typeface, SourceFontSelection("embedded-source-face", requested_family, candidate.typeface.getFamilyName(), None, reference.original_family, requested_family, reference.script)
+        face = font_manager.matchFamilyStyle(requested_family, requested_style)
+        if face is None:
+            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-face-unavailable", reference.original_family, requested_family, reference.script)
+        elif not _same_family(face.getFamilyName(), requested_family):
+            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-family-mismatch", reference.original_family, requested_family, reference.script)
+        elif not _same_style(face.fontStyle(), requested_style):
+            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-style-mismatch", reference.original_family, requested_family, reference.script)
+        elif not _glyphs_available(face, run.text):
+            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-glyphs-unavailable", reference.original_family, requested_family, reference.script)
+        else:
+            return face, SourceFontSelection("installed-source-face", requested_family, face.getFamilyName(), None, reference.original_family, requested_family, reference.script)
+    assert last_selection is not None
+    generic_classification = {"serif": "serif", "monospace": "fixed-width", "sans-serif": "sans-serif"}.get(
+        (last_selection.original_reference or "").lower()
+    )
+    if generic_classification:
+        fallback = noto_faces[generic_classification]
+        last_selection = replace(last_selection, measured_family=fallback.getFamilyName())
+    return fallback, last_selection
+
+
+def _source_font_segments(run: BoundedTextRun) -> tuple[BoundedTextRun, ...]:
+    """Split runs only when the adapter supplied script-specific references."""
+    if not run.source_typefaces or not run.text:
+        return (run,)
+    segments: list[BoundedTextRun] = []
+    current_script: str | None = None
+    current_text = ""
+    for character in run.text:
+        script = _script_for_character(character)
+        if current_text and script != current_script:
+            segments.append(_source_font_segment(run, current_text, current_script))
+            current_text = ""
+        current_script = script
+        current_text += character
+    if current_text:
+        segments.append(_source_font_segment(run, current_text, current_script))
+    return tuple(segments)
+
+
+def _source_font_segment(
+    run: BoundedTextRun, text: str, script: str | None
+) -> BoundedTextRun:
+    references = tuple(item for item in run.source_typefaces if item.script == script)
+    if not references:
+        references = tuple(item for item in run.source_typefaces if item.script == "latin")
+    if not references:
+        return replace(run, text=text, source_typefaces=())
+    return replace(run, text=text, font_family=references[0].original_family, source_typefaces=references)
+
+
+def _script_for_character(character: str) -> str:
+    codepoint = ord(character)
+    if (
+        0x3000 <= codepoint <= 0x30FF
+        or 0x3400 <= codepoint <= 0x9FFF
+        or 0xAC00 <= codepoint <= 0xD7AF
+        or 0xF900 <= codepoint <= 0xFAFF
+    ):
+        return "eastAsian"
+    name = unicodedata.name(character, "")
+    if any(marker in name for marker in (
+        "ARABIC", "HEBREW", "DEVANAGARI", "BENGALI", "GURMUKHI", "GUJARATI",
+        "ORIYA", "TAMIL", "TELUGU", "KANNADA", "MALAYALAM", "THAI", "LAO",
+        "TIBETAN", "MYANMAR", "GEORGIAN", "ETHIOPIC", "SYRIAC",
+    )):
+        return "complex"
+    return "latin"
+
+
+def _source_font_style(run: BoundedTextRun) -> skia.FontStyle:
+    if run.bold is True and run.italic is True:
+        return skia.FontStyle.BoldItalic()
+    if run.bold is True:
+        return skia.FontStyle.Bold()
+    if run.italic is True:
+        return skia.FontStyle.Italic()
+    return skia.FontStyle.Normal()
+
+
+def _same_style(left: skia.FontStyle, right: skia.FontStyle) -> bool:
+    return bool(
+        left.weight() == right.weight()
+        and left.width() == right.width()
+        and left.slant() == right.slant()
+    )
+
+
+def _same_family(left: str, right: str) -> bool:
+    return " ".join(unicodedata.normalize("NFKC", left).casefold().split()) == " ".join(
+        unicodedata.normalize("NFKC", right).casefold().split()
+    )
+
+
+def _glyphs_available(typeface: skia.Typeface, text: str) -> bool:
+    font = skia.Font(typeface)
+    for character in text:
+        if character in {"\n", "\r", "\v"}:
+            continue
+        glyphs = font.textToGlyphs(character)
+        if not glyphs or int(glyphs[0]) == 0:
+            return False
+    return True
+
+
 def replace_paragraphs(
     text_box: BoundedTextBox,
     provider: TextReplacementProvider,
@@ -138,21 +341,38 @@ def fit_explicit_noto_text_box(
     typefaces: dict[str, skia.Typeface] | None = None,
     *,
     preserve_source_font_family: bool = False,
+    measure_source_fonts: bool = False,
+    embedded_faces: tuple[EmbeddedTypefaceCandidate, ...] = (),
+    font_manager: skia.FontMgr | None = None,
 ) -> FittedTextBox:
     """Fit a replacement and return no-autofit-ready explicit run typography.
 
-    Noto remains the deterministic measurement face.  Callers may preserve a
-    resolved source typeface reference in the written output as a best-effort
-    presentation-design policy.
+    Noto remains the deterministic default. Source-font mode can instead use
+    verified embedded or installed faces while retaining source references in
+    written output.
     """
     selected_typefaces = typefaces or noto_typefaces()
+    measurement = (
+        source_font_measurement(
+            text_box,
+            selected_typefaces,
+            embedded_faces=embedded_faces,
+            font_manager=font_manager,
+        )
+        if measure_source_fonts
+        else None
+    )
+    measurement_box = text_box if measurement is None else measurement.text_box
+    measurement_typefaces = selected_typefaces if measurement is None else measurement.typefaces
     width, height = _content_dimensions(text_box)
     if _is_vertical(text_box):
         # PowerPoint advances vertical text through the shape height, then opens a
         # new column across its width. Shape rotation itself needs no adjustment:
         # it rotates the already-laid-out text frame with the containing shape.
         width, height = height, width
-    scale, status = _fit_scale(text_box.paragraphs, width, height, selected_typefaces)
+    scale, status = _fit_scale(
+        measurement_box.paragraphs, width, height, measurement_typefaces
+    )
     explicit_paragraphs = tuple(
         replace(
             paragraph,
@@ -165,6 +385,7 @@ def fit_explicit_noto_text_box(
                         else selected_typefaces[_classification(run)].getFamilyName()
                     ),
                     font_size_points=_font_points(run) * scale,
+                    source_typefaces=run.source_typefaces if preserve_source_font_family else (),
                 )
                 for run in paragraph.runs
             ),
@@ -175,7 +396,12 @@ def fit_explicit_noto_text_box(
         )
         for paragraph in text_box.paragraphs
     )
-    return FittedTextBox(replace(text_box, paragraphs=explicit_paragraphs), scale, status)
+    return FittedTextBox(
+        replace(text_box, paragraphs=explicit_paragraphs),
+        scale,
+        status,
+        () if measurement is None else measurement.selections,
+    )
 
 
 def replace_and_fit_text_box(
@@ -186,6 +412,9 @@ def replace_and_fit_text_box(
     typefaces: dict[str, skia.Typeface] | None = None,
     *,
     preserve_source_font_family: bool = False,
+    measure_source_fonts: bool = False,
+    embedded_faces: tuple[EmbeddedTypefaceCandidate, ...] = (),
+    font_manager: skia.FontMgr | None = None,
 ) -> FittedTextBox:
     """Apply the standard paragraph replacement and explicit fitting policy.
 
@@ -197,12 +426,19 @@ def replace_and_fit_text_box(
         replace_paragraphs(text_box, provider, source_language, target_language),
         typefaces,
         preserve_source_font_family=preserve_source_font_family,
+        measure_source_fonts=measure_source_fonts,
+        embedded_faces=embedded_faces,
+        font_manager=font_manager,
     )
 
 
 def source_occupied_text_box(
     text_box: BoundedTextBox,
     typefaces: dict[str, skia.Typeface] | None = None,
+    *,
+    measure_source_fonts: bool = False,
+    embedded_faces: tuple[EmbeddedTypefaceCandidate, ...] = (),
+    font_manager: skia.FontMgr | None = None,
 ) -> BoundedTextBox:
     """Return no-autofit's source-width and natural-height fitting rectangle.
 
@@ -212,12 +448,24 @@ def source_occupied_text_box(
     the source shape geometry when they write the fitted replacement.
     """
     selected_typefaces = typefaces or noto_typefaces()
+    measurement = (
+        source_font_measurement(
+            text_box,
+            selected_typefaces,
+            embedded_faces=embedded_faces,
+            font_manager=font_manager,
+        )
+        if measure_source_fonts
+        else None
+    )
+    measurement_box = text_box if measurement is None else measurement.text_box
+    measurement_typefaces = selected_typefaces if measurement is None else measurement.typefaces
     content_width, content_height = _content_dimensions(text_box)
     layout_width, layout_height = content_width, content_height
     if _is_vertical(text_box):
         layout_width, layout_height = layout_height, layout_width
 
-    lines = _layout_lines(text_box.paragraphs, layout_width, selected_typefaces, 1.0)
+    lines = _layout_lines(measurement_box.paragraphs, layout_width, measurement_typefaces, 1.0)
     if _is_vertical(text_box):
         width_emu = _natural_dimension_emu(
             _layout_height(lines), text_box.margin_left_emu, text_box.margin_right_emu
@@ -435,7 +683,7 @@ def _measure(text: str, style: _Style, typefaces: dict[str, skia.Typeface]) -> f
 
 
 def _classification(run: BoundedTextRun) -> str:
-    return run.font_classification if run.font_classification in FONT_PATHS else "sans-serif"
+    return run.font_classification
 
 
 def _font_points(run: BoundedTextRun) -> float:

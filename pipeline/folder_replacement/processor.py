@@ -590,6 +590,7 @@ def _replace_pdf_annotations(
             replaced_items += _replace_pdf_bounded_dictionary_text(
                 annotation, "/Contents", replacement_provider, source_language, target_language, writer,
                 embed_noto=document_text_layout == "preserve-basic-layout",
+                measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
             )
             continue
         replaced_items += _replace_pdf_dictionary_text(
@@ -632,6 +633,7 @@ def _replace_pdf_form_fields(
         replaced_items = _replace_pdf_bounded_dictionary_text(
             dictionary, "/V", replacement_provider, source_language, target_language, writer,
             embed_noto=document_text_layout == "preserve-basic-layout",
+            measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
         )
     else:
         replaced_items = _replace_pdf_dictionary_text(
@@ -717,6 +719,7 @@ def _replace_pdf_bounded_dictionary_text(
     writer: PdfWriter,
     *,
     embed_noto: bool,
+    measure_source_fonts: bool,
 ) -> int:
     """Fit a form/FreeText value and make its portable-size setting explicit.
 
@@ -743,6 +746,7 @@ def _replace_pdf_bounded_dictionary_text(
     fitted = replace_and_fit_text_box(
         box, replacement_provider, source_language, target_language, noto_typefaces(),
         preserve_source_font_family=True,
+        measure_source_fonts=measure_source_fonts,
     )
     run = fitted.text_box.paragraphs[0].runs[0]
     set_value(NameObject(key), TextStringObject(run.text))

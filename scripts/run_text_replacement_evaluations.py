@@ -43,9 +43,13 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    SourceFontSelection,
+    SourceTypefaceReference,
     fit_explicit_noto_text_box,
+    source_font_measurement,
     source_occupied_text_box,
 )
+from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.text_replacement import (
     TextReplacementProviderFactory,
     TextReplacementRequest,
@@ -80,6 +84,7 @@ class TextRunProperties:
     italic: bool | None
     underline: str | None
     baseline: int | None
+    source_typefaces: tuple[SourceTypefaceReference, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,11 +272,33 @@ def evaluate_text_replacement_examples(
                         language_directory.name,
                         target_language,
                     )
+                    source_font_output_path = output_path.with_name(
+                        f"{output_path.stem}.sf.html"
+                    )
+                    source_font_artifacts = _render_text_boxes(
+                        text_box_evaluations,
+                        typefaces,
+                        source_font_output_path,
+                        providers,
+                        language_directory.name,
+                        target_language,
+                        source_font=True,
+                    )
+                    _write_html_page(
+                        source_font_output_path,
+                        source_path.relative_to(input_root),
+                        tuple(item.source_properties for item in text_box_evaluations),
+                        source_font_artifacts,
+                        provider_names,
+                        language_directory.name,
+                        target_language,
+                        source_font=True,
+                    )
                 except (OSError, PackageNotFoundError, RuntimeError, ValueError) as error:
                     result.skipped_presentations += 1
                     print(f"Skipping {source_path}: {error}.")
                 else:
-                    result.written_pages += 1
+                    result.written_pages += 2
                     result.rendered_text_boxes += len(text_box_evaluations)
                 finally:
                     progress.update(1)
@@ -299,8 +326,12 @@ def _load_typeface(path: Path) -> skia.Typeface:
 def _presentation_text_boxes(source_path: Path) -> Iterable[_TextBoxEvaluation]:
     """Yield eligible text boxes, including text boxes in grouped shapes."""
     presentation = Presentation(str(source_path))
+    themes = pptx_themes_by_slide(source_path)
     for slide_number, slide in enumerate(presentation.slides, 1):
-        yield from _slide_text_boxes(slide.shapes, slide_number, (), slide.slide_layout)
+        yield from _slide_text_boxes(
+            slide.shapes, slide_number, (), slide.slide_layout,
+            themes[slide_number - 1] if slide_number <= len(themes) else None,
+        )
 
 
 def _slide_text_boxes(
@@ -308,12 +339,13 @@ def _slide_text_boxes(
     slide_number: int,
     group_path: tuple[int, ...],
     slide_layout: object,
+    theme: PptxThemeFonts | None,
 ) -> Iterable[_TextBoxEvaluation]:
     for shape_number, shape in enumerate(shapes, 1):
         path = group_path + (shape_number,)
         if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
             group_shape = cast(GroupShape, shape)
-            yield from _slide_text_boxes(group_shape.shapes, slide_number, path, slide_layout)
+            yield from _slide_text_boxes(group_shape.shapes, slide_number, path, slide_layout, theme)
             continue
         if not shape.has_text_frame:
             continue
@@ -325,7 +357,7 @@ def _slide_text_boxes(
         )
         yield _TextBoxEvaluation(
             source_properties,
-            _effective_text_box_properties(text_shape, source_properties, slide_layout),
+            _effective_text_box_properties(text_shape, source_properties, slide_layout, theme),
         )
 
 
@@ -363,11 +395,11 @@ def _text_box_properties(shape: Shape, source: str) -> TextBoxProperties:
 
 
 def _effective_text_box_properties(
-    shape: Shape, source_properties: TextBoxProperties, slide_layout: object
+    shape: Shape, source_properties: TextBoxProperties, slide_layout: object, theme: PptxThemeFonts | None
 ) -> TextBoxProperties:
     """Resolve list-style defaults needed to make editable layout self-contained."""
     paragraphs = tuple(
-        _effective_paragraph_properties(paragraph, source_paragraph, shape, slide_layout)
+        _effective_paragraph_properties(paragraph, source_paragraph, shape, slide_layout, theme)
         for paragraph, source_paragraph in zip(
             shape.text_frame.paragraphs, source_properties.paragraphs, strict=True
         )
@@ -380,6 +412,7 @@ def _effective_paragraph_properties(
     source_properties: ParagraphProperties,
     shape: Shape,
     slide_layout: object,
+    theme: PptxThemeFonts | None,
 ) -> ParagraphProperties:
     style_properties = _paragraph_style_properties(
         shape, slide_layout, source_properties.level, paragraph._p.pPr
@@ -387,7 +420,7 @@ def _effective_paragraph_properties(
     bullet_kind, bullet_marker = _effective_bullet(style_properties)
     defaults = _run_defaults(style_properties)
     runs = tuple(
-        _effective_run_properties(run, defaults) for run in source_properties.runs
+        _effective_run_properties(run, defaults, theme) for run in source_properties.runs
     )
     return replace(
         source_properties,
@@ -504,6 +537,7 @@ class _RunDefaults:
     italic: bool | None = None
     underline: str | None = None
     baseline: int | None = None
+    source_typefaces: tuple[SourceTypefaceReference, ...] = ()
 
 
 def _run_defaults(style_properties: tuple[object, ...]) -> _RunDefaults:
@@ -529,6 +563,9 @@ def _merge_run_defaults(defaults: _RunDefaults, properties: object) -> _RunDefau
         italic=italic if italic is not None else defaults.italic,
         underline=underline if underline is not None else defaults.underline,
         baseline=int(baseline) if baseline is not None else defaults.baseline,
+        source_typefaces=_merge_source_typefaces(
+            defaults.source_typefaces, _source_typefaces_from_properties(properties)
+        ),
     )
 
 
@@ -543,6 +580,32 @@ def _font_family_from_properties(properties: object) -> str | None:
     return None
 
 
+def _source_typefaces_from_properties(
+    properties: object,
+) -> tuple[SourceTypefaceReference, ...]:
+    element = cast("_XmlSearchElement", properties)
+    references: list[SourceTypefaceReference] = []
+    for script, tag in (("latin", "latin"), ("eastAsian", "ea"), ("complex", "cs")):
+        family_element = element.find(qn(f"a:{tag}"))
+        if family_element is not None and family_element.get("typeface"):
+            references.append(SourceTypefaceReference(script, family_element.get("typeface")))
+    return tuple(references)
+
+
+def _merge_source_typefaces(
+    defaults: tuple[SourceTypefaceReference, ...], direct: tuple[SourceTypefaceReference, ...]
+) -> tuple[SourceTypefaceReference, ...]:
+    by_script = {item.script: item for item in defaults}
+    by_script.update({item.script: item for item in direct})
+    return tuple(by_script[script] for script in ("latin", "eastAsian", "complex") if script in by_script)
+
+
+def _primary_source_family(references: tuple[SourceTypefaceReference, ...]) -> str | None:
+    return next((item.original_family for item in references if item.script == "latin"), None) or next(
+        (item.original_family for item in references), None
+    )
+
+
 def _xml_boolean(value: str | None) -> bool | None:
     if value is None:
         return None
@@ -550,9 +613,11 @@ def _xml_boolean(value: str | None) -> bool | None:
 
 
 def _effective_run_properties(
-    source_properties: TextRunProperties, defaults: _RunDefaults
+    source_properties: TextRunProperties, defaults: _RunDefaults, theme: PptxThemeFonts | None
 ) -> TextRunProperties:
-    font_family = source_properties.font_family or defaults.font_family
+    source_typefaces = _merge_source_typefaces(defaults.source_typefaces, source_properties.source_typefaces)
+    source_typefaces = resolve_theme_typefaces(source_typefaces, theme, source_properties.text)
+    font_family = source_properties.font_family or defaults.font_family or _primary_source_family(source_typefaces)
     return replace(
         source_properties,
         font_family=font_family,
@@ -566,6 +631,7 @@ def _effective_run_properties(
         baseline=source_properties.baseline
         if source_properties.baseline is not None
         else defaults.baseline,
+        source_typefaces=source_typefaces,
     )
 
 
@@ -666,6 +732,7 @@ def _run_properties(run: _Run) -> TextRunProperties:
         italic=font.italic,
         underline=_enum_name(font.underline),
         baseline=_font_baseline(font._element),
+        source_typefaces=_source_typefaces_from_properties(font._element),
     )
 
 
@@ -734,8 +801,14 @@ def _render_text_boxes(
     providers: dict[str, TextReplacementProvider],
     source_language: str,
     target_language: str,
+    *,
+    source_font: bool = False,
 ) -> tuple[_TextBoxArtifact, ...]:
-    artifact_directory = output_path.with_name(f"{output_path.stem}.text-layout-artifacts")
+    artifact_directory = (
+        output_path.with_suffix("")
+        if source_font
+        else output_path.with_name(f"{output_path.stem}.text-layout-artifacts")
+    )
     artifacts: list[_TextBoxArtifact] = []
     for text_box_index, text_box_evaluation in enumerate(text_box_evaluations, 1):
         source_properties = text_box_evaluation.source_properties
@@ -744,10 +817,15 @@ def _render_text_boxes(
         properties_path = artifact_stem.with_suffix(".json")
         explicit_properties_path = artifact_stem.with_suffix(".explicit.json")
         rendering_path.parent.mkdir(parents=True, exist_ok=True)
-        source_preview = _source_preview_fitting(text_box_evaluation.effective_properties, typefaces)
+        rendering_properties, rendering_typefaces, source_selections = (
+            _source_measurement_properties(text_box_evaluation.effective_properties, typefaces)
+            if source_font
+            else (text_box_evaluation.effective_properties, typefaces, ())
+        )
+        source_preview = _source_preview_fitting(rendering_properties, rendering_typefaces)
         rendering, layout_fit = _render_text_box(
-            text_box_evaluation.effective_properties,
-            typefaces,
+            rendering_properties,
+            rendering_typefaces,
             layout_fit=source_preview.layout_fit,
             canvas_height_emu=source_preview.canvas_height_emu,
             source_shape_guide=(
@@ -770,13 +848,18 @@ def _render_text_boxes(
         )
         explicit_properties = asdict(
             _explicit_text_box_properties(
-                text_box_evaluation.effective_properties, layout_fit, typefaces
+                rendering_properties,
+                layout_fit,
+                rendering_typefaces,
+                preserve_source_font_family=source_font,
             )
         )
         explicit_properties["rendering"] = {
             "font_scale": layout_fit.font_scale,
             "fit_status": layout_fit.fit_status,
         }
+        if source_font:
+            explicit_properties["measurement_faces"] = [asdict(item) for item in source_selections]
         explicit_properties_path.write_text(
             json.dumps(explicit_properties, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -789,12 +872,27 @@ def _render_text_boxes(
                 source_language,
                 target_language,
             )
-            replacement_fitting = _replacement_fitting(
-                text_box_evaluation.effective_properties, replacement_text_box, typefaces
-            )
+            if source_font:
+                (
+                    replacement_properties,
+                    replacement_typefaces,
+                    replacement_selections,
+                ) = _source_measurement_properties(replacement_text_box, typefaces)
+                replacement_fitting = _source_replacement_fitting(
+                    text_box_evaluation.effective_properties,
+                    replacement_properties,
+                    replacement_typefaces,
+                )
+            else:
+                replacement_properties = replacement_text_box
+                replacement_typefaces = typefaces
+                replacement_selections = ()
+                replacement_fitting = _replacement_fitting(
+                    text_box_evaluation.effective_properties, replacement_text_box, typefaces
+                )
             replacement_rendering, replacement_layout_fit = _render_text_box(
-                replacement_text_box,
-                typefaces,
+                replacement_properties,
+                replacement_typefaces,
                 layout_fit=replacement_fitting.layout_fit,
                 derived_fit_box=(
                     replacement_fitting.fitting_box
@@ -814,7 +912,10 @@ def _render_text_boxes(
             replacement_rendering.save(replacement_rendering_path, format="PNG")
             replacement_explicit_properties = asdict(
                 _explicit_text_box_properties(
-                    replacement_text_box, replacement_layout_fit, typefaces
+                    replacement_properties,
+                    replacement_layout_fit,
+                    replacement_typefaces,
+                    preserve_source_font_family=source_font,
                 )
             )
             replacement_explicit_properties["rendering"] = {
@@ -832,6 +933,10 @@ def _render_text_boxes(
                 "derived_from_source": replacement_fitting.derived_from_source,
                 "rectangle": _fitting_rectangle(replacement_fitting.fitting_box),
             }
+            if source_font:
+                replacement_explicit_properties["measurement_faces"] = [
+                    asdict(item) for item in replacement_selections
+                ]
             replacement_explicit_path.write_text(
                 json.dumps(replacement_explicit_properties, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
@@ -881,6 +986,74 @@ def _replacement_fitting(
         derived_from_source,
         source_text_box.height_emu,
     )
+
+
+def _source_replacement_fitting(
+    source_text_box: TextBoxProperties,
+    replacement_text_box: TextBoxProperties,
+    typefaces: dict[str, skia.Typeface],
+) -> _ReplacementFitting:
+    """Fit the source-font preview using its already-selected measurement faces."""
+    source_bounded = _bounded_text_box(source_text_box)
+    derived_from_source = source_text_box.explicit_no_autofit
+    fitting_box = (
+        source_occupied_text_box(source_bounded, typefaces, measure_source_fonts=True)
+        if derived_from_source
+        else source_bounded
+    )
+    replacement_bounded = replace(
+        _bounded_text_box(replacement_text_box),
+        width_emu=fitting_box.width_emu,
+        height_emu=fitting_box.height_emu,
+    )
+    fitted = fit_explicit_noto_text_box(
+        replacement_bounded,
+        typefaces,
+        preserve_source_font_family=True,
+    )
+    full_width, _ = _content_dimensions(replacement_text_box)
+    return _ReplacementFitting(
+        _LayoutFit(
+            _layout_lines(
+                replacement_text_box.paragraphs, full_width, typefaces, fitted.font_scale
+            ),
+            fitted.font_scale,
+            fitted.fit_status,
+        ),
+        fitting_box,
+        derived_from_source,
+        source_text_box.height_emu,
+    )
+
+
+def _source_measurement_properties(
+    text_box: TextBoxProperties, typefaces: dict[str, skia.Typeface]
+) -> tuple[TextBoxProperties, dict[str, skia.Typeface], tuple[SourceFontSelection, ...]]:
+    """Apply common resolver-selected run keys to evaluator rendering properties."""
+    measurement = source_font_measurement(_bounded_text_box(text_box), typefaces)
+    paragraphs = tuple(
+        replace(
+            paragraph,
+            runs=tuple(
+                TextRunProperties(
+                    text=measured_run.text,
+                    font_family=measured_run.font_family,
+                    font_classification=measured_run.font_classification,
+                    font_size_points=measured_run.font_size_points,
+                    bold=measured_run.bold,
+                    italic=measured_run.italic,
+                    underline=measured_run.underline,
+                    baseline=measured_run.baseline,
+                    source_typefaces=measured_run.source_typefaces,
+                )
+                for measured_run in measured_paragraph.runs
+            ),
+        )
+        for paragraph, measured_paragraph in zip(
+            text_box.paragraphs, measurement.text_box.paragraphs, strict=True
+        )
+    )
+    return replace(text_box, paragraphs=paragraphs), measurement.typefaces, measurement.selections
 
 
 def _source_preview_fitting(
@@ -942,6 +1115,7 @@ def _bounded_text_box(text_box: TextBoxProperties) -> BoundedTextBox:
                         italic=run.italic,
                         underline=run.underline,
                         baseline=run.baseline,
+                        source_typefaces=run.source_typefaces,
                     )
                     for run in paragraph.runs
                 ),
@@ -999,6 +1173,8 @@ def _explicit_text_box_properties(
     text_box: TextBoxProperties,
     layout_fit: _LayoutFit,
     typefaces: dict[str, skia.Typeface],
+    *,
+    preserve_source_font_family: bool = False,
 ) -> TextBoxProperties:
     """Return evaluator-writable properties with selected fonts and fitted sizes."""
     paragraphs = tuple(
@@ -1007,7 +1183,11 @@ def _explicit_text_box_properties(
             runs=tuple(
                 replace(
                     run,
-                    font_family=typefaces[run.font_classification].getFamilyName(),
+                    font_family=(
+                        run.font_family
+                        if preserve_source_font_family and run.font_family
+                        else typefaces[run.font_classification].getFamilyName()
+                    ),
                     font_size_points=(run.font_size_points or DEFAULT_FONT_SIZE_POINTS)
                     * layout_fit.font_scale,
                 )
@@ -1407,6 +1587,8 @@ def _write_html_page(
     provider_names: tuple[str, ...],
     source_language: str,
     target_language: str,
+    *,
+    source_font: bool = False,
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     rows = "\n".join(
@@ -1416,6 +1598,7 @@ def _write_html_page(
     if not rows:
         rows = f'<tr><td colspan="{2 + len(provider_names)}">No eligible text boxes.</td></tr>'
     title = html.escape(source_path.as_posix())
+    report_title = "Native source-font text-layout evaluation" if source_font else "Native text-layout evaluation"
     provider_headers = "".join(f"<th>{html.escape(name)}</th>" for name in provider_names)
     output_path.write_text(
         f"""<!doctype html>
@@ -1423,7 +1606,7 @@ def _write_html_page(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Native text-layout evaluation: {title}</title>
+  <title>{report_title}: {title}</title>
   <style>
     body {{ background: #f6f7f9; color: #1f2937; font-family: system-ui, sans-serif; margin: 0; overflow-x: auto; }}
     main {{ padding: 2rem; width: max-content; }}
@@ -1435,7 +1618,7 @@ def _write_html_page(
 </head>
 <body>
   <main>
-    <h1>Native text-layout evaluation</h1>
+    <h1>{report_title}</h1>
     <p>PowerPoint source: <code>{title}</code> <span>{html.escape(source_language)}→{html.escape(target_language)}</span></p>
     <table>
       <thead><tr><th>Text box</th><th>Original</th>{provider_headers}</tr></thead>

@@ -30,10 +30,12 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    SourceTypefaceReference,
     noto_typefaces,
     replace_and_fit_text_box,
     source_occupied_text_box,
 )
+from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.ocr import OcrProvider
 from pipeline.folder_replacement.office_xml import (
     replace_drawing_diagram_xml_text,
@@ -132,6 +134,7 @@ def replace_pptx_file(
     }:
         raise ValueError(f"Unsupported document text layout mode: {document_text_layout!r}")
     preserve_source_font_family = document_text_layout == "preserve-basic-layout-source-font"
+    slide_themes = pptx_themes_by_slide(source) if preserve_source_font_family else ()
 
     # Preserve the established embedded bitmap and vector paths before python-pptx
     # rewrites supported slide text frames.
@@ -155,7 +158,7 @@ def replace_pptx_file(
     )
     presentation = Presentation(str(destination))
     layout_typefaces = noto_typefaces()
-    for slide in presentation.slides:
+    for slide_index, slide in enumerate(presentation.slides):
         native_items += _replace_slide_text_frames(
             slide.shapes,
             slide.slide_layout,
@@ -164,6 +167,7 @@ def replace_pptx_file(
             target_language,
             layout_typefaces,
             preserve_source_font_family,
+            slide_themes[slide_index] if slide_index < len(slide_themes) else None,
         )
     presentation.save(str(destination))
     native_items += _replace_speaker_note_parts(
@@ -319,6 +323,7 @@ def _replace_slide_text_frames(
     target_language: str,
     typefaces: dict[str, skia.Typeface],
     preserve_source_font_family: bool,
+    theme: PptxThemeFonts | None,
 ) -> int:
     replaced = 0
     for shape in shapes:
@@ -331,6 +336,7 @@ def _replace_slide_text_frames(
                 target_language,
                 typefaces,
                 preserve_source_font_family,
+                theme,
             )
             continue
         if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
@@ -341,6 +347,7 @@ def _replace_slide_text_frames(
                 target_language,
                 typefaces,
                 preserve_source_font_family,
+                theme,
             )
             continue
         if not shape.has_text_frame:
@@ -348,9 +355,11 @@ def _replace_slide_text_frames(
         text_shape = cast(_TextShape, shape)
         if not _has_text(text_shape):
             continue
-        text_box = _text_box(text_shape, slide_layout)
+        text_box = _text_box(text_shape, slide_layout, theme if preserve_source_font_family else None)
         fit_box = (
-            source_occupied_text_box(text_box, typefaces)
+            source_occupied_text_box(
+                text_box, typefaces, measure_source_fonts=preserve_source_font_family
+            )
             if _has_explicit_no_autofit(text_shape.text_frame)
             else text_box
         )
@@ -361,6 +370,7 @@ def _replace_slide_text_frames(
             target_language,
             typefaces,
             preserve_source_font_family=preserve_source_font_family,
+            measure_source_fonts=preserve_source_font_family,
         )
         _write_explicit_text_frame(text_shape.text_frame, fitted.text_box)
         replaced += sum(
@@ -378,6 +388,7 @@ def _replace_table_cells(
     target_language: str,
     typefaces: dict[str, skia.Typeface],
     preserve_source_font_family: bool,
+    theme: PptxThemeFonts | None,
 ) -> int:
     """Replace each merge-origin table cell using its resolved grid rectangle."""
     replaced = 0
@@ -393,7 +404,7 @@ def _replace_table_cells(
                 )
                 continue
             width, height = bounds
-            text_box = _table_cell_text_box(cell, width, height)
+            text_box = _table_cell_text_box(cell, width, height, theme if preserve_source_font_family else None)
             if not _has_non_whitespace_text(text_box):
                 continue
             fitted = replace_and_fit_text_box(
@@ -403,6 +414,7 @@ def _replace_table_cells(
                 target_language,
                 typefaces,
                 preserve_source_font_family=preserve_source_font_family,
+                measure_source_fonts=preserve_source_font_family,
             )
             _write_explicit_text_frame(
                 cell.text_frame,
@@ -434,7 +446,9 @@ def _table_cell_bounds(
     return (width, height) if width > 0 and height > 0 else None
 
 
-def _table_cell_text_box(cell: _Cell, width: int, height: int) -> BoundedTextBox:
+def _table_cell_text_box(
+    cell: _Cell, width: int, height: int, theme: PptxThemeFonts | None
+) -> BoundedTextBox:
     """Build a bounded layout model using the table cell's own margins."""
     text_frame = cell.text_frame
     return BoundedTextBox(
@@ -446,12 +460,14 @@ def _table_cell_text_box(cell: _Cell, width: int, height: int) -> BoundedTextBox
         margin_bottom_emu=int(cell.margin_bottom),
         text_direction=text_frame._element.bodyPr.get("vert"),
         paragraphs=tuple(
-            _effective_table_cell_paragraph(paragraph) for paragraph in text_frame.paragraphs
+            _effective_table_cell_paragraph(paragraph, theme) for paragraph in text_frame.paragraphs
         ),
     )
 
 
-def _effective_table_cell_paragraph(paragraph: _Paragraph) -> BoundedTextParagraph:
+def _effective_table_cell_paragraph(
+    paragraph: _Paragraph, theme: PptxThemeFonts | None
+) -> BoundedTextParagraph:
     direct = _paragraph_properties(paragraph)
     style_properties = (paragraph._p.pPr,) if paragraph._p.pPr is not None else ()
     defaults = _run_defaults(style_properties)
@@ -473,7 +489,7 @@ def _effective_table_cell_paragraph(paragraph: _Paragraph) -> BoundedTextParagra
         bullet_marker=bullet_marker,
         empty_line_font_size_points=direct.empty_line_font_size_points
         or defaults.font_size_points,
-        runs=tuple(_effective_run(run, defaults) for run in direct.runs),
+        runs=tuple(_effective_run(run, defaults, theme) for run in direct.runs),
     )
 
 
@@ -513,10 +529,12 @@ def _has_explicit_no_autofit(text_frame: TextFrame) -> bool:
     return text_frame._element.bodyPr.find(qn("a:noAutofit")) is not None
 
 
-def _text_box(shape: "_TextShape", slide_layout: object) -> BoundedTextBox:
+def _text_box(
+    shape: "_TextShape", slide_layout: object, theme: PptxThemeFonts | None
+) -> BoundedTextBox:
     text_frame = shape.text_frame
     paragraphs = tuple(
-        _effective_paragraph(paragraph, shape, slide_layout)
+        _effective_paragraph(paragraph, shape, slide_layout, theme)
         for paragraph in text_frame.paragraphs
     )
     return BoundedTextBox(
@@ -532,7 +550,7 @@ def _text_box(shape: "_TextShape", slide_layout: object) -> BoundedTextBox:
 
 
 def _effective_paragraph(
-    paragraph: _Paragraph, shape: "_TextShape", slide_layout: object
+    paragraph: _Paragraph, shape: "_TextShape", slide_layout: object, theme: PptxThemeFonts | None
 ) -> BoundedTextParagraph:
     direct = _paragraph_properties(paragraph)
     style_properties = _paragraph_style_properties(
@@ -557,7 +575,7 @@ def _effective_paragraph(
         bullet_marker=bullet_marker,
         empty_line_font_size_points=direct.empty_line_font_size_points
         or defaults.font_size_points,
-        runs=tuple(_effective_run(run, defaults) for run in direct.runs),
+        runs=tuple(_effective_run(run, defaults, theme) for run in direct.runs),
     )
 
 
@@ -588,6 +606,7 @@ def _paragraph_properties(paragraph: _Paragraph) -> BoundedTextParagraph:
 
 
 def _run_properties(run: _Run) -> BoundedTextRun:
+    source_typefaces = _source_typefaces_from_properties(run.font._element)
     return BoundedTextRun(
         text=run.text,
         font_family=run.font.name,
@@ -597,6 +616,7 @@ def _run_properties(run: _Run) -> BoundedTextRun:
         italic=run.font.italic,
         underline=_enum_name(run.font.underline),
         baseline=_xml_integer(run.font._element, "baseline"),
+        source_typefaces=source_typefaces,
     )
 
 
@@ -608,6 +628,7 @@ class _RunDefaults:
     italic: bool | None = None
     underline: str | None = None
     baseline: int | None = None
+    source_typefaces: tuple[SourceTypefaceReference, ...] = ()
 
 
 def _paragraph_style_properties(
@@ -680,12 +701,19 @@ def _run_defaults(properties: tuple[object, ...]) -> _RunDefaults:
             else defaults.italic,
             underline=run_properties.get("u") or defaults.underline,
             baseline=_xml_integer(run_properties, "baseline") or defaults.baseline,
+            source_typefaces=_merge_source_typefaces(
+                defaults.source_typefaces, _source_typefaces_from_properties(run_properties)
+            ),
         )
     return defaults
 
 
-def _effective_run(run: BoundedTextRun, defaults: _RunDefaults) -> BoundedTextRun:
-    family = run.font_family or defaults.font_family
+def _effective_run(
+    run: BoundedTextRun, defaults: _RunDefaults, theme: PptxThemeFonts | None
+) -> BoundedTextRun:
+    source_typefaces = _merge_source_typefaces(defaults.source_typefaces, run.source_typefaces)
+    source_typefaces = resolve_theme_typefaces(source_typefaces, theme, run.text)
+    family = run.font_family or defaults.font_family or _primary_source_family(source_typefaces)
     return replace(
         run,
         font_family=family,
@@ -695,6 +723,7 @@ def _effective_run(run: BoundedTextRun, defaults: _RunDefaults) -> BoundedTextRu
         italic=run.italic if run.italic is not None else defaults.italic,
         underline=run.underline if run.underline is not None else defaults.underline,
         baseline=run.baseline if run.baseline is not None else defaults.baseline,
+        source_typefaces=source_typefaces,
     )
 
 
@@ -848,12 +877,21 @@ def _write_bullet(properties: object, paragraph: BoundedTextParagraph) -> None:
 def _write_run_properties(properties: object, run: BoundedTextRun) -> None:
     element = cast("_XmlElement", properties)
     element.set("sz", str(_ooxml_font_size_centipoints(run.font_size_points or 18.0)))
-    for tag in ("a:latin", "a:ea"):
+    references = (
+        (
+            {"latin": "a:latin", "eastAsian": "a:ea", "complex": "a:cs"}[item.script],
+            item.original_family,
+        )
+        for item in run.source_typefaces
+    ) if run.source_typefaces else ((tag, run.font_family or "Noto Sans JP") for tag in ("a:latin", "a:ea"))
+    for tag, family in references:
+        if not family:
+            continue
         child = element.find(qn(tag))
         if child is None:
             child = _new_element(tag)
             element.append(child)
-        child.set("typeface", run.font_family or "Noto Sans JP")
+        child.set("typeface", family)
     _reorder_children(element, _RUN_PROPERTY_CHILD_ORDER)
 
 
@@ -924,6 +962,32 @@ def _font_from_properties(properties: object) -> str | None:
         if candidate is not None and candidate.get("typeface"):
             return candidate.get("typeface")
     return None
+
+
+def _source_typefaces_from_properties(
+    properties: object,
+) -> tuple[SourceTypefaceReference, ...]:
+    element = cast("_XmlElement", properties)
+    references: list[SourceTypefaceReference] = []
+    for script, tag in (("latin", "a:latin"), ("eastAsian", "a:ea"), ("complex", "a:cs")):
+        candidate = element.find(qn(tag))
+        if candidate is not None and candidate.get("typeface"):
+            references.append(SourceTypefaceReference(script, candidate.get("typeface")))
+    return tuple(references)
+
+
+def _merge_source_typefaces(
+    defaults: tuple[SourceTypefaceReference, ...], direct: tuple[SourceTypefaceReference, ...]
+) -> tuple[SourceTypefaceReference, ...]:
+    by_script = {item.script: item for item in defaults}
+    by_script.update({item.script: item for item in direct})
+    return tuple(by_script[script] for script in ("latin", "eastAsian", "complex") if script in by_script)
+
+
+def _primary_source_family(references: tuple[SourceTypefaceReference, ...]) -> str | None:
+    return next((item.original_family for item in references if item.script == "latin"), None) or next(
+        (item.original_family for item in references), None
+    )
 
 
 def _xml_integer(element: object | None, name: str) -> int | None:

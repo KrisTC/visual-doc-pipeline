@@ -976,7 +976,7 @@ Native text elements have explicit bounds and may contain multiple runs with dis
 
 The initial input format is PPTX only. The evaluator shall use the ordinary local evaluation corpus, including locally processed confidential samples under the repository's confidential-sample rule. It shall ignore PowerPoint temporary lock files whose filename starts with `~$`. It shall recursively traverse each slide's shape tree and evaluate each shape with a text frame, including text frames within grouped shapes. Tables, charts, notes, masters, layouts, and other text not exposed as a slide-shape text frame are out of scope. The command shall accept `--input-root` and `--output-root`, defaulting to `sample-data/` and `outputs/evaluations/text-replacement/`. It shall write one HTML page for each source presentation and a sibling artifact directory named after that page; each text box shall have a PNG rendering and JSON properties file in that directory. The HTML shall display the PNG at its native pixel dimensions without a forced maximum size. Because each HTML page represents one presentation, the table shall show only a slide/object reference rather than repeating the presentation filename in each row. Reported dimensions, padding, paragraph spacing, and font sizes shall use PowerPoint's source English Metric Units (EMUs) and points where applicable.
 
-The first renderer shall support the reported run-level typography, paragraph alignment and spacing, text-frame padding, vertical alignment, text rotation, direct bullet characters, and empty paragraphs. It shall preserve an empty paragraph's line advance, using its direct end-paragraph run font size when present, but shall not render a bullet for an empty paragraph. Underlines shall use the selected Skia typeface's underline position and thickness metrics rather than an estimated size-relative position, and an explicit false underline setting shall suppress underline rendering. It shall report direct source properties and resolve list-style defaults through the PowerPoint master, layout, text-frame, and paragraph precedence chain for the evaluator's explicit-properties artifacts. Theme resolution remains out of scope. For rendering only, an absent direct font size shall use 18 points and an absent direct font-family classification shall use sans-serif. The committed Noto Sans JP, Noto Serif JP, and Noto Sans Mono assets shall be selected, respectively, for sans-serif, serif, and fixed-width classifications. Tab layout and automatic-number and picture bullets remain out of scope. Colour, shape fill, borders, and other non-layout visual styling are out of scope for this first pass.
+The first renderer shall support the reported run-level typography, paragraph alignment and spacing, text-frame padding, vertical alignment, text rotation, direct bullet characters, and empty paragraphs. It shall preserve an empty paragraph's line advance, using its direct end-paragraph run font size when present, but shall not render a bullet for an empty paragraph. Underlines shall use the selected Skia typeface's underline position and thickness metrics rather than an estimated size-relative position, and an explicit false underline setting shall suppress underline rendering. It shall report direct source properties and resolve list-style defaults through the PowerPoint master, layout, text-frame, and paragraph precedence chain for the evaluator's explicit-properties artifacts. Theme resolution remains out of scope except where FR-2026-08-22-10 requires it for source-font fitting and previews. For rendering only, an absent direct font size shall use 18 points and an absent direct font-family classification shall use sans-serif. The committed Noto Sans JP, Noto Serif JP, and Noto Sans Mono assets shall be selected, respectively, for sans-serif, serif, and fixed-width classifications. Tab layout and automatic-number and picture bullets remain out of scope. Colour, shape fill, borders, and other non-layout visual styling are out of scope for this first pass.
 
 Source symbol-font `buChar` codepoints may not render as their intended visual glyph with the committed Noto fonts. A future fallback must map a source symbol-font character to an appropriate Unicode glyph supported by the committed Noto assets; it shall not depend on an operating-system symbol font. The initial supported source symbol fonts and their mapping coverage remain to be specified.
 
@@ -1102,7 +1102,9 @@ For a PowerPoint slide-shape text frame processed with `--document-text-layout p
 
 The handler shall use the original shape or cell rectangle directly for every other bounded-text case, including `text-to-fit-shape`, `shape-to-fit-text`, inherited or unspecified autofit, table cells, and non-PowerPoint adapters. It shall not derive replacement bounds from original text in those cases.
 
-The measurement shall remain deterministic and use the same committed Noto face selected for the source run's broad family classification when the source font itself is unavailable. It shall not use operating-system font discovery.
+Typeface selection for `preserve-basic-layout-source-font` is defined by
+FR-2026-08-22-04. This requirement continues to define the no-autofit fit
+rectangle independently of the selected typeface.
 
 ### Rationale
 
@@ -1182,28 +1184,16 @@ Automated tests shall use a synthetic no-autofit text frame whose source text ne
 |----------|-------|
 | Title | Preserve source typeface references during best-effort PPTX fitting |
 | Owner | |
-| Status | Implemented |
+| Status | Superseded |
 | Source | User request |
 | Date Added | 2026-08-04 |
-| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-04-05 |
+| Related Requirements | FR-2026-08-22-04 |
 
 ### Description
 
-The folder-replacement command shall provide a PPTX layout mode named `preserve-basic-layout-source-font`. It shall perform the same source-bound selection, source-width/natural-height handling for explicit `noAutofit`, paragraph formatting, fitted font-size calculation, and explicit autofit disabling as `preserve-basic-layout`.
-
-For every replacement run with a resolved source typeface reference, this mode shall retain that reference in the output PPTX while applying the fitted size and other explicit run properties. It shall not replace that reference with Noto merely because fitting is enabled. A run without a resolved source typeface reference shall use the existing Noto fallback.
-
-Fitting measurement shall remain deterministic: it shall use the committed Noto face chosen by the source run's broad family classification to calculate the scale. The mode does not guarantee metric identity with a source font that is unavailable on the viewing machine. It shall neither discover operating-system fonts nor embed fonts in this initial implementation.
-
-The existing `preserve-basic-layout` mode shall retain its current explicit-Noto output behaviour, so users can compare deterministic-Noto and source-font best-effort output without changing existing commands.
-
-### Rationale
-
-Preserving a presentation's source typeface can retain important visual design even when font metrics are only approximately known. A separate mode makes this trade-off explicit and preserves the current deterministic Noto result as a fallback and comparison point.
-
-### Notes
-
-Automated tests shall use synthetic runs with a resolved non-Noto source typeface reference and with no source reference. They shall verify the new mode writes the source reference for the former, uses Noto for the latter, and retains the existing fitting and autofit behaviour.
+This historical requirement introduced
+`preserve-basic-layout-source-font`. Its current definition is
+FR-2026-08-22-04.
 
 ---
 
@@ -1554,8 +1544,8 @@ size, the written Latin and East-Asian typeface references, and the existing
 required explicit text-frame layout settings such as disabled autofit. In
 `preserve-basic-layout`, it shall write the selected Noto typeface references.
 In `preserve-basic-layout-source-font`, it shall retain resolved source
-typeface references where available. Both modes shall retain the same
-Noto-based deterministic measurement and fitting calculation.
+typeface references where available. Typeface selection and fitting measurement
+for that mode are defined by FR-2026-08-22-04.
 
 Advanced text styling may alter the visual occupied bounds or make the fitted
 output appear imperfect. This is an accepted best-effort limitation; it is not
@@ -1850,3 +1840,584 @@ for a representative generated DOCX. Where Word automation is available, it
 shall open and save the synthetic output and verify that no repair log is
 created. This manual or platform-specific gate supplements, rather than
 replaces, deterministic automated package validation.
+
+---
+
+## FR-2026-08-22-04
+
+| Property | Value |
+|----------|-------|
+| Title | Measure source-font fitted layout with the best verified source face |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-06, FR-2026-08-04-07 |
+
+### Description
+
+This requirement supersedes the fitting-measurement rule in
+FR-2026-08-04-06. `--document-text-layout preserve-basic-layout-source-font`
+shall retain its existing source-font output behaviour and shall measure each
+replacement run or script segment with the best verified source face available
+to the pipeline. The selection order shall be: an exact face embedded in the
+input document; an exact face installed on the host operating system; then the
+committed Noto face selected by the run's broad family classification.
+
+An exact source face shall have a resolved family name and a matching requested
+weight, width, and slant. A host-font lookup shall not accept a font-manager
+substitution merely because a lookup returned a face: it shall compare the
+returned face's resolved family and style with the source request. A selected
+embedded or installed source face shall provide a non-zero glyph for every
+character in the replacement text. A failed identity, style, font-loading, or
+glyph-coverage check shall select the committed Noto fallback rather than a
+near-match. Existing target-language coverage and overflow behaviour apply if
+that Noto fallback does not cover the replacement text.
+
+The source-font mode shall use the selected face consistently when it derives
+an original occupied fit rectangle and when it wraps and fits the replacement.
+It shall continue to write the resolved source typeface reference where the
+format permits, even when Noto was required for measurement. It shall not add,
+replace, expand, subset, or redistribute a source document's embedded font.
+Existing document font parts and relationships shall be retained.
+
+The shared bounded-text layout and font-handling code shall be independent of
+document packaging. A document-format adapter shall provide the common font
+resolver with concrete source-face requests and any safely decoded, in-memory
+embedded-face candidates from that document. Before doing so, the adapter shall
+resolve any format-specific typeface indirection, including theme aliases,
+style inheritance, or script-specific font slots. It shall not pass an opaque
+placeholder such as a DrawingML `+mj-lt` token to the common resolver.
+
+When one source run selects different faces for different scripts, the adapter
+shall preserve those selections as distinct measurement and rendering segments.
+It shall retain the original source reference(s) when serializing source-font
+output; resolving a reference for measurement shall not rewrite it to a host or
+theme-resolved family. The common resolver shall perform candidate priority,
+identity and glyph validation, Skia-typeface loading, fallback selection, and
+measurement. Format adapters shall remain responsible for locating font parts,
+decoding their format-specific representation, and preserving their package or
+file content. The resolver shall not fetch a font, URL, or filesystem path
+named by an input document.
+
+The result of source-face selection shall be available to the caller as an
+explicit diagnostic that identifies `embedded-source-face`,
+`installed-source-face`, or `noto-fallback` and the fallback reason when
+applicable. Where the source uses an indirect typeface reference, the
+diagnostic shall record both that original reference and its concrete resolved
+family. The mode is intentionally machine-dependent when it selects an
+installed font. `preserve-basic-layout` shall remain the deterministic Noto
+measurement and output mode.
+
+### Rationale
+
+Source-font output is most accurately fitted with the same font metrics. An
+embedded source face makes that result independent of the host; an exact host
+face is a useful best-effort alternative. A strict fallback retains the
+existing predictable result when neither is usable and prevents an arbitrary
+platform substitution from being mistaken for the original design font.
+
+Although `preserve-basic-layout`, is safest from preserving layout, it isn't doesn't necessarily produce the most visually compatible transformation of the documents which might have specifically selected stylistic fonts.
+
+### Notes
+
+This requirement changes the meaning of the existing
+`preserve-basic-layout-source-font` mode; it does not add another command-line
+mode. It does not make the output portable when it retains an unembedded source
+reference.
+
+The current shared resolver and evaluator support direct family names and the
+embedded-candidate interface. Theme and other indirect-reference resolution is
+not implemented until the applicable format requirement is implemented.
+FR-2026-08-22-10 defines the first such adapter work for PPTX. DOCX theme-font
+attributes, XLSX major/minor font schemes, and SVG CSS font inheritance or
+stacks require separate format requirements before they can participate. PDF,
+EMF, and WMF use their active font resource or face name rather than an OOXML
+theme alias.
+
+Automated tests shall use only synthetic documents and repository-owned test
+fonts. They shall test resolver priority, exact-family/style rejection,
+replacement-glyph rejection, Noto fallback, source-bound measurement, direct
+and indirect source-reference diagnostics, and script-segment selection. They
+shall inject embedded and host-face candidates into the common resolver and
+shall not depend on fonts installed on the test host.
+
+---
+
+## FR-2026-08-22-05
+
+| Property | Value |
+|----------|-------|
+| Title | Use embedded DOCX source fonts for source-font layout measurement |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-22-03, FR-2026-08-22-04 |
+
+### Description
+
+As the first embedded-source-font implementation, the DOCX adapter shall
+discover embedded WordprocessingML font faces in the input package and offer
+them to the common source-font resolver for eligible DrawingML text containers
+processed in `preserve-basic-layout-source-font` mode. It shall resolve a
+`w:font` entry and its requested regular, bold, italic, or bold-italic
+embedded-face relationship through the package font table and font-table
+relationships.
+
+The adapter shall de-obfuscate a candidate `.odttf` part with its recorded
+`w:fontKey`, validate that the recovered bytes are a loadable OpenType or
+TrueType face, and provide those bytes in memory only. It shall reject a
+missing, malformed, unreachable, unsafe, or mismatched relationship or font
+part. It shall not use a font-table declaration without a valid corresponding
+embedded face as evidence that the face is available.
+
+The adapter shall preserve pre-existing font-table entries, relationships, and
+font-part bytes. It shall not write decoded source-font bytes to the output,
+create a new embedding, or alter the source font's embedding permissions. The
+common resolver shall determine whether a valid candidate has the requested
+identity and replacement glyph coverage; failure shall follow the fallback
+rules in FR-2026-08-22-04.
+
+### Rationale
+
+DOCX already has a well-defined embedded-font package representation, and this
+pipeline already validates that representation when it embeds its own fitted
+Noto faces. It is therefore the lowest-risk first format for source-font
+measurement without relying on a locally installed font.
+
+### Notes
+
+Automated tests shall create complete synthetic DOCX packages containing an
+embedded repository-owned test face and verify successful in-memory recovery
+and selection. They shall also verify malformed obfuscation, missing or
+incorrect relationships, requested-style absence, and missing replacement
+glyphs fall back without corrupting or expanding the existing font parts.
+
+---
+
+## FR-2026-08-22-06
+
+| Property | Value |
+|----------|-------|
+| Title | Use embedded PPTX source fonts for source-font layout measurement |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-15, FR-2026-08-22-04 |
+
+### Description
+
+The PPTX adapter shall discover presentation-embedded font faces referenced by
+the input PresentationML embedded-font list and offer safely decoded candidates
+to the common source-font resolver for eligible fitted text frames, including
+grouped shapes and table cells, in `preserve-basic-layout-source-font` mode.
+It shall associate each embedded regular, bold, italic, or bold-italic face
+with its declared family and source-run style through the package's standard
+relationships.
+
+The adapter shall accept a candidate only when the relationship target is a
+contained package part and its decoded bytes load as a Skia typeface. It shall
+preserve all pre-existing embedded-font parts, relationships, and list entries;
+it shall neither decode a source font to disk nor write, subset, replace, or
+expand it. Candidate identity and replacement-glyph coverage remain the common
+resolver's responsibility under FR-2026-08-22-04.
+
+### Rationale
+
+PowerPoint files can carry their own design fonts. Using an available original
+face gives the source-font mode metrics that reflect a presentation's intended
+appearance without depending on the host's Office installation.
+
+### Notes
+
+The implementation shall first document the exact supported PresentationML
+font-part encodings and relationship forms before enabling them. Automated
+tests shall use self-contained synthetic PPTX packages and repository-owned
+test fonts; they shall cover each supported style, invalid or external-looking
+relationships, unusable font data, and preservation of unrelated package
+content.
+
+---
+
+## FR-2026-08-22-07
+
+| Property | Value |
+|----------|-------|
+| Title | Use embedded PDF source fonts for source-font layout measurement |
+| Owner | |
+| Status | Deferred |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-04-07, FR-2026-08-04-09, FR-2026-08-22-04 |
+
+### Description
+
+For a bounded PDF FreeText annotation or editable AcroForm field processed in
+`preserve-basic-layout-source-font` mode, the PDF adapter shall offer an
+embedded source font only when it can identify the active source font resource
+for that container and recover a loadable embedded font program from that
+resource. It shall support only contained font streams and formats that Skia
+can load; it shall not fetch a font named by a PDF resource or descriptor.
+
+The adapter shall preserve the source font object, stream, resource dictionaries,
+encoding, and appearance data unless the existing text-replacement rules
+otherwise require a safe update. It shall not attempt to extend a subsetted
+font. The common resolver shall reject an embedded PDF candidate whose font
+does not provide the requested replacement glyphs, and the adapter shall then
+use the general fallback rules.
+
+### Rationale
+
+PDFs often embed the exact font needed to render their form or annotation
+content, but those programs are frequently subsetted. Separating recovery from
+glyph validation permits accurate use when possible without claiming that an
+arbitrary PDF font can encode a translated replacement.
+
+### Notes
+
+Implementation of this requirement is intentionally deferred until broader PDF
+handling has been reviewed and separately specified.
+
+Automated tests shall use synthetic PDFs with bounded supported containers and
+embedded repository-owned test fonts. They shall verify matching selection,
+subset or missing-glyph fallback, malformed font-stream fallback, no network or
+filesystem access, and valid output appearances.
+
+---
+
+## FR-2026-08-22-08
+
+| Property | Value |
+|----------|-------|
+| Title | Use embedded SVG source fonts for source-font layout measurement |
+| Owner | |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-04-07, FR-2026-08-22-04 |
+
+### Description
+
+For an eligible bounded SVG text container processed in
+`preserve-basic-layout-source-font` mode, the SVG adapter shall discover an
+embedded `@font-face` only when its source is a contained `data:` URI in that
+same SVG and its decoded bytes load as a Skia typeface. It shall map the
+embedded face's declared family and style to the source text request before
+offering it to the common source-font resolver.
+
+The adapter shall not open or fetch any external stylesheet, URL, path, or
+package-relative font reference. It shall preserve the original stylesheet and
+embedded data unchanged. Unsupported data formats, malformed CSS, malformed
+data URIs, style mismatches, and missing replacement glyphs shall use the
+general fallback rules.
+
+### Rationale
+
+An inline SVG font is a self-contained source of the intended typeface, whereas
+an external font reference crosses the pipeline's existing external-resource
+security boundary.
+
+### Notes
+
+Automated tests shall use synthetic SVGs with inline repository-owned test-font
+data. They shall verify matching selection and all fallback conditions, and
+shall verify that external font URLs are neither opened nor reported as
+available.
+
+---
+
+## FR-2026-08-22-09
+
+| Property | Value |
+|----------|-------|
+| Title | Preview source-font fitted layout in the native-text evaluator |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-22-04, FR-2026-08-22-06 |
+
+### Description
+
+`scripts/run_text_replacement_evaluations.py` shall generate previews for both
+fitted document-text layout modes. For each input presentation it shall retain
+the existing HTML report and artifact directory for `preserve-basic-layout`,
+and write a separate source-font report named `<filename>.sf.html` with a
+sibling `<filename>.sf/` artifact directory. The source-font report shall not
+be mixed into the existing HTML file.
+
+For every provider-specific replacement preview in the source-font report, its
+HTML row shall contain a native-size `preserve-basic-layout-source-font`
+rendering and a new-tab link to its source-font explicit-properties JSON
+artifact. Its original rendering shall be retained in that report as the visual
+comparison baseline. The existing Noto-mode report and artifacts shall remain
+unchanged.
+
+The source-font preview shall call the common source-font resolver and bounded
+layout core required by FR-2026-08-22-04. It shall use the same source bounds,
+source-width/natural-height behaviour for explicit `noAutofit`, paragraph
+replacement, wrapping, font-size fitting, and face-selection priority as the
+folder-replacement source-font mode. For the evaluator's PPTX inputs, it shall
+offer a verified embedded source face when the PPTX embedded-font support of
+FR-2026-08-22-06 is available; otherwise it shall offer an exact installed
+source face where available, before using the committed Noto fallback.
+
+The source-font explicit-properties artifact shall identify the selected
+measurement face, its selection diagnostic, and the resulting scale and fit
+status. It shall distinguish `embedded-source-face`,
+`installed-source-face`, and `noto-fallback`, including the fallback reason.
+The bitmap shall render with the face selected for measurement, so it is a
+review of the source-font mode's layout calculation rather than a guarantee of
+how a document will render on another machine without that face.
+
+The evaluator shall preserve the existing confidential-sample handling and
+external-resource boundary. It shall not fetch a font or open a document-named
+path or URL. The source-font report is allowed to be wider than the viewport
+and shall retain native bitmap dimensions.
+
+### Rationale
+
+Source-font fitting deliberately permits host-dependent results. Side-by-side
+local previews, together with an explicit record of the selected measurement
+face and fallback decision, make those results reviewable before users rely on
+the mode for document output.
+
+### Notes
+
+This requirement expands the evaluator only; it does not make
+`preserve-basic-layout-source-font` available for any additional document
+containers. Before PPTX embedded-font support is implemented, evaluator
+previews can still exercise exact installed-font and Noto-fallback paths.
+
+Automated tests shall use synthetic presentations and injected embedded or
+host-face candidates. They shall verify a `<filename>.sf.html` report and its
+separate artifact directory, one source-font preview and JSON artifact per
+replacement preview, resolver priority and diagnostics in the artifact, Noto
+fallback, the existing Noto report remaining unchanged, and no dependency on
+fonts installed on the test host.
+
+---
+
+## FR-2026-08-22-10
+
+| Property | Value |
+|----------|-------|
+| Title | Resolve PPTX theme typeface aliases for source-font fitting |
+| Owner | |
+| Status | Implemented |
+| Source | User request and source-font evaluation diagnosis |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-03-15, FR-2026-08-22-04, FR-2026-08-22-09 |
+
+### Description
+
+For PPTX input processed in `preserve-basic-layout-source-font` mode, the
+PPTX adapter and native-text evaluator shall resolve DrawingML theme typeface
+aliases to concrete family requests before calling the common source-font
+resolver. They shall resolve the text container's reachable theme part through
+the package relationship chain; they shall not assume that a part named
+`ppt/theme/theme1.xml` applies to every slide or text frame.
+
+The adapter shall resolve the DrawingML major and minor aliases `+mj-lt`,
+`+mj-ea`, `+mj-cs`, `+mn-lt`, `+mn-ea`, and `+mn-cs` through the corresponding
+`a:fontScheme` major or minor Latin, East Asian, or complex-script slot. It
+shall retain direct concrete typeface names unchanged. It shall consider
+script-specific `a:font` entries in the selected theme when the applicable
+major or minor slot delegates to one of those entries.
+
+The adapter shall retain separate source typeface declarations for the Latin,
+East Asian, and complex-script slots of a run. It shall choose the applicable
+concrete family for each character or contiguous script segment, then provide
+those segments to the shared source-font resolver and layout renderer. It shall
+not treat a Latin theme alias as evidence that its resolved Latin face covers
+East Asian text. When the theme, relationship, alias, script, or concrete face
+cannot be resolved safely, that segment shall follow the Noto fallback rules
+of FR-2026-08-22-04.
+
+Theme resolution shall affect measurement and evaluator rendering only. The
+PPTX writer shall preserve the original typeface aliases and script-specific
+references in source-font output unless an existing explicit-layout rule
+requires another source-preserving serialization. Evaluator source-font JSON
+shall record the original alias, resolved concrete family, script or segment,
+and final face-selection diagnostic.
+
+### Rationale
+
+Theme aliases are symbolic pointers into a presentation's design system, not
+font family names. Resolving them before fitting lets the source-font mode use
+the family PowerPoint intends for each script, while retaining the original
+theme-driven formatting in the editable output.
+
+### Notes
+
+This is the first format-specific indirect-typeface implementation required by
+FR-2026-08-22-04. It does not add embedded-font extraction; PPTX embedded-font
+handling remains FR-2026-08-22-06. It shall not follow an external package,
+filesystem path, or URL while resolving a theme.
+
+Automated tests shall use synthetic PPTX packages with relationship-reachable
+themes. They shall verify every major/minor and Latin/East Asian/complex-script
+alias, direct-family preservation, script-segment selection, an unresolved
+theme fallback, source-font JSON diagnostics, unchanged source aliases in
+written output, and no dependency on fonts installed on the test host.
+
+---
+
+## FR-2026-08-22-11
+
+| Property | Value |
+|----------|-------|
+| Title | Resolve DOCX theme fonts for source-font fitting |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-22-04, FR-2026-08-22-05 |
+
+### Description
+
+For eligible DOCX DrawingML text containers processed in
+`preserve-basic-layout-source-font` mode, the DOCX adapter shall resolve
+WordprocessingML run-font settings through direct run properties, applicable
+character and paragraph styles, document defaults, and the document theme
+before calling the common source-font resolver. It shall preserve the original
+WordprocessingML references when writing source-font output.
+
+The adapter shall resolve `w:asciiTheme`, `w:hAnsiTheme`, `w:eastAsiaTheme`,
+and `w:cstheme` font references to the reachable Word theme's DrawingML
+`a:fontScheme` major or minor Latin, East Asian, or complex-script slot. It
+shall retain direct `w:ascii`, `w:hAnsi`, `w:eastAsia`, and `w:cs` family names
+as concrete requests. It shall retain separate script-specific requests and
+select the applicable face by character or contiguous script segment; it shall
+not use a Latin request as proof that a face covers East Asian or complex-script
+text.
+
+Theme and style resolution shall use only parts and relationships contained in
+the DOCX package. A missing, malformed, unreachable, or cyclic style/theme
+reference shall produce the ordinary Noto fallback for the affected segment.
+Evaluator diagnostics introduced for a future DOCX evaluator shall record the
+original reference, resolved family, script segment, and final selection.
+
+### Rationale
+
+Word documents can inherit symbolic theme-font settings through several style
+layers. Resolving those layers makes source-font measurement reflect the
+document's intended typography without changing the theme-driven editable
+formatting retained in output.
+
+### Notes
+
+This requirement does not add fitting for flowing Word paragraphs or alter
+their existing source-formatting fallback. Embedded DOCX source-font recovery
+remains FR-2026-08-22-05. Automated tests shall use synthetic DOCX packages
+with document defaults, styles, and relationship-reachable themes; they shall
+verify direct overrides, each theme font attribute, script segmentation,
+fallbacks, and unchanged serialized source references.
+
+---
+
+## FR-2026-08-22-12
+
+| Property | Value |
+|----------|-------|
+| Title | Resolve XLSX workbook theme fonts for source-font fitting |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-04-07, FR-2026-08-22-04 |
+
+### Description
+
+For eligible XLSX cells and DrawingML text processed in
+`preserve-basic-layout-source-font` mode, the XLSX adapter shall resolve the
+workbook's contained theme and font-style records before calling the common
+source-font resolver. It shall preserve the original style and DrawingML font
+references when writing source-font output.
+
+For worksheet cells, the adapter shall resolve an `x:font` with an `x:scheme`
+value of `major` or `minor` through the workbook theme's `a:fontScheme` major
+or minor slots. A direct `x:name` remains a concrete family request unless the
+format specifies that the selected scheme overrides it. For DrawingML text,
+the adapter shall resolve DrawingML major/minor Latin, East Asian, and
+complex-script aliases under the same rules as FR-2026-08-22-10. It shall keep
+script-specific requests distinct and select concrete faces per character or
+contiguous script segment.
+
+The adapter shall use only relationship-reachable theme and style parts inside
+the workbook. A missing or malformed theme, unsupported scheme value, or
+unresolvable script slot shall use the common Noto fallback for that segment.
+It shall not make XLSX font embedding portable or fetch an external font.
+
+### Rationale
+
+Excel styles can request the major or minor workbook theme fonts instead of a
+literal family name, while drawing text uses DrawingML's richer script-aware
+font model. Resolving both paths provides metrics consistent with a workbook's
+design without altering its existing style references.
+
+### Notes
+
+This requirement does not change finite-cell eligibility, structured-table
+handling, or XLSX's lack of an interoperable embedded-font path. Automated
+tests shall use synthetic workbooks with relationship-reachable themes and
+both cell and drawing text. They shall verify major/minor schemes, direct-name
+precedence, DrawingML aliases, script segmentation, safe fallback, and
+unchanged source style references.
+
+---
+
+## FR-2026-08-22-13
+
+| Property | Value |
+|----------|-------|
+| Title | Resolve SVG CSS font inheritance and stacks for source-font fitting |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-22 |
+| Related Requirements | FR-2026-08-22-04, FR-2026-08-22-08 |
+
+### Description
+
+For eligible SVG text processed in `preserve-basic-layout-source-font` mode,
+the SVG adapter shall compute the applicable `font-family`, `font-weight`, and
+`font-style` from the element, inherited SVG/CSS properties, and contained
+`style` rules before calling the common source-font resolver. It shall preserve
+the original SVG and CSS font declarations in source-font output.
+
+The adapter shall parse a CSS `font-family` list as an ordered set of concrete
+family candidates. For each character or contiguous script segment it shall
+offer candidates in CSS order to the common resolver, selecting the first
+exact embedded or installed face that matches the requested style and covers
+the segment's glyphs. If none is usable, it shall use the common Noto fallback.
+Generic CSS family names and unsupported CSS expressions shall not be mistaken
+for installed family names; they shall follow an explicitly specified fallback
+policy before Noto is selected.
+
+The adapter shall process only styles and `@font-face` data contained inside
+the SVG. It shall not load external stylesheets, URLs, paths, CSS imports, or
+font resources. Inline embedded-font use remains subject to FR-2026-08-22-08.
+
+### Rationale
+
+SVG typography is usually governed by CSS inheritance and ordered fallback
+stacks, rather than a single direct family attribute. Computing the effective
+stack lets source-font measurement follow the author’s intended fallback order
+without crossing the existing external-resource trust boundary.
+
+### Notes
+
+This requirement does not add general HTML/CSS layout support. The supported
+selector subset is element, `.class`, `#id`, and descendant combinations of
+those forms, using ordinary specificity and source-order precedence.
+Custom properties and `var()` are unsupported: a declaration using `var()` is
+ignored. `serif`, `monospace`, and `sans-serif` map respectively to the
+committed Noto serif, mono, and sans fallback classifications; they are never
+accepted as a host-family match. Text inside `foreignObject` is outside this
+fitted SVG-text scope. Automated tests shall use synthetic SVGs with inline
+styles and repository-owned test fonts; they shall verify inheritance, stack
+order, style matching, glyph fallback, malformed-CSS fallback, and that no
+external reference is opened.

@@ -252,7 +252,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             )
             self.assertEqual([call(1), call(1)], progress.update.call_args_list)
 
-    # Verifies FR-2026-08-03-13 and FR-2026-08-04-12.
+    # Verifies FR-2026-08-03-13, FR-2026-08-04-12, and FR-2026-08-22-09.
     def test_processes_the_configured_confidential_subtree_locally(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -264,10 +264,11 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             result = evaluate_text_replacement_examples(input_root, root / "output")
 
             self.assertEqual(2, result.processed_presentations)
-            self.assertEqual(2, result.written_pages)
+            self.assertEqual(4, result.written_pages)
             self.assertTrue((root / "output" / "confidential" / "ja" / "restricted.html").is_file())
+            self.assertTrue((root / "output" / "confidential" / "ja" / "restricted.sf.html").is_file())
 
-    # Verifies FR-2026-08-03-13.
+    # Verifies FR-2026-08-03-13 and FR-2026-08-22-09.
     def test_ignores_powerpoint_temporary_lock_files(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -278,9 +279,9 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             result = evaluate_text_replacement_examples(input_root, root / "output")
 
             self.assertEqual(1, result.processed_presentations)
-            self.assertEqual(1, result.written_pages)
+            self.assertEqual(2, result.written_pages)
 
-    # Verifies FR-2026-08-03-13.
+    # Verifies FR-2026-08-03-13 and FR-2026-08-22-09.
     def test_skips_text_frames_without_non_whitespace_run_text(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -405,6 +406,8 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
 
             page_path = output_root / "ja" / "nested" / "layout.html"
             page = page_path.read_text(encoding="utf-8")
+            source_font_page_path = output_root / "ja" / "nested" / "layout.sf.html"
+            source_font_page = source_font_page_path.read_text(encoding="utf-8")
             artifacts = output_root / "ja" / "nested" / "layout.text-layout-artifacts"
             first_rendering = artifacts / "text-box-0001.png"
             first_properties = artifacts / "text-box-0001.json"
@@ -412,11 +415,16 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             first_provider_rendering = artifacts / "text-box-0001.provider-0001.png"
             first_provider_properties = artifacts / "text-box-0001.provider-0001.explicit.json"
             second_rendering = artifacts / "text-box-0002.png"
+            source_font_artifacts = output_root / "ja" / "nested" / "layout.sf"
+            source_font_provider_properties = (
+                source_font_artifacts / "text-box-0001.provider-0001.explicit.json"
+            )
             self.assertEqual(1, result.processed_presentations)
             self.assertEqual(0, result.skipped_presentations)
-            self.assertEqual(1, result.written_pages)
+            self.assertEqual(2, result.written_pages)
             self.assertEqual(2, result.rendered_text_boxes)
             self.assertIn("Native text-layout evaluation", page)
+            self.assertIn("Native source-font text-layout evaluation", source_font_page)
             self.assertIn("<th>Original</th><th>argos_translate</th>", page)
             self.assertIn("main { padding: 2rem; width: max-content; }", page)
             self.assertIn('href="layout.text-layout-artifacts/text-box-0001.json" target="_blank"', page)
@@ -437,6 +445,8 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             self.assertTrue(first_provider_rendering.is_file())
             self.assertTrue(first_provider_properties.is_file())
             self.assertTrue(second_rendering.is_file())
+            self.assertTrue(source_font_artifacts.is_dir())
+            self.assertTrue(source_font_provider_properties.is_file())
             properties = json.loads(first_properties.read_text(encoding="utf-8"))
             self.assertEqual(30.0, properties["shape_rotation_degrees"])
             self.assertEqual(30.0, properties["effective_text_rotation_degrees"])
@@ -462,6 +472,9 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
                 16.0, explicit_properties["paragraphs"][0]["runs"][0]["font_size_points"]
             )
             provider_properties = json.loads(first_provider_properties.read_text(encoding="utf-8"))
+            source_font_provider = json.loads(
+                source_font_provider_properties.read_text(encoding="utf-8")
+            )
             self.assertEqual("argos_translate", provider_properties["replacement"]["provider"])
             self.assertEqual("ja", provider_properties["replacement"]["source_language"])
             self.assertEqual("en", provider_properties["replacement"]["target_language"])
@@ -470,6 +483,20 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
                 "Noto Serif JP", provider_properties["paragraphs"][0]["runs"][0]["font_family"]
             )
             self.assertEqual(1, len(provider_properties["paragraphs"][0]["runs"]))
+            self.assertIn("measurement_faces", source_font_provider)
+            self.assertTrue(source_font_provider["measurement_faces"])
+            self.assertEqual(
+                "noto-fallback", source_font_provider["measurement_faces"][0]["source"]
+            )
+            self.assertEqual(
+                "Example Serif", source_font_provider["measurement_faces"][0]["original_reference"]
+            )
+            self.assertEqual(
+                "Example Serif", source_font_provider["measurement_faces"][0]["resolved_family"]
+            )
+            self.assertEqual(
+                "latin", source_font_provider["measurement_faces"][0]["script"]
+            )
             run_classifications = [
                 run["font_classification"] for run in properties["paragraphs"][0]["runs"]
             ]

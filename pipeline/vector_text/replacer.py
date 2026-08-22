@@ -333,6 +333,7 @@ def _replace_emf_exttext_record(
                 fitted = replace_and_fit_text_box(
                     box, replacement_provider, source_language, target_language, noto_typefaces(),
                     preserve_source_font_family=True,
+                    measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
                 )
                 replacement = fitted.text_box.paragraphs[0].runs[0].text
                 fitted_scale = fitted.font_scale
@@ -489,7 +490,8 @@ def _wmf_fitted_exttextout(
         (BoundedTextParagraph("left", None, None, None, None, 0, None, None, None, None, None,
                               (BoundedTextRun(source_text, None, "sans-serif", 12.0, False, False, "none", None),)),))
     fitted = replace_and_fit_text_box(box, provider, source_language, target_language, noto_typefaces(),
-                                      preserve_source_font_family=True)
+                                      preserve_source_font_family=True,
+                                      measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font")
     return fitted.text_box.paragraphs[0].runs[0].text, fitted.font_scale
 
 
