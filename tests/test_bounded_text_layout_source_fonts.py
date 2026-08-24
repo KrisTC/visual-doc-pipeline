@@ -18,7 +18,8 @@ from pipeline.bounded_text_layout import (
 )
 
 
-FONT_PATH = Path(__file__).parent / "assets" / "fonts" / "NotoSansJP-Regular.ttf"
+FONT_PATH = Path(__file__).parent / "assets" / "fonts" / "NotoSansCJKjp-Regular.ttf"
+FONT_FAMILY = "Noto Sans CJK JP"
 
 
 class _FontManager:
@@ -56,7 +57,7 @@ class SourceFontMeasurementTests(unittest.TestCase):
                     None,
                     None,
                     None,
-                    (BoundedTextRun(text, "Noto Sans JP", "sans-serif", 18.0, False, False, None, None),),
+                    (BoundedTextRun(text, FONT_FAMILY, "sans-serif", 18.0, False, False, None, None),),
                 ),
             ),
         )
@@ -67,7 +68,7 @@ class SourceFontMeasurementTests(unittest.TestCase):
         measurement = source_font_measurement(
             self._box(),
             embedded_faces=(
-                EmbeddedTypefaceCandidate("Noto Sans JP", self.typeface.fontStyle(), self.typeface),
+                EmbeddedTypefaceCandidate(FONT_FAMILY, self.typeface.fontStyle(), self.typeface),
             ),
             font_manager=_FontManager(None),
         )
@@ -103,8 +104,8 @@ class SourceFontMeasurementTests(unittest.TestCase):
             box.paragraphs[0].runs[0],
             font_family="+mj-lt",
             source_typefaces=(
-                SourceTypefaceReference("latin", "+mj-lt", "Noto Sans JP"),
-                SourceTypefaceReference("eastAsian", "+mj-ea", "Noto Sans JP"),
+                SourceTypefaceReference("latin", "+mj-lt", FONT_FAMILY),
+                SourceTypefaceReference("eastAsian", "+mj-ea", FONT_FAMILY),
             ),
         )
         box = replace(box, paragraphs=(replace(box.paragraphs[0], runs=(run,)),))
@@ -112,7 +113,7 @@ class SourceFontMeasurementTests(unittest.TestCase):
 
         self.assertEqual(["latin", "eastAsian"], [item.script for item in measurement.selections])
         self.assertEqual(["+mj-lt", "+mj-ea"], [item.original_reference for item in measurement.selections])
-        self.assertEqual(["Noto Sans JP", "Noto Sans JP"], [item.resolved_family for item in measurement.selections])
+        self.assertEqual([FONT_FAMILY, FONT_FAMILY], [item.resolved_family for item in measurement.selections])
         self.assertEqual(2, len(measurement.text_box.paragraphs[0].runs))
 
     # Verifies FR-2026-08-22-13.
