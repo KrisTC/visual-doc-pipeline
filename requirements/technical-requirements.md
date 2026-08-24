@@ -107,7 +107,9 @@ A single test location and equivalent per-platform test commands make regression
 
 ### Notes
 
-Both runners shall use uv to execute Python from the project's synchronised environment (`uv run`) and Python's standard-library `unittest` discovery against `tests/` with the pattern `test_*.py`. They shall exit with the underlying test-process exit code. Direct hard-coded paths into `.venv/bin` or `.venv/Scripts` shall not be required by the runners, so the same approach works across platforms.
+Both runners shall use Python's standard-library `unittest` discovery against `tests/` with the pattern `test_*.py`. They shall exit with the underlying test-process exit code. Direct hard-coded paths into `.venv/bin` or `.venv/Scripts` shall not be required by the runners, so the same approach works across platforms.
+
+FR-2026-08-24-03 supersedes this requirement's direct `uv run` invocation: each runner shall delegate its test command to the corresponding `scripts/run.ps1` or `scripts/run.sh` wrapper. That wrapper remains responsible for executing Python from the project's synchronised uv environment and loading the optional local `.env.local` configuration.
 
 ---
 

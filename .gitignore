@@ -13,5 +13,8 @@ outputs/evaluations/*
 __pycache__/
 *.py[cod]
 
+# Local developer configuration, including provider credentials
+.env.local
+
 # MacOS
 .DS_Store

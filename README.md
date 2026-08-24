@@ -41,27 +41,20 @@ Type-check all Python with:
 
 ### Windows NVIDIA GPU OCR
 
-On Windows, the locked environment uses PaddlePaddle's CUDA 12.6 GPU wheel and selects GPU 0 automatically when the NVIDIA runtime is available. GPU support requires an x64 NVIDIA CUDA 12 runtime and an x64 cuDNN 9 runtime on `PATH` in addition to a compatible NVIDIA driver.
+On Windows, the locked environment uses PaddlePaddle's CUDA 12.6 GPU wheel and selects GPU 0 automatically when the NVIDIA runtime is available. GPU support requires an x64 NVIDIA CUDA 12 runtime and an x64 cuDNN 9 runtime in the child-process `PATH`, in addition to a compatible NVIDIA driver.
 
 The following archived installers were verified with the current PaddlePaddle wheel:
 
 - [CUDA Toolkit 12.0 for Windows x86_64](https://developer.nvidia.com/cuda-12-0-0-download-archive?target_os=Windows&target_arch=x86_64&target_version=11&target_type=exe_local)
 - [cuDNN 9.24 for Windows x86_64](https://developer.nvidia.com/cudnn-9-24-0-download-archive?target_os=Windows&target_arch=x86_64&target_version=11&target_type=exe_local)
 
-Install the x64 variants, then open a new PowerShell session so its `PATH` includes directories equivalent to:
-
-```text
-C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.0\bin
-C:\Program Files\NVIDIA\CUDNN\v9.24\bin\12.9\x64
-```
-
-Verify the runtime before running OCR:
+Install the x64 variants, then generate the local ignored runtime configuration:
 
 ```powershell
-& .\.venv\Scripts\python.exe -c "import paddle; print('cuDNN=', paddle.device.get_cudnn_version()); paddle.set_device('gpu:0'); print(paddle.randn([32, 32]).place)"
+& .\scripts\configure-paddle-cuda-environment.ps1
 ```
 
-The command should print a nonzero cuDNN version and `Place(gpu:0)`. CPU-only and non-Windows environments continue to use the standard CPU PaddlePaddle dependency.
+The script selects the newest valid installed CUDA Toolkit 12.x directory and cuDNN 9.x `bin\12.*\x64` directory, writes only its managed `PATH` entry to the ignored `.env.local` file, and verifies that PaddlePaddle sees a CUDA device. It preserves other `.env.local` entries, including provider credentials. Subsequent project commands use that file through `scripts/run.ps1` or `scripts/run.sh`. CPU-only and non-Windows environments continue to use the standard CPU PaddlePaddle dependency.
 
 The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md). The text-region-colour API is documented in [docs/text-region-colours-api.md](docs/text-region-colours-api.md), with its rationale and algorithm in [docs/text-region-colours-algorithm.md](docs/text-region-colours-algorithm.md). The Skia-backed in-place rendering API is documented in [docs/text-region-rendering-api.md](docs/text-region-rendering-api.md).
 

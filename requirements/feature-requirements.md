@@ -1387,6 +1387,43 @@ Automated tests shall use synthetic non-ASCII replacements and verify embedded f
 
 ---
 
+## FR-2026-08-24-03
+
+| Property | Value |
+|----------|-------|
+| Title | Configure Windows Paddle CUDA runtime environment |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-24 |
+| Related Requirements | FR-2026-08-21-01, TR-2026-08-01-01, SR-2026-08-21-01 |
+
+### Description
+
+The project shall provide a Windows PowerShell script that discovers the newest locally installed NVIDIA CUDA Toolkit 12.x and the newest locally installed cuDNN 9.x runtime for Windows x86_64 required by the project's pinned Windows `paddlepaddle-gpu` distribution. The script shall validate that the discovered CUDA and cuDNN DLL directories exist and contain the required runtime DLLs before updating the repository-root `.env.local` dotenv environment file.
+
+The setup script shall manage only the `.env.local` `PATH` entry. It shall configure that entry so PaddlePaddle can load the validated NVIDIA DLL directories while preserving the invoking user's existing `PATH`. It shall preserve every user-managed `.env.local` entry, including future provider credentials or other secrets, unchanged. The file shall be ignored by Git and must not be committed. Project commands shall use it when it exists, without requiring CUDA or cuDNN directories to be added permanently to the user's global Windows environment.
+
+The project shall provide `scripts/run.ps1` and executable `scripts/run.sh` wrapper scripts. Each wrapper shall accept a command and its arguments, run it through `uv run`, and, when the repository-root `.env.local` file exists, pass that file to uv with `--env-file`. The wrapper shall also support an explicit dotenv-file override for project-internal setup validation. The wrapper shall preserve the delegated command's exit code. Every project script that otherwise invokes `uv run` directly shall invoke the platform-appropriate `run` wrapper instead.
+
+The setup script shall merge its candidate `PATH` entry with a temporary copy of `.env.local`, then start a fresh process through the PowerShell `run` wrapper using that temporary dotenv-file override. It shall verify that the installed PaddlePaddle distribution reports CUDA compilation support and detects at least one available CUDA device. The script shall report the detected CUDA Toolkit and cuDNN locations and the number of visible devices. It shall exit non-zero without creating `.env.local` when it did not previously exist, or modifying it when it did, if discovery, validation, dotenv loading, or Paddle CUDA-device detection fails. It shall delete the temporary candidate file in every outcome.
+
+### Rationale
+
+The Windows PaddlePaddle GPU wheel can be installed correctly while CUDA and cuDNN DLLs remain unavailable to its child process because their installation locations are not on `PATH`. A project-local environment file gives local development commands a repeatable way to expose those libraries and future provider settings without changing machine-wide configuration, while an end-to-end verification prevents treating a merely installed toolkit as usable GPU acceleration.
+
+### Notes
+
+The approved Paddle CUDA wheel registry in SR-2026-08-21-01 remains CUDA 12.6. The local runtime-discovery rule is independent of that wheel registry label: it shall select the newest valid CUDA Toolkit 12.x installation and the newest valid cuDNN 9.x Windows x86_64 runtime installation, including a standard cuDNN layout such as `C:\Program Files\NVIDIA\CUDNN\v9.<version>\bin\12.<version>\x64`. The fresh Paddle CUDA-device probe is the final compatibility check. The implementation shall identify the exact required cuDNN DLL names and compatible CUDA Toolkit locations from the pinned PaddlePaddle GPU runtime, rather than accepting an arbitrary directory that happens to contain similarly named files.
+
+The setup script shall not download, install, update, or modify NVIDIA software, the Python environment, the uv lockfile, or the user's persistent environment variables. It may read standard Windows NVIDIA installation locations and relevant environment variables to discover candidate installations. Its diagnostics shall distinguish missing CUDA Toolkit, missing or incompatible cuDNN runtime libraries, an unavailable NVIDIA driver or GPU, and a PaddlePaddle CUDA-loading failure.
+
+The setup script shall update the `PATH` entry atomically after the probe succeeds, so a failed run cannot leave a partially written file or overwrite user-managed settings. A malformed or duplicate managed `PATH` entry shall fail with a diagnostic rather than causing the script to rewrite unrelated content. The `PATH` entry is the setup script's only managed part of `.env.local`; users are responsible for adding, rotating, and removing any secrets. Diagnostics and automated tests shall not display secret values.
+
+The `.env.local` file shall be added to `.gitignore` when this requirement is implemented. Automated tests shall mock installation discovery and the child-process probe; they shall not require CUDA hardware or NVIDIA software in CI. They shall verify that the setup script preserves arbitrary user-managed dotenv entries and rolls back cleanly on failure, and that each run wrapper uses `.env.local` only when it exists. The runtime probe is a required local validation on supported Windows machines, while CPU-only platforms remain valid under FR-2026-08-21-01.
+
+---
+
 ## FR-2026-08-04-11
 
 | Property | Value |
