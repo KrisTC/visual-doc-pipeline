@@ -2421,3 +2421,544 @@ fitted SVG-text scope. Automated tests shall use synthetic SVGs with inline
 styles and repository-owned test fonts; they shall verify inheritance, stack
 order, style matching, glyph fallback, malformed-CSS fallback, and that no
 external reference is opened.
+
+---
+
+## FR-2026-08-23-01
+
+| Property | Value |
+|----------|-------|
+| Title | Fit replacement text in inferred PDF visual text regions |
+| Owner | |
+| Status | Implemented |
+| Source | User request following PDF layout review |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-04-09, FR-2026-08-04-10 |
+
+### Description
+
+This requirement extends `preserve-basic-layout` to eligible native text
+shown by PDF page-content streams and Form XObjects. It supersedes the
+prohibition on inferred PDF bounds in FR-2026-08-04-09 only for text that
+meets the eligibility rules below. Existing FreeText-annotation and AcroForm
+behaviour remains unchanged.
+
+The PDF adapter shall build visual text regions from visible text-showing
+operations. It shall calculate each source glyph or run's position, baseline,
+advance, and transform from the active PDF graphics state, text state, font,
+and text-showing operators. It shall not treat a PDF text operand, word,
+space character, individual glyph, or `BT`/`ET` text-object boundary as a
+paragraph boundary.
+
+PDF glyph advances are expressed in text space. The adapter shall transform
+each advance through the active text matrix and current transformation matrix
+before using it to calculate source-region geometry. It shall account for text
+state that affects placement, including font size, horizontal scaling,
+character spacing, word spacing, leading, text rise, and text rendering mode.
+When it writes fitted text, it shall preserve an equivalent placement transform
+or normalize that transform exactly once. It shall not omit or apply a source
+transform twice.
+
+For each candidate region, the adapter shall:
+
+1. Collect placed, decoded text chunks throughout the current page-content or
+   Form-XObject content scope, including chunks in separate `BT`/`ET` text
+   objects. Group compatible contiguous chunks into visual runs and visual
+   lines using their common baseline, orientation, proximity, and applicable
+   graphics state.
+2. Determine reading order from the visual layout within a region, rather than
+   relying on the order of independent PDF content-stream operations.
+3. Measure the source text at its original effective size and transform to
+   derive a finite occupied region. The measurement shall use a verified
+   source face when available; otherwise it shall use the PDF text-placement
+   geometry and glyph advances. Character count alone shall not determine a
+   region's bounds.
+4. Classify the result as either a visual line, which retains its original
+   line region and baseline, or a visual text block, whose replacement may
+   wrap and reflow within the inferred block region.
+
+A visual text block is eligible only when the adapter can deterministically
+identify a finite region containing multiple compatible lines with a common
+orientation, text flow, and compatible text-painting state. The adapter shall
+not merge text across columns, table-like row or cell boundaries,
+independently positioned labels, materially different transforms, clipping
+boundaries, opacity, or colour state. If block classification is uncertain, it
+shall use independent visual-line fitting rather than paragraph reflow.
+
+For an eligible visual line or block, the adapter shall use the shared
+bounded-text layout core. It shall pass the complete region text to the
+selected text-replacement provider, fit the returned replacement to that
+region, preserve the source orientation and alignment, and record whether the
+result fitted or overflowed. `preserve-basic-layout` shall use the configured
+portable target-language face and normal fitted-layout rules.
+
+The adapter shall replace the source text painting rather than paint an opaque
+background over it. It shall preserve applicable surrounding graphics state,
+including clipping, colour, opacity, and the region's placement transform. It
+shall not alter unrelated page content.
+
+Eligibility requires all of the following:
+
+- the source text is visible text rather than text used only for clipping,
+  masking, or an invisible rendering mode;
+- the source can be decoded reliably enough for the selected replacement
+  provider;
+- the adapter can derive a finite non-degenerate visual line or block region;
+- the adapter can safely replace every source text-showing operation belonging
+  to that region; and
+- a font can render every replacement character.
+
+An undecodable, unsupported, non-visible, or unsafe source text operation
+shall be retained unchanged and act as a visual-region boundary. It shall not
+make other independently eligible text in the same `BT`/`ET` text object
+ineligible.
+
+General Unicode replacement for eligible page-content and Form-XObject text
+requires FR-2026-08-04-10. Until that requirement is implemented, an item for
+which the active source font cannot encode the replacement shall remain
+unchanged and be reported as unsupported; it shall not use an ASCII masking
+fallback for translated output.
+
+The initial scope shall support ordinary horizontal text and text rotated by a
+multiple of 90 degrees, including scaled placements. It shall support text
+inside reusable Form XObjects in their local coordinate system.
+
+### Rationale
+
+A PDF page commonly contains text positioned as fragments, words, or glyph
+runs rather than as a reflowable paragraph. Reconstructing a visual line or a
+well-evidenced visual block provides a bounded region comparable to a
+PowerPoint text frame, allowing translated replacement text to be fitted
+without treating arbitrary PDF operator boundaries as layout structure.
+
+### Notes
+
+This requirement does not require PDF tags or a semantic document structure.
+Tags may be used as a future hint, but visual geometry remains the authority
+for placement.
+
+An identity replacement provider is a source-equivalent fitted-layout control.
+It shall pass through the same region inference, measurement, bounded fitting,
+target-face selection, and PDF output-drawing path as any other replacement;
+it shall not bypass or retain the original source painting. Its rendered result
+should preserve the original text's visual placement and size as closely as
+the configured replacement face permits. Tests shall verify that replacement
+drawing was emitted for both an identity replacement and a changed
+replacement.
+
+Table-like layouts, contents pages, forms, labels, and multi-column pages are
+supported initially through separate visual-line fitting. They shall not be
+treated as prose blocks unless a later requirement defines reliable cell or
+table reconstruction.
+
+The following remain out of scope: outlined/path-only text, image-only pages
+(which use the existing OCR path), arbitrary-angle or sheared text, Type 3 or
+otherwise non-standard text rendering that cannot be safely replaced, text
+used as a clipping or masking path, and decorative text following a path.
+
+Automated tests shall use synthetic PDFs only. They shall cover fragmented
+`Tj` and `TJ` text, separately positioned runs forming one line, multi-line
+paragraph blocks, multi-column text, table-like rows, contents-page leaders,
+nested and reusable Form XObjects, 90-degree rotated text, Unicode fallback
+eligibility, uncertain-block line fallback, and unsupported clipping,
+outlined, and image-only cases. They shall also cover non-unit text matrices,
+current-transformation-matrix scaling, horizontal text scaling, and a text
+object containing both an unsupported operation and a separately eligible
+operation. Tests shall verify that transformed source bounds are correct, that
+the eligible operation is replaced while the unsupported operation is
+unchanged, and that fitted output uses the expected replacement font size and
+placement. Rendered output shall be visually verified by an independent PDF
+renderer.
+
+---
+
+## FR-2026-08-23-02
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve PDF text paint state when fitting visual regions |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF layout evaluation |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-04-09 |
+
+### Description
+
+For eligible ordinary fill-text regions (PDF text rendering mode `0`), a
+graphics-state transition later in the same `BT`/`ET` text object shall not
+cause an earlier independently eligible region to remain unchanged solely
+because replacement text would otherwise be emitted after `ET`.
+
+The PDF adapter shall associate every candidate visual region with the
+graphics and text paint state that applied when its source text was painted.
+It shall emit the fitted replacement while that state applies. The adapter may
+do this by writing replacement operations at the source location within the
+existing text object and restoring the subsequent text state, or by splitting
+and reconstructing equivalent text objects. It shall not nest `BT`/`ET` text
+objects or change the rendering of later source operations.
+
+The replacement shall preserve the region's applicable fill colour, colour
+space, opacity, blend state, clipping, and placement transform. A transition
+of any of those properties shall be a visual-region boundary: chunks on each
+side shall be fitted separately unless a later requirement defines a safe
+cross-state grouping rule. A later transition shall not retroactively make an
+earlier region in a different paint state ineligible.
+
+This requirement applies to page content and reusable Form XObjects. It does
+not require support for stroked, fill-and-stroke, clipping, invisible, or
+otherwise non-fill text rendering modes.
+
+### Rationale
+
+PDF generators commonly retain a long text object while changing fill colour
+for a link, label, or emphasis. Emitting every replacement only after the
+text object's `ET` cannot preserve the paint state of its earlier text. The
+replacement must instead be anchored to the source region's state.
+
+### Notes
+
+Automated tests shall use synthetic PDFs only. They shall include one text
+object containing multiple visible fill-text regions separated by fill-colour
+and opacity changes, including a transition back to an earlier colour. Tests
+shall verify that every eligible region is replaced, each replacement retains
+its source paint state, later source text remains semantically and visually
+unchanged apart from its own replacement, and the output renders in an
+independent PDF renderer.
+
+## FR-2026-08-23-03
+
+| Property | Value |
+|----------|-------|
+| Title | Use fill-only portable replacement for fill-and-stroke PDF text |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF layout evaluation |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-23-02 |
+
+### Description
+
+`preserve-basic-layout` shall support eligible text painted with PDF text
+rendering mode `2` (fill and stroke). It shall fit the replacement using the
+same visual-region rules as ordinary fill text. The portable replacement shall
+be painted in rendering mode `0` (fill-only), using the source fill colour,
+colour space, opacity, blend state, clipping, and placement transform.
+
+The replacement shall not apply the source stroke colour, stroke width, dash,
+join, cap, or other stroke state. Retaining or compensating a source text
+stroke for a portable target font is out of scope for this requirement and
+requires a later explicit style policy.
+
+The adapter shall calculate and retain text-position state through eligible
+mode-`2` source text. A later independently eligible fill-only region in the
+same `BT`/`ET` text object shall remain eligible without requiring a reset
+text matrix. A change to text rendering mode, stroke colour, stroke width, or
+other applicable stroke state shall be a visual-region boundary.
+
+Stroke-only, clipping, invisible, and other non-fill text rendering modes
+remain out of scope.
+
+### Rationale
+
+Mode `2` is visible selectable text, but a source outline stroke is not a
+portable font-weight instruction. Applying it unchanged to a different target
+face, particularly after fitting to a smaller size, can make replacement text
+materially heavier than the source. Fill-only output is the predictable
+baseline for translated and masking output.
+
+### Notes
+
+Automated tests shall use synthetic mode-`2` text and verify, in an
+independent PDF renderer, that the source text painting is replaced by
+fill-only portable output with the source fill paint state. They shall include
+an ordinary fill-only operation after mode-`2` text in the same text object
+and verify that both regions are replaced without a reset text matrix.
+
+---
+
+## FR-2026-08-23-04
+
+| Property | Value |
+|----------|-------|
+| Title | Use Type0 CID width tables for PDF visual-region geometry |
+| Owner | |
+| Status | Implemented |
+| Source | User request following PDF measurement review |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-04-09 |
+
+### Description
+
+When deriving an eligible Type0 PDF text run's source advance, the PDF
+adapter shall use the active descendant CIDFont's per-CID `/W` width table
+when a safe code-to-CID mapping is available. It shall use the descendant's
+`/DW` default width only for CIDs not covered by `/W`.
+
+The adapter shall determine source character-code boundaries using the active
+PDF CMaps. It shall not assume that source character codes are two bytes, that
+`/Identity-H` applies, or that a `/ToUnicode` mapping can be reversed to find
+a CID. A `/ToUnicode` CMap remains decoding evidence; the active encoding CMap
+is the authority for mapping a source code to a CID for width lookup.
+
+If the adapter cannot determine a code-to-CID mapping safely, it shall retain
+the existing conservative source-advance fallback. It shall not invent a CID
+from Unicode text. This requirement changes source-region measurement only;
+it does not change replacement font selection or encoding.
+
+### Rationale
+
+Type0 CIDFonts often use widths that vary by CID. Treating every decoded code
+as the `/DW` default can over- or under-estimate a source visual line, causing
+unnecessary shrinking, wrapping, or poor placement of a fitted replacement.
+
+### Notes
+
+Automated tests shall use synthetic Type0 fonts with an Identity encoding and
+mixed `/W` and `/DW` coverage. They shall verify source-line advance, inferred
+region width, fitted replacement size, and placement. Tests shall also cover
+variable-length source codes and a non-identity encoding case; an unresolved
+mapping shall take the documented fallback without emitting an invented CID.
+
+---
+
+## FR-2026-08-23-05
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve PDF text positioning across undecodable source text |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF layout evaluation |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-23-04 |
+
+### Description
+
+When a visible source text-showing operation cannot be decoded for the text
+replacement provider, `preserve-basic-layout` shall retain that operation
+unchanged and make it a visual-region boundary. If the adapter can determine
+the operation's advance safely from the source font, active encoding CMap,
+text-showing operator, and current text state, it shall advance its internal
+text-position state by that amount.
+
+This shall allow a later independently eligible text operation in the same
+`BT`/`ET` object to be inferred and replaced without requiring an intervening
+`Tm`, `Td`, `TD`, or other text-position reset. The undecodable source text
+shall not be sent to the replacement provider and shall not be incorporated
+into a replacement visual region.
+
+For `Tj`, `TJ`, `'`, and `"` operations, calculated advance shall include
+source glyph widths, `TJ` numeric adjustments, character spacing, word
+spacing, horizontal scaling, and any operator-defined line movement. The
+adapter shall use the active source encoding CMap to establish code
+boundaries; it shall not infer widths from decoded Unicode text.
+
+If complete advance cannot be determined safely, the adapter shall retain the
+operation unchanged and preserve the existing conservative positioning
+barrier. It shall not guess character boundaries, CIDs, glyph widths, or text
+advance.
+
+### Rationale
+
+PDF text positioning is stateful. An undecodable glyph can be left visually
+unchanged without making a later decodable run unsafe, provided its advance is
+known. Treating every undecodable operation as an unknown-position barrier
+unnecessarily leaves later, independently replaceable text unchanged.
+
+### Notes
+
+Automated tests shall use synthetic PDFs only. They shall include an
+undecodable composite-font operation with a safe encoding-CMap/width-based
+advance followed by a decodable ordinary-fill operation in the same text
+object without a text-matrix reset. Tests shall verify that the former remains
+unchanged, the latter is replaced at its original visual position, and an
+unknown code-to-CID mapping retains the conservative barrier.
+
+---
+
+## FR-2026-08-23-06
+
+| Property | Value |
+|----------|-------|
+| Title | Recover Unicode from embedded Identity CID fonts when `/ToUnicode` is incomplete |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF text-replacement evaluation |
+| Date Added | 2026-08-23 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-23-04, FR-2026-08-23-05 |
+
+### Description
+
+For an otherwise eligible Type0 source-text operation, the PDF adapter shall
+prefer the source `/ToUnicode` CMap. When that CMap is absent or does not map
+every source code in an operation, the adapter shall attempt an embedded-font
+Unicode recovery path before classifying the operation as undecodable.
+
+The initial recovery path applies only when all of the following hold:
+
+- the active source encoding is `/Identity-H`;
+- the descendant CIDFont declares `/CIDToGIDMap /Identity`;
+- the descendant font descriptor contains an embedded TrueType or OpenType
+  font program with a parseable Unicode `cmap`; and
+- every source code can be mapped through a complete, unambiguous chain of
+  source code to CID, CID to GID, and GID to exactly one Unicode text value.
+
+For a conforming Identity-H operand, the adapter shall read source codes as
+two-byte CIDs. For a single-byte source string operand, it may apply an
+Identity-H compatibility mapping by zero-extending that byte to a CID only
+when the resulting GID has exactly one Unicode mapping in the embedded font's
+`cmap`. It shall not apply this compatibility mapping to a multi-byte operand,
+split an even-length operand into one-byte CIDs, or choose between multiple
+possible code segmentations or Unicode values.
+
+When recovery succeeds, the adapter shall use the recovered Unicode text for
+the selected text-replacement provider and shall retain the existing
+PDF-derived glyph-width and text-position calculations for visual geometry.
+Recovered text shall participate in the same visual-region inference,
+replacement, paint-state preservation, and fitting path as text decoded from
+`/ToUnicode`.
+
+The adapter shall cache parsed embedded-font Unicode maps per source font for
+the duration of one document. It shall not use operating-system fonts, font
+name heuristics, OCR, or network resources as part of this decoding path.
+
+If any source code, CID, GID, embedded font, or Unicode mapping is missing,
+ambiguous, malformed, or unsupported, the adapter shall retain the source
+operation unchanged and follow the existing safe-positioning behaviour. It
+shall not guess text from glyph outlines or use a placeholder character as a
+translation input.
+
+### Rationale
+
+Some PDFs contain visible selectable text whose `/ToUnicode` CMap is absent
+or incomplete even though the embedded CID font provides an unambiguous
+Unicode mapping. A PDF viewer can often use that mapping for copy and select
+operations. Recovering it through a verified source-code-to-glyph chain makes
+the text available to every replacement provider, including translation,
+without weakening the existing conservative handling of genuinely opaque
+glyph codes.
+
+### Notes
+
+Automated tests shall use synthetic PDFs and non-confidential font assets.
+They shall cover a Type0 Identity-H font with an Identity CID-to-GID map and
+embedded Unicode `cmap` where `/ToUnicode` is incomplete; a successful
+two-byte recovery; a successful single-byte compatibility recovery; and
+rejection of ambiguous, missing, non-Identity, and multi-byte compatibility
+cases. Tests shall verify provider input, source-region placement, and that a
+rejected operation remains unchanged without suppressing a later independently
+eligible operation.
+
+---
+
+## FR-2026-08-24-01
+
+| Property | Value |
+|----------|-------|
+| Title | Reliably decode Type0 PDF text when high-level decoding yields whitespace |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF text-replacement evaluation |
+| Date Added | 2026-08-24 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-23-04, FR-2026-08-23-05, FR-2026-08-23-06 |
+
+### Description
+
+For Type0 source text, the adapter shall not treat a structurally present
+`/ToUnicode` CMap as reliable merely because it maps every source code. A
+mapping that produces only whitespace or other semantically implausible output
+for visible non-whitespace source glyphs shall be treated as unreliable. The
+adapter shall first parse the PDF's `/ToUnicode` CMap according to its code
+space and mapping rules rather than relying solely on a library's simplified
+font-decoding helper. It may then use a deterministic recovery route supported
+by the PDF itself, including the embedded-font recovery of FR-2026-08-23-06.
+
+If no complete, unambiguous, in-document Unicode recovery route is available,
+the adapter shall leave the source operation unchanged. It shall not infer
+Unicode from glyph outlines, host fonts, OCR, or network resources. Use of an
+external CID-collection mapping is out of scope unless a later requirement
+defines its provenance, licensing, versioning, and validation.
+
+### Rationale
+
+PDF viewers can sometimes recover text from Type0 fonts through decoding paths
+that differ from a library's high-level helper. Parsing the document's own
+Unicode CMap before declaring text undecodable prevents a helper limitation
+from silently turning meaningful visible text into whitespace while retaining
+the conservative no-guessing policy for genuinely opaque fonts.
+
+### Notes
+
+Automated tests shall use only synthetic PDFs and non-confidential font assets.
+They shall also cover a Type0 font whose direct `/ToUnicode` CMap parsing
+recovers visible non-whitespace text when the existing high-level decoding
+helper does not, plus a CMap or embedded font for which recovery is ambiguous
+or unavailable. The former shall reach the provider and semantic replacement
+path; the latter shall remain unchanged and shall not emit a placeholder or
+replacement. Tests shall verify provider input and visual behavior with an
+independent PDF renderer.
+
+---
+
+## FR-2026-08-24-02
+
+| Property | Value |
+|----------|-------|
+| Title | Make fitted replacement text authoritative for PDF copy and search |
+| Owner | |
+| Status | Implemented |
+| Source | User request following native-PDF text-replacement evaluation |
+| Date Added | 2026-08-24 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-24-01 |
+
+### Description
+
+For every source text-showing operation that is safely replaced by
+`preserve-basic-layout`, the fitted replacement shall become the authoritative
+semantic text of the output PDF. Standard PDF text extraction, selection,
+copy, and search shall expose the replacement text, in its provider-returned
+Unicode order, rather than the source text.
+
+The adapter shall not retain the replaced source `Tj`, `TJ`, `'`, or `"`
+operand as hidden, invisible, or otherwise non-painted selectable text. It
+shall instead remove or rewrite that source text representation and preserve
+the required text-position state for subsequent page content. The output must
+therefore retain the visual placement of later independent content without
+leaving the replaced source text discoverable through the normal PDF text
+layer.
+
+The replacement font encoding shall provide a complete, unambiguous Unicode
+mapping for every emitted replacement glyph. The generated text stream and
+its `/ToUnicode` mapping shall together extract as exactly the replacement
+text; visible glyph placement alone is insufficient.
+
+When the source content is inside marked content whose alternate text affects
+selection, copy, or extraction, the adapter shall update that alternate text
+to the replacement text or remove it if it no longer represents the replaced
+content. If it cannot safely update or remove an applicable alternate-text
+representation, it shall leave that source operation unchanged rather than
+produce a visual and semantic mismatch.
+
+This requirement applies only to operations that otherwise meet the safe
+replacement eligibility requirements. Unsupported or undecodable source text,
+and existing FreeText annotations and AcroForm field values, remain unchanged.
+
+### Rationale
+
+Hiding source glyph painting can preserve the page's appearance and text
+positioning, but it leaves the source string in the PDF text layer. That makes
+copy, selection, and search disagree with the document the user sees. A
+replacement pipeline intended for translation or masking must replace both
+representations.
+
+### Notes
+
+Automated tests shall use only synthetic PDFs and non-confidential font assets.
+They shall cover a replaced `Tj` and `TJ` operation whose original source text
+is no longer returned by extraction; successful search, selection, and copy
+of the replacement Unicode text; a generated-font `/ToUnicode` mapping;
+preservation of the following operation's visual position after the source
+showing operation is removed or rewritten; and marked content with an
+`/ActualText` value. Tests shall verify semantic behavior with an independent
+PDF text extractor and visual behavior with an independent PDF renderer.

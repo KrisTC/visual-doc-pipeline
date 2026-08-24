@@ -99,6 +99,19 @@ class FittedTextBox:
 
 
 @dataclass(frozen=True, slots=True)
+class FittedTextLine:
+    """One line of a fitted text box in layout pixels.
+
+    Format adapters that render their own text need the shared layout engine's
+    resolved wrapping, rather than a second format-specific wrapping policy.
+    """
+
+    text: str
+    width_pixels: float
+    height_pixels: float
+
+
+@dataclass(frozen=True, slots=True)
 class SourceFontSelection:
     """The measurement face selected for one source run."""
 
@@ -429,6 +442,23 @@ def replace_and_fit_text_box(
         measure_source_fonts=measure_source_fonts,
         embedded_faces=embedded_faces,
         font_manager=font_manager,
+    )
+
+
+def fitted_text_lines(
+    fitted: FittedTextBox,
+    typefaces: dict[str, skia.Typeface] | None = None,
+) -> tuple[FittedTextLine, ...]:
+    """Return the shared engine's wrapped output lines for a fitted text box."""
+    selected_typefaces = typefaces or noto_typefaces()
+    width, _height = _content_dimensions(fitted.text_box)
+    return tuple(
+        FittedTextLine(
+            "".join(segment.text for segment in line.segments),
+            line.width,
+            _line_advance(line),
+        )
+        for line in _layout_lines(fitted.text_box.paragraphs, width, selected_typefaces, 1.0)
     )
 
 

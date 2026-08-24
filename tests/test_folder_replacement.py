@@ -10,6 +10,7 @@ import re
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 import xml.etree.ElementTree as ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -26,7 +27,7 @@ from pptx.oxml.ns import qn
 from pptx.util import Inches, Pt
 # pypdf does not publish PEP 561 metadata for its generic object model.
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, ContentStream, DecodedStreamObject, DictionaryObject, NameObject, NumberObject, TextStringObject
+from pypdf.generic import ArrayObject, ByteStringObject, ContentStream, DecodedStreamObject, DictionaryObject, FloatObject, NameObject, NumberObject, TextStringObject
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
@@ -36,6 +37,7 @@ from pipeline.folder_replacement import (
     replace_input_folder,
 )
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
+from pipeline.folder_replacement.pdf import _pdf_decode_composite_bytes, _pdf_text_advance
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
 from pipeline.bounded_text_layout import noto_typefaces
@@ -1134,23 +1136,828 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(1, result.replaced_native_text_items)
             self.assertIn(b"\\043\\043\\043\\043\\043", (output_root / "document.pdf").read_bytes())
 
-    # Verifies FR-2026-08-04-07.
+    # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_content_uses_the_safe_replacement_font(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
             source = input_root / "document.pdf"
             writer = PdfWriter(); page = writer.add_blank_page(100, 100)
-            contents = DecodedStreamObject(); contents.set_data(b"BT /F1 12 Tf 10 10 Td (Hello) Tj ET")
+            contents = DecodedStreamObject(); contents.set_data(b"BT /F1 12 Tf 10 10 Td [(Hel) 0 (lo)] TJ ET")
             page.replace_contents(ContentStream(contents, writer))
             with source.open("wb") as source_file: writer.write(source_file)
 
-            self._run(input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider(), document_text_layout="preserve-basic-layout")
+            provider = _RecordingReplacementProvider()
+            self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+            self.assertEqual(["Hello"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
 
             output = PdfReader(output_root / "document.pdf")
             stream = ContentStream(output.pages[0].get_contents(), output)
-            self.assertTrue(any(operator == b"Tf" and operands[0] == "/PipelineFallback" for operands, operator in stream.operations))
-            self.assertIn(b"<2323232323>", (output_root / "document.pdf").read_bytes())
+            self.assertTrue(any(operator == b"Tf" and operands[0] == "/PipelineNoto" for operands, operator in stream.operations))
+            self.assertTrue(any(
+                operator == b"Tr" and operands and int(operands[0]) == 3
+                for operands, operator in stream.operations
+            ))
+            self.assertNotIn("Hello", output.pages[0].extract_text())
+            fonts = cast(DictionaryObject, cast(DictionaryObject, output.pages[0]["/Resources"])["/Font"])
+            type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
+            descendant = cast(DictionaryObject, cast(ArrayObject, type_zero["/DescendantFonts"])[0].get_object())
+            self.assertTrue(descendant.get("/W"))
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_splits_widely_spaced_tj_fragments_into_visual_regions(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(240, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 60 Td [(one) -5000 (two) -5000 (three) -5000 (four)] TJ ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(4, result.replaced_native_text_items)
+            self.assertEqual(["one", "two", "three", "four"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            font_name = ""
+            text_matrix: list[float] | None = None
+            generated_x_positions: list[float] = []
+            for operands, operator in stream.operations:
+                if operator == b"Tf":
+                    font_name = str(operands[0])
+                elif operator == b"Tm":
+                    text_matrix = [float(value) for value in operands]
+                elif operator == b"Tj" and font_name == "/PipelineNoto" and text_matrix is not None:
+                    generated_x_positions.append(text_matrix[4])
+            self.assertEqual(4, len(generated_x_positions))
+            self.assertEqual(generated_x_positions, sorted(generated_x_positions))
+            self.assertGreater(min(
+                right - left for left, right in zip(generated_x_positions, generated_x_positions[1:])
+            ), 40.0)
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_splits_close_tj_fragments_at_a_table_cell_gap(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(120, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 60 Td [(value) -600 (unit)] TJ ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(["value", "unit"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-24-02.
+    def test_basic_layout_pdf_identity_replaces_through_the_fitted_output_path(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (Hello) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="Hello")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["Hello"], [request.text for request in provider.requests if not request.is_filename])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in stream.operations
+            ))
+            self.assertFalse(any(
+                operator == b"Tj" and operands and str(operands[0]) == "Hello"
+                for operands, operator in stream.operations
+            ))
+            self.assertEqual("Hello", output.pages[0].extract_text().strip())
+            pipeline_font_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tf" and operands[0] == "/PipelineNoto"
+            )
+            self.assertTrue(any(
+                operator == b"Tj" and operands and str(operands[0])
+                for operands, operator in stream.operations[pipeline_font_index:]
+            ))
+
+    # Verifies FR-2026-08-24-02.
+    def test_basic_layout_pdf_replaces_the_extractable_source_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(150, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (source) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            self._run(
+                input_root, output_root, _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="replacement"),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            output = PdfReader(output_root / "document.pdf")
+            extracted = output.pages[0].extract_text()
+            self.assertIn("replacement", extracted)
+            self.assertNotIn("source", extracted)
+            fonts = cast(DictionaryObject, cast(DictionaryObject, output.pages[0]["/Resources"])["/Font"])
+            type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
+            self.assertIsNotNone(type_zero.get("/ToUnicode"))
+
+    # Verifies FR-2026-08-24-02.
+    def test_basic_layout_pdf_retains_marked_content_with_actual_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(150, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 10 Td /Span << /ActualText (alternate) >> BDC "
+                b"(protected) Tj EMC 0 -20 Td (replaceable) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="replacement")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["replaceable"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertTrue(any(
+                operator == b"Tj" and operands and str(operands[0]) == "protected"
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-23-02 and FR-2026-08-24-02.
+    def test_basic_layout_pdf_keeps_each_fitted_region_in_its_source_paint_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/ExtGState"): DictionaryObject({
+                    NameObject("/Full"): DictionaryObject({NameObject("/ca"): NumberObject(1)}),
+                    NameObject("/Half"): DictionaryObject({NameObject("/ca"): FloatObject(0.5)}),
+                }),
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 70 Td 1 0 0 rg /Full gs (first) Tj "
+                b"0 0 1 rg /Half gs 0 -20 Td (second) Tj "
+                b"1 0 0 rg /Full gs 0 -20 Td (third) Tj 14 TL T* 1 Tr (outline) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="mask")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(3, result.replaced_native_text_items)
+            self.assertEqual(["first", "second", "third"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertEqual(1, sum(operator == b"BT" for _operands, operator in stream.operations))
+            self.assertEqual(1, sum(operator == b"ET" for _operands, operator in stream.operations))
+            self.assertFalse(any(
+                operator == b"Tj" and operands and str(operands[0]) in {"first", "second", "third"}
+                for operands, operator in stream.operations
+            ))
+            outline_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tj" and operands and str(operands[0]) == "outline"
+            )
+            self.assertEqual(b"Tr", stream.operations[outline_index - 1][1])
+            self.assertEqual(1, int(stream.operations[outline_index - 1][0][0]))
+
+            fill_colour: tuple[float, float, float] | None = None
+            opacity: str | None = None
+            fitted_paint_states: list[tuple[tuple[float, float, float] | None, str | None]] = []
+            for operands, operator in stream.operations:
+                if operator == b"rg":
+                    fill_colour = (float(operands[0]), float(operands[1]), float(operands[2]))
+                elif operator == b"gs":
+                    opacity = str(operands[0])
+                elif operator == b"Tf" and operands[0] == "/PipelineNoto":
+                    fitted_paint_states.append((fill_colour, opacity))
+            self.assertEqual([
+                ((1.0, 0.0, 0.0), "/Full"),
+                ((0.0, 0.0, 1.0), "/Half"),
+                ((1.0, 0.0, 0.0), "/Full"),
+            ], fitted_paint_states)
+
+    # Verifies FR-2026-08-23-03.
+    def test_basic_layout_pdf_replaces_fill_and_stroke_with_fill_only_output(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"2 w 1 0 0 rg 0 0 1 RG BT /F1 12 Tf 14 TL 10 70 Td "
+                b"2 Tr (filled and stroked) Tj 0 Tr T* (fill only) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="mask")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(["filled and stroked", "fill only"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertEqual(1, sum(operator == b"BT" for _operands, operator in stream.operations))
+            self.assertEqual(1, sum(operator == b"ET" for _operands, operator in stream.operations))
+
+            text_rendering_mode = 0
+            generated_modes: list[int] = []
+            for operands, operator in stream.operations:
+                if operator == b"Tr":
+                    text_rendering_mode = int(operands[0])
+                elif operator == b"Tf" and operands[0] == "/PipelineNoto":
+                    generated_modes.append(text_rendering_mode)
+            self.assertEqual([0, 0], generated_modes)
+            self.assertTrue(any(
+                operator == b"w" and float(operands[0]) == 2.0
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-23-01 and FR-2026-08-24-02.
+    def test_basic_layout_pdf_uses_text_matrix_and_ctm_for_fitted_geometry(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"q 2 0 0 2 0 0 cm BT /F1 10 Tf .5 0 0 .5 10 20 Tm (test) Tj ET Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider(),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            pipeline_font_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tf" and operands[0] == "/PipelineNoto"
+            )
+            generated_matrix = next(
+                operands for operands, operator in stream.operations[pipeline_font_index:]
+                if operator == b"Tm"
+            )
+            self.assertEqual([0.5, 0.0, 0.0, 0.5], [round(float(value), 4) for value in generated_matrix[:4]])
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_preserves_an_axis_aligned_nonuniform_transform(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"q 1.2 0 0 .8 0 0 cm BT /F1 10 Tf 1 0 0 1 10 70 Tm (cell) Tj ET Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="mask")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["cell"], [request.text for request in provider.requests if not request.is_filename])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertFalse(any(
+                operator == b"Tj" and operands and str(operands[0]) == "cell"
+                for operands, operator in stream.operations
+            ))
+            pipeline_font_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tf" and operands[0] == "/PipelineNoto"
+            )
+            generated_matrix = next(
+                operands for operands, operator in stream.operations[pipeline_font_index:]
+                if operator == b"Tm"
+            )
+            # The fitted font size absorbs the source's vertical 0.8 scale;
+            # the matrix retains the resulting 1.5 horizontal-to-vertical ratio.
+            self.assertEqual([1.25, 0.0, 0.0, 1.25], [round(float(value), 4) for value in generated_matrix[:4]])
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_groups_compatible_text_objects_into_one_visual_block(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 70 Td (first line) Tj ET BT /F1 12 Tf 10 56 Td (second line) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="a fitted replacement")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["first line\nsecond line"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_keeps_an_undecodable_operation_but_replaces_a_reset_neighbour(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(b"1 beginbfchar\n<0001> <0041>\nendbfchar\n")
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticIdentity"), NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td <0002> Tj 1 0 0 1 10 30 Tm <0001> Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["A"], [request.text for request in provider.requests if not request.is_filename])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertTrue(any(
+                operator == b"Tj" and operands and str(operands[0]) == "\x02"
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-23-05.
+    def test_basic_layout_pdf_advances_past_undecodable_identity_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(b"1 beginbfchar\n<0001> <0041>\nendbfchar\n")
+            descendant = writer._add_object(DictionaryObject({NameObject("/DW"): NumberObject(1000)}))
+            descendants = writer._add_object(ArrayObject([descendant]))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticIdentity"), NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+                NameObject("/DescendantFonts"): descendants,
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 10 Tf 10 30 Td <0002> Tj <0001> Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["A"], [request.text for request in provider.requests if not request.is_filename])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            unknown_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tj" and operands and str(operands[0]) == "\x02"
+            )
+            self.assertNotEqual(b"Tr", stream.operations[unknown_index - 1][1])
+            pipeline_font_index = next(
+                index for index, (operands, operator) in enumerate(stream.operations)
+                if operator == b"Tf" and operands[0] == "/PipelineNoto"
+            )
+            generated_matrix = next(
+                operands for operands, operator in stream.operations[pipeline_font_index:]
+                if operator == b"Tm"
+            )
+            self.assertEqual(20.0, float(generated_matrix[4]))
+
+    # Verifies FR-2026-08-23-05.
+    def test_basic_layout_pdf_keeps_barrier_when_undecodable_encoding_is_unknown(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(b"1 beginbfchar\n<0001> <0041>\nendbfchar\n")
+            encoding = writer._add_object(DecodedStreamObject())
+            descendant = writer._add_object(DictionaryObject({NameObject("/DW"): NumberObject(1000)}))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticCustom"), NameObject("/Encoding"): encoding,
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+                NameObject("/DescendantFonts"): ArrayObject([descendant]),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 10 Tf 10 30 Td <0002> Tj <0001> Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(0, result.replaced_native_text_items)
+            self.assertFalse([request for request in provider.requests if not request.is_filename])
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_recovers_at_line_position_resets_after_unknown_advance(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 120)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(b"1 beginbfchar\n<0001> <0041>\nendbfchar\n")
+            descendant = writer._add_object(DictionaryObject({NameObject("/DW"): NumberObject(1000)}))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticIdentity"), NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+                NameObject("/DescendantFonts"): ArrayObject([descendant]),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 10 Tf 12 TL 10 105 Td <02> Tj 0 -15 Td <0001> Tj ET "
+                b"BT /F1 10 Tf 12 TL 10 85 Td <02> Tj 0 -15 TD <0001> Tj ET "
+                b"BT /F1 10 Tf 12 TL 10 65 Td <02> Tj T* <0001> Tj ET "
+                b"BT /F1 10 Tf 12 TL 10 45 Td <02> Tj <0001> ' ET "
+                b"BT /F1 10 Tf 12 TL 10 25 Td <02> Tj 0 0 <0001> \" ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(5, result.replaced_native_text_items)
+            self.assertEqual(
+                ["A"] * 5,
+                [request.text for request in provider.requests if not request.is_filename],
+            )
+
+    # Verifies FR-2026-08-23-06.
+    def test_basic_layout_pdf_recovers_unicode_from_an_embedded_identity_font(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            font_data = static_noto_bytes("sans-serif", False)
+            source_face = skia.Typeface.MakeFromData(font_data)
+            self.assertIsNotNone(source_face)
+            glyph = skia.Font(source_face).textToGlyphs("A")[0]
+            self.assertLess(glyph, 256)
+
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            font_stream = DecodedStreamObject(); font_stream.set_data(font_data)
+            descriptor = writer._add_object(DictionaryObject({
+                NameObject("/FontFile2"): writer._add_object(font_stream),
+            }))
+            descendant = writer._add_object(DictionaryObject({
+                NameObject("/DW"): NumberObject(1000),
+                NameObject("/CIDToGIDMap"): NameObject("/Identity"),
+                NameObject("/FontDescriptor"): descriptor,
+            }))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticEmbeddedIdentity"),
+                NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/DescendantFonts"): ArrayObject([descendant]),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            source_font = cast(DictionaryObject, font.get_object())
+            self.assertEqual(
+                "A", _pdf_decode_composite_bytes(glyph.to_bytes(2, "big"), source_font)
+            )
+            self.assertEqual("A", _pdf_decode_composite_bytes(bytes([glyph]), source_font))
+            self.assertIsNone(
+                _pdf_decode_composite_bytes(bytes([glyph, glyph, glyph]), source_font)
+            )
+            non_identity_font = DictionaryObject(source_font)
+            non_identity_font[NameObject("/Encoding")] = NameObject("/Identity-V")
+            self.assertIsNone(_pdf_decode_composite_bytes(bytes([glyph]), non_identity_font))
+            contents = DecodedStreamObject()
+            contents.set_data(f"BT /F1 10 Tf 10 30 Td <{glyph:02X}> Tj ET".encode("ascii"))
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(
+                ["A"],
+                [request.text for request in provider.requests if not request.is_filename],
+            )
+
+    # Verifies FR-2026-08-24-01.
+    def test_type0_pdf_uses_direct_tounicode_parsing_when_the_helper_returns_whitespace(self) -> None:
+        to_unicode = DecodedStreamObject()
+        to_unicode.set_data(
+            b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+            b"1 beginbfrange\n<0001> <0001> <0041>\nendbfrange\n"
+        )
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type0"),
+            NameObject("/Encoding"): NameObject("/Identity-H"),
+            NameObject("/ToUnicode"): to_unicode,
+        })
+        with patch(
+            "pipeline.folder_replacement.pdf.get_encoding",
+            return_value=("utf-8", {"\x00\x01": " "}),
+        ):
+            self.assertEqual("A", _pdf_decode_composite_bytes(b"\x00\x01", font))
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_replaces_tj_text_with_a_whitespace_fragment(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(
+                b"1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n"
+                b"2 beginbfchar\n<0001> <0041>\n<0002> <0020>\nendbfchar\n"
+            )
+            descendant = writer._add_object(DictionaryObject({NameObject("/DW"): NumberObject(1000)}))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/SyntheticIdentity"), NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+                NameObject("/DescendantFonts"): ArrayObject([descendant]),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 10 Tf 10 30 Td [<0001> 0 <0002> 0 <0001>] TJ ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["A A"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_reflows_one_visual_paragraph_and_replaces_its_source_operations(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td (first line) Tj T* (second line) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(
+                replacement_text="A replacement sentence that needs several wrapped lines."
+            )
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            requests = [request.text for request in provider.requests if not request.is_filename]
+            self.assertEqual(["first line\nsecond line"], requests)
+            output_reader = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
+            self.assertGreaterEqual(sum(operator == b"Tj" for _operands, operator in stream.operations), 3)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_keeps_distant_same_line_labels_as_independent_regions(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 70 Td (left) Tj 100 0 Td (right) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="replacement")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            requests = [request.text for request in provider.requests if not request.is_filename]
+            self.assertEqual(["left", "right"], requests)
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_retains_clipping_text_and_skips_the_provider(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 7 Tr 10 70 Td (clip only) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output: writer.write(output)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(0, result.replaced_native_text_items)
+            self.assertFalse([request for request in provider.requests if not request.is_filename])
+            self.assertIn(b"clip only", (output_root / "document.pdf").read_bytes())
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_preserves_a_right_angle_text_orientation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 0 1 -1 0 100 10 Tm (vertical) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output: writer.write(output)
+
+            self._run(
+                input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider(),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            output_reader = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
+            self.assertTrue(any(
+                operator == b"Tm" and [float(value) for value in operands[:4]] == [0.0, 1.0, -1.0, 0.0]
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-23-01.
+    def test_basic_layout_pdf_replaces_text_inside_a_reusable_form_xobject(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            form = DecodedStreamObject()
+            form.set_data(b"BT /F1 12 Tf 10 10 Td (form text) Tj ET")
+            form.update({
+                NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Form"),
+                NameObject("/BBox"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(30)]),
+            })
+            form_reference = writer._add_object(form)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/XObject"): DictionaryObject({NameObject("/Form1"): form_reference})
+            })
+            contents = DecodedStreamObject(); contents.set_data(b"q /Form1 Do Q")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="fitted replacement")
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            output_reader = PdfReader(output_root / "document.pdf")
+            xobjects = cast(DictionaryObject, cast(DictionaryObject, output_reader.pages[0]["/Resources"])["/XObject"])
+            updated_form = cast(DecodedStreamObject, xobjects["/Form1"].get_object())
+            stream = ContentStream(updated_form, output_reader)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in stream.operations
+            ))
 
     # Verifies FR-2026-08-03-03.
     def test_replaces_type0_pdf_text_with_a_tounicode_map(self) -> None:
@@ -1187,7 +1994,12 @@ class FolderReplacementTests(unittest.TestCase):
             )
 
             self.assertEqual(1, result.replaced_native_text_items)
-            self.assertIn(b"<23>", (output_root / "document.pdf").read_bytes())
+            basic_reader = PdfReader(output_root / "document.pdf")
+            basic_stream = ContentStream(basic_reader.pages[0].get_contents(), basic_reader)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in basic_stream.operations
+            ))
 
             identity_basic_output = root / "identity-basic-output"
             self._run(
@@ -1236,6 +2048,157 @@ class FolderReplacementTests(unittest.TestCase):
                 for operands, operator in fallback_stream.operations
             ))
             self.assertIn(b"<23>", (fallback_output / "document.pdf").read_bytes())
+
+    # Verifies FR-2026-08-23-04.
+    def test_type0_pdf_widths_use_w_overrides_and_dw_fallback(self) -> None:
+        to_unicode = DecodedStreamObject()
+        to_unicode.set_data(
+            b"4 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\n<0004> <003F>\nendbfchar\n"
+        )
+        descendant = DictionaryObject({
+            NameObject("/DW"): NumberObject(1000),
+            NameObject("/W"): ArrayObject([
+                NumberObject(1), ArrayObject([NumberObject(250), NumberObject(750)]),
+                NumberObject(3), NumberObject(3), NumberObject(500),
+            ]),
+        })
+        font = DictionaryObject({
+            NameObject("/Subtype"): NameObject("/Type0"),
+            NameObject("/Encoding"): NameObject("/Identity-H"),
+            NameObject("/ToUnicode"): to_unicode,
+            NameObject("/DescendantFonts"): ArrayObject([descendant]),
+        })
+        value = ByteStringObject(b"\x00\x01\x00\x02\x00\x03\x00\x04")
+        self.assertEqual("ABC", _pdf_decode_composite_bytes(value[:6], font))
+        advance = _pdf_text_advance(
+            value,
+            "ABC?",
+            (NameObject("/F1"), NumberObject(10)),
+            {"/F1": font},
+            10.0,
+            0.0,
+            0.0,
+            1.0,
+        )
+        self.assertEqual(25.0, advance)
+
+    # Verifies FR-2026-08-23-04.
+    def test_type0_pdf_widths_support_one_byte_codes_and_explicit_nonidentity_cids(self) -> None:
+        to_unicode = DecodedStreamObject()
+        to_unicode.set_data(b"2 beginbfchar\n<01> <0041>\n<02> <0042>\nendbfchar\n")
+        encoding = DecodedStreamObject()
+        encoding.set_data(b"2 begincidchar\n<01> 7\n<02> 9\nendcidchar\n")
+        descendant = DictionaryObject({
+            NameObject("/DW"): NumberObject(1000),
+            NameObject("/W"): ArrayObject([
+                NumberObject(7), ArrayObject([NumberObject(300)]),
+                NumberObject(9), NumberObject(9), NumberObject(700),
+            ]),
+        })
+        font = DictionaryObject({
+            NameObject("/Subtype"): NameObject("/Type0"),
+            NameObject("/Encoding"): encoding,
+            NameObject("/ToUnicode"): to_unicode,
+            NameObject("/DescendantFonts"): ArrayObject([descendant]),
+        })
+        value = ByteStringObject(b"\x01\x02")
+        self.assertEqual("AB", _pdf_decode_composite_bytes(value, font))
+        self.assertEqual(
+            10.0,
+            _pdf_text_advance(
+                value,
+                "AB",
+                (NameObject("/F1"), NumberObject(10)),
+                {"/F1": font},
+                10.0,
+                0.0,
+                0.0,
+                1.0,
+            ),
+        )
+
+    # Verifies FR-2026-08-23-04.
+    def test_type0_pdf_widths_fall_back_to_dw_when_cid_mapping_is_incomplete(self) -> None:
+        to_unicode = DecodedStreamObject()
+        to_unicode.set_data(b"2 beginbfchar\n<01> <0041>\n<02> <0042>\nendbfchar\n")
+        encoding = DecodedStreamObject()
+        encoding.set_data(b"1 begincidchar\n<01> 7\nendcidchar\n")
+        descendant = DictionaryObject({
+            NameObject("/DW"): NumberObject(1000),
+            NameObject("/W"): ArrayObject([NumberObject(7), ArrayObject([NumberObject(300)])]),
+        })
+        font = DictionaryObject({
+            NameObject("/Subtype"): NameObject("/Type0"),
+            NameObject("/Encoding"): encoding,
+            NameObject("/ToUnicode"): to_unicode,
+            NameObject("/DescendantFonts"): ArrayObject([descendant]),
+        })
+        self.assertEqual(
+            20.0,
+            _pdf_text_advance(
+                ByteStringObject(b"\x01\x02"),
+                "AB",
+                (NameObject("/F1"), NumberObject(10)),
+                {"/F1": font},
+                10.0,
+                0.0,
+                0.0,
+                1.0,
+            ),
+        )
+
+    # Verifies FR-2026-08-23-04.
+    def test_basic_layout_pdf_type0_widths_control_the_fitted_replacement_size(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; input_root.mkdir()
+            narrow_source = input_root / "narrow.pdf"
+            wide_source = input_root / "wide.pdf"
+
+            def write_source(path: Path, widths: ArrayObject | None) -> None:
+                writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+                to_unicode = DecodedStreamObject()
+                to_unicode.set_data(b"2 beginbfchar\n<0001> <0041>\n<0002> <0042>\nendbfchar\n")
+                descendant = DictionaryObject({NameObject("/DW"): NumberObject(1000)})
+                if widths is not None:
+                    descendant[NameObject("/W")] = widths
+                font = writer._add_object(DictionaryObject({
+                    NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type0"),
+                    NameObject("/BaseFont"): NameObject("/SyntheticIdentity"), NameObject("/Encoding"): NameObject("/Identity-H"),
+                    NameObject("/ToUnicode"): writer._add_object(to_unicode),
+                    NameObject("/DescendantFonts"): ArrayObject([writer._add_object(descendant)]),
+                }))
+                page[NameObject("/Resources")] = DictionaryObject({
+                    NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+                })
+                contents = DecodedStreamObject()
+                contents.set_data(b"BT /F1 10 Tf 10 20 Td <00010002> Tj ET")
+                page.replace_contents(ContentStream(contents, writer))
+                with path.open("wb") as output_file: writer.write(output_file)
+
+            write_source(narrow_source, ArrayObject([NumberObject(1), ArrayObject([NumberObject(250), NumberObject(750)])]))
+            write_source(wide_source, None)
+
+            output_root = root / "output"
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="########"),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+
+            def fitted_size(path: Path) -> float:
+                output = PdfReader(path)
+                stream = ContentStream(output.pages[0].get_contents(), output)
+                return next(
+                    float(operands[1]) for operands, operator in stream.operations
+                    if operator == b"Tf" and operands[0] == "/PipelineNoto"
+                )
+
+            self.assertLess(fitted_size(output_root / "narrow.pdf"), fitted_size(output_root / "wide.pdf"))
 
     # Verifies FR-2026-08-03-03.
     def test_replaces_one_byte_type0_tj_fragments(self) -> None:
