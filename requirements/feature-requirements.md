@@ -694,6 +694,33 @@ No source or output content may be sent to external services. The selected provi
 
 ---
 
+## FR-2026-08-27-01
+
+| Property | Value |
+|----------|-------|
+| Title | Flatten transparent raster images for OCR using the source page or slide background |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-03-03 |
+
+### Description
+
+Before an OCR provider that accepts opaque RGB input receives a raster image with transparency, the pipeline shall alpha-composite a temporary OCR-only copy of the image onto an opaque background and supply the resulting RGB pixels to the provider. It shall not use that flattened copy for colour estimation, replacement rendering, or output encoding; those operations shall continue to use the original source image.
+
+For a raster image embedded in a DOCX document, the pipeline shall use the direct document background colour when it is a valid explicit RGB value. For a raster image embedded in a PPTX document, it shall use the direct slide background colour when it is a valid explicit RGB value and unambiguous for that image. It shall use opaque white when the background colour cannot be determined, including for standalone bitmap input and PDF images. It need not resolve theme colours, inherited backgrounds, or compositing through nested or overlapping images, shapes, or other visual layers.
+
+### Rationale
+
+Palette images can express alpha as per-palette transparency bytes. Direct conversion to RGB discards that alpha and causes Pillow to warn. Flattening an OCR-only copy before OCR removes the warning and gives OCR pixels consistent with the simple visible page or slide background without altering the source image used for replacement output.
+
+### Notes
+
+The scope is limited to preparing raster pixels for OCR. It does not require general document rendering or composition of arbitrary visual layers. It does not change source-image alpha handling during colour estimation or replacement rendering. Automated tests shall use synthetic transparent raster images and synthetic page or slide backgrounds only, and shall verify that the original image is retained for replacement output.
+
+---
+
 ## FR-2026-08-03-04
 
 | Property | Value |

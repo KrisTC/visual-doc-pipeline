@@ -26,6 +26,7 @@ from pipeline.folder_replacement.office_xml import (
     _serialize_with_compatibility_bindings,
 )
 from pipeline.ocr import OcrProvider
+from pipeline.ocr.image_preparation import RgbColour
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
@@ -70,11 +71,24 @@ def replace_docx_file(
 ) -> tuple[int, int, int]:
     """Fit Word DrawingML text boxes while retaining ordinary flow text behaviour."""
     from pipeline.folder_replacement.processor import _replace_office_file
+    ocr_backgrounds = _docx_ocr_backgrounds(source)
     if document_text_layout == "preserve-source-formatting":
-        return _replace_office_file(source, destination, ocr, replacement, source_language, target_language, typeface, completed)
+        return _replace_office_file(
+            source,
+            destination,
+            ocr,
+            replacement,
+            source_language,
+            target_language,
+            typeface,
+            completed,
+            ocr_backgrounds=ocr_backgrounds,
+        )
     native, images, vectors = _replace_office_file(
         source, destination, ocr, replacement, source_language, target_language, typeface,
-        completed, skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
+        completed,
+        skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
+        ocr_backgrounds=ocr_backgrounds,
     )
     native += _replace_docx_parts(destination, replacement, source_language, target_language,
         document_text_layout == "preserve-basic-layout-source-font")
@@ -82,6 +96,33 @@ def replace_docx_file(
         _embed_docx_static_fonts(destination)
     completed("native text layout")
     return native, images, vectors
+
+
+def _docx_ocr_backgrounds(source: Path) -> dict[str, RgbColour]:
+    """Return the direct document background for every embedded Word image."""
+    with ZipFile(source) as archive:
+        try:
+            document = ElementTree.fromstring(archive.read("word/document.xml"))
+        except (KeyError, ElementTree.ParseError):
+            return {}
+        background = document.find(_tag(_W, "background"))
+        colour = None if background is None else _rgb_value(background.get(_tag(_W, "color")))
+        if colour is None:
+            return {}
+        return {
+            name: colour
+            for name in archive.namelist()
+            if name.startswith("word/media/")
+        }
+
+
+def _rgb_value(value: str | None) -> RgbColour | None:
+    if value is None or len(value) != 6:
+        return None
+    try:
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except ValueError:
+        return None
 
 
 def _replace_docx_parts(path: Path, provider: TextReplacementProvider, source: str, target: str, preserve_font: bool) -> int:

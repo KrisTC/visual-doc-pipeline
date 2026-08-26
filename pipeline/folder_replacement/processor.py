@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
@@ -16,6 +16,7 @@ import skia  # type: ignore[import-not-found]
 from tqdm import tqdm
 
 from pipeline.ocr import OcrProvider
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.vector_text import replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
@@ -349,6 +350,7 @@ def _replace_office_file(
     *,
     replace_native_xml: bool = True,
     skip_native_xml_part: Callable[[str], bool] | None = None,
+    ocr_backgrounds: Mapping[str, RgbColour] | None = None,
 ) -> tuple[int, int, int]:
     native_items = 0
     image_regions = 0
@@ -367,6 +369,9 @@ def _replace_office_file(
                     source_language,
                     target_language,
                     typeface,
+                    DEFAULT_OCR_BACKGROUND
+                    if ocr_backgrounds is None
+                    else ocr_backgrounds.get(entry.filename, DEFAULT_OCR_BACKGROUND),
                 )
                 image_regions += replaced
                 work_completed(f"embedded image {embedded_image_index}")
@@ -424,8 +429,17 @@ def _replace_bitmap_bytes(
     source_language: str,
     target_language: str,
     typeface: skia.Typeface,
+    ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND,
 ) -> tuple[bytes, int]:
-    return _process_bitmap_bytes(data, ocr_provider, replacement_provider, source_language, target_language, typeface)
+    return _process_bitmap_bytes(
+        data,
+        ocr_provider,
+        replacement_provider,
+        source_language,
+        target_language,
+        typeface,
+        ocr_background,
+    )
 
 
 def _replace_native_text(

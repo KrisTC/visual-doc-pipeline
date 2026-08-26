@@ -37,6 +37,7 @@ from pipeline.bounded_text_layout import (
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.ocr import OcrProvider
+from pipeline.ocr.image_preparation import RgbColour
 from pipeline.folder_replacement.office_xml import (
     replace_drawing_diagram_xml_text,
     replace_office_xml_text,
@@ -91,6 +92,7 @@ _RUN_PROPERTY_CHILD_ORDER = (
 _OOXML_MINIMUM_FONT_SIZE_CENTIPOINTS = 100
 _OOXML_MAXIMUM_FONT_SIZE_CENTIPOINTS = 400_000
 _RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
+_PRESENTATION_NAMESPACE = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
 
 def replace_pptx_file(
@@ -108,6 +110,7 @@ def replace_pptx_file(
     from pipeline.folder_replacement.processor import _replace_office_file
 
     smartart_parts, smartart_data_parts = _reachable_smartart_parts(source)
+    ocr_backgrounds = _pptx_ocr_backgrounds(source)
     if document_text_layout == "preserve-source-formatting":
         native_items, image_regions, retained_vectors = _replace_office_file(
             source,
@@ -119,6 +122,7 @@ def replace_pptx_file(
             typeface,
             completed,
             skip_native_xml_part=smartart_parts.__contains__,
+            ocr_backgrounds=ocr_backgrounds,
         )
         native_items += _replace_smartart_data_parts(
             destination,
@@ -148,6 +152,7 @@ def replace_pptx_file(
         typeface,
         completed,
         replace_native_xml=False,
+        ocr_backgrounds=ocr_backgrounds,
     )
     native_items += _replace_smartart_data_parts(
         destination,
@@ -178,6 +183,81 @@ def replace_pptx_file(
     )
     completed("native text layout")
     return native_items, image_regions, retained_vectors
+
+
+def _pptx_ocr_backgrounds(source: Path) -> dict[str, RgbColour]:
+    """Return unambiguous direct solid slide backgrounds for embedded images."""
+    with ZipFile(source) as archive:
+        parts = frozenset(archive.namelist())
+        candidates: dict[str, set[RgbColour]] = {}
+        unknown_backgrounds: set[str] = set()
+        for slide_part in parts:
+            if not _is_slide_part(slide_part):
+                continue
+            image_parts = _slide_image_parts(archive, parts, slide_part)
+            if not image_parts:
+                continue
+            background = _slide_background_colour(archive, slide_part)
+            if background is None:
+                unknown_backgrounds.update(image_parts)
+                continue
+            for image_part in image_parts:
+                candidates.setdefault(image_part, set()).add(background)
+    return {
+        image_part: next(iter(backgrounds))
+        for image_part, backgrounds in candidates.items()
+        if len(backgrounds) == 1 and image_part not in unknown_backgrounds
+    }
+
+
+def _is_slide_part(part_name: str) -> bool:
+    parent, name = posixpath.split(part_name)
+    return parent == "ppt/slides" and name.startswith("slide") and name.endswith(".xml")
+
+
+def _slide_image_parts(archive: ZipFile, parts: frozenset[str], slide_part: str) -> set[str]:
+    relationships_part = _relationships_part_name(slide_part)
+    if relationships_part not in parts:
+        return set()
+    try:
+        relationships = ElementTree.fromstring(archive.read(relationships_part))
+    except ElementTree.ParseError:
+        return set()
+    image_parts: set[str] = set()
+    for relationship in relationships:
+        if relationship.tag != f"{{{_RELATIONSHIPS_NAMESPACE}}}Relationship":
+            continue
+        if relationship.get("TargetMode") == "External" or not (relationship.get("Type") or "").endswith("/image"):
+            continue
+        target = relationship.get("Target")
+        image_part = None if target is None else _relationship_target_part_name(slide_part, target)
+        if image_part is not None and image_part in parts:
+            image_parts.add(image_part)
+    return image_parts
+
+
+def _slide_background_colour(archive: ZipFile, slide_part: str) -> RgbColour | None:
+    try:
+        slide = ElementTree.fromstring(archive.read(slide_part))
+    except ElementTree.ParseError:
+        return None
+    background = slide.find(
+        f"{{{_PRESENTATION_NAMESPACE}}}cSld/{{{_PRESENTATION_NAMESPACE}}}bg/"
+        f"{{{_PRESENTATION_NAMESPACE}}}bgPr/{{{_DRAWING_NAMESPACE}}}solidFill/"
+        f"{{{_DRAWING_NAMESPACE}}}srgbClr"
+    )
+    if background is None:
+        return None
+    value = background.get("val")
+    if value is None or len(value) != 6:
+        return None
+    try:
+        red = int(value[0:2], 16)
+        green = int(value[2:4], 16)
+        blue = int(value[4:6], 16)
+    except ValueError:
+        return None
+    return red, green, blue
 
 
 def _reachable_smartart_parts(source: Path) -> tuple[frozenset[str], frozenset[str]]:

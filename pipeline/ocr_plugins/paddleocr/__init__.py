@@ -13,6 +13,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pipeline.ocr.errors import OcrProviderError
+from pipeline.ocr.image_preparation import opaque_rgb_for_ocr
 from pipeline.ocr.models import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip, OcrProvider
 
@@ -99,7 +100,7 @@ class PaddleOcrProvider:
                 engine_record = self._create_cpu_engine(native_language, request.language, error)
             self._engines[native_language] = engine_record
 
-        image_array = np.asarray(request.image.convert("RGB"), dtype=np.uint8)
+        image_array = np.asarray(opaque_rgb_for_ocr(request.image), dtype=np.uint8)
         try:
             raw_result = _predict(engine_record.engine, image_array)
         except Exception as error:

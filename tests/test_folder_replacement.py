@@ -37,6 +37,8 @@ from pipeline.folder_replacement import (
     replace_input_folder,
 )
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
+from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
+from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import _pdf_decode_composite_bytes, _pdf_text_advance
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
@@ -124,6 +126,49 @@ class _RecordedProgress:
 
 
 class FolderReplacementTests(unittest.TestCase):
+    # Verifies FR-2026-08-27-01.
+    def test_uses_a_direct_document_background_for_embedded_word_image_ocr(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            document = Path(temporary_directory) / "input.docx"
+            with ZipFile(document, "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    """<?xml version=\"1.0\"?>
+                    <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">
+                      <w:background w:color=\"102030\"/>
+                    </w:document>""",
+                )
+                archive.writestr("word/media/image1.png", b"synthetic")
+
+            self.assertEqual({"word/media/image1.png": (16, 32, 48)}, _docx_ocr_backgrounds(document))
+
+    # Verifies FR-2026-08-27-01.
+    def test_uses_an_unambiguous_direct_slide_background_for_embedded_image_ocr(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            presentation = Path(temporary_directory) / "input.pptx"
+            with ZipFile(presentation, "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "ppt/slides/slide1.xml",
+                    """<?xml version=\"1.0\"?>
+                    <p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\"
+                        xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">
+                      <p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"102030\"/>
+                      </a:solidFill></p:bgPr></p:bg></p:cSld>
+                    </p:sld>""",
+                )
+                archive.writestr(
+                    "ppt/slides/_rels/slide1.xml.rels",
+                    """<?xml version=\"1.0\"?>
+                    <Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">
+                      <Relationship Id=\"rId1\"
+                        Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\"
+                        Target=\"../media/image1.png\"/>
+                    </Relationships>""",
+                )
+                archive.writestr("ppt/media/image1.png", b"synthetic")
+
+            self.assertEqual({"ppt/media/image1.png": (16, 32, 48)}, _pptx_ocr_backgrounds(presentation))
+
     # Verifies FR-2026-08-22-02.
     def test_include_patterns_select_relative_supported_paths(self) -> None:
         with TemporaryDirectory() as temporary_directory:
