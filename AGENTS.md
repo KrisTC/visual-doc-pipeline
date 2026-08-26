@@ -22,6 +22,8 @@ No confidential content, identifier, metadata, or document-specific detail from 
 
 Local evaluation artifacts derived from confidential samples may be written only below the gitignored `outputs/evaluations/` subtree. They may be used only for local inspection. Do not upload, send, stage, commit, quote, summarise, log, or otherwise disclose those artifacts or their contents. Do not add, stage, or commit files from `sample-data/confidential/` or other derived /confidential/ folders. The developer is ultimately responsible for reviewing local test activity and all changes before committing.
 
+It is acceptable for sample data in confidential folder to be used with plugins that call external services as long as those services have clearly documented terms of service and privacy policies. Agents must not use confidential sample data with any external service that does not have a clearly documented privacy policy.
+
 ---
 
 ## Requirements Process

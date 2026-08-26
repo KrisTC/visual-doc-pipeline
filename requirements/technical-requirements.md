@@ -31,6 +31,31 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 
 ---
 
+## TR-2026-08-26-01
+
+| Property | Value |
+|----------|-------|
+| Title | Dependency policy validation remains dependency-agnostic |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-26 |
+| Related Requirements | SR-2026-08-01-01, SR-2026-08-21-02 |
+
+### Description
+
+`scripts/check-dependency-policy.py` shall remain dependency-agnostic. It shall derive registry configuration and package-to-index assignments from `pyproject.toml`, and approved non-default package versions from `approved-dependency-artifact-hashes.toml`. It shall not encode package names, package versions, security-requirement IDs, registry URLs, artifact hosts, or artifact paths for a particular dependency.
+
+### Rationale
+
+Dependency-specific validation causes routine publisher hosting changes to require code changes and makes registry-exception controls difficult to reuse.
+
+### Notes
+
+The checker validates metadata relationships. The verified-installation workflow remains responsible for downloading the approved artifact and verifying its SHA-256 digest before installation.
+
+---
+
 ## TR-2026-08-01-01
 
 | Property | Value |

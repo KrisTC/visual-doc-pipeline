@@ -9,7 +9,7 @@ from pipeline.text_replacement.factory import TextReplacementProviderFactory
 
 
 class TextReplacementProviderFactoryTests(unittest.TestCase):
-    # Verifies FR-2026-08-02-06, FR-2026-08-02-11, FR-2026-08-03-01, and FR-2026-08-04-12.
+    # Verifies FR-2026-08-02-06, FR-2026-08-02-11, FR-2026-08-03-01, FR-2026-08-04-12, and FR-2026-08-24-04.
     def test_discovers_built_in_provider_packages_by_their_directory_names(self) -> None:
         factory = TextReplacementProviderFactory.discover_default_plugins()
 
@@ -18,6 +18,7 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
                 "argos_translate",
                 "character_mask",
                 "double_character_mask",
+                "google_cloud_translate",
                 "half_character_mask",
                 "identity",
             ),
@@ -30,6 +31,7 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
                 "double_character_mask": (
                     "Deterministic text-replacement provider with double-length hash output."
                 ),
+                "google_cloud_translate": "Google Cloud Translation Advanced v3 text-replacement provider.",
                 "half_character_mask": (
                     "Deterministic text-replacement provider with half-length hash output."
                 ),
