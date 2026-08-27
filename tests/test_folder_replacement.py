@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
+import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -42,7 +43,7 @@ from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import _pdf_decode_composite_bytes, _pdf_text_advance
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
-from pipeline.bounded_text_layout import noto_typefaces
+from pipeline.bounded_text_layout import PortableTextUnsupportedError, noto_typefaces
 from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
@@ -192,6 +193,7 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(1, result.ignored_files)
             self.assertTrue((output_root / "selected" / "keep.png").is_file())
             self.assertFalse((output_root / "skip.png").exists())
+            self.assertFalse((output_root / "skip.png.diagnostics.json").exists())
 
     # Verifies FR-2026-08-22-02.
     def test_include_patterns_allow_comma_separated_repeated_values_and_zero_matches(self) -> None:
@@ -300,6 +302,7 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(0, result.failed_files)
             self.assertTrue((output_root / "same.png").is_file())
             self.assertTrue((output_root / "same (2).png").is_file())
+            self.assertFalse((output_root / "ignore.txt.diagnostics.json").exists())
 
     # Verifies FR-2026-08-03-03.
     def test_replaces_office_native_text_in_word_drawing_and_spreadsheet_parts(self) -> None:
@@ -545,14 +548,14 @@ class FolderReplacementTests(unittest.TestCase):
                 self.assertEqual("Replaced", output_wordart.text)
                 self.assertEqual("Replaced", output_coloured_text.text)
                 expected_wordart_font = (
-                    "Noto Sans JP"
-                    if layout_mode == "preserve-basic-layout"
-                    else "Source WordArt Font"
+                    "Source WordArt Font"
+                    if layout_mode == "preserve-source-formatting"
+                    else "Noto Sans JP"
                 )
                 expected_coloured_font = (
-                    "Noto Sans JP"
-                    if layout_mode == "preserve-basic-layout"
-                    else "Source Coloured Font"
+                    "Source Coloured Font"
+                    if layout_mode == "preserve-source-formatting"
+                    else "Noto Sans JP"
                 )
                 self.assertEqual(
                     expected_wordart_font,
@@ -678,8 +681,8 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual("ctr", output_shapes["middle-aligned"].text_frame._element.bodyPr.get("anchor"))
             self.assertIsNone(output_shapes["default-aligned"].text_frame._element.bodyPr.get("anchor"))
 
-    # Verifies FR-2026-08-04-06.
-    def test_pptx_basic_layout_source_font_preserves_resolved_typeface_references(self) -> None:
+    # Verifies FR-2026-08-27-02.
+    def test_pptx_source_font_mode_falls_back_when_source_faces_are_unavailable(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"
@@ -720,7 +723,7 @@ class FolderReplacementTests(unittest.TestCase):
             output_unnamed = next(shape for shape in output_shapes if shape.name == "unnamed-source")
             output_themed = next(shape for shape in output_shapes if shape.name == "themed-source")
             self.assertEqual(
-                "Source Presentation Font",
+                "Noto Sans JP",
                 output_named.text_frame.paragraphs[0].runs[0].font.name,
             )
             self.assertEqual(
@@ -728,7 +731,7 @@ class FolderReplacementTests(unittest.TestCase):
                 output_unnamed.text_frame.paragraphs[0].runs[0].font.name,
             )
             self.assertEqual(
-                "+mj-lt",
+                "Noto Sans JP",
                 output_themed.text_frame.paragraphs[0].runs[0].font.name,
             )
             self.assertEqual(MSO_AUTO_SIZE.NONE, output_named.text_frame.auto_size)
@@ -1149,11 +1152,23 @@ class FolderReplacementTests(unittest.TestCase):
 
             failure_output = StringIO()
             with redirect_stderr(failure_output):
-                result = self._run(input_root, output_root, _LowConfidenceOcrProvider(), provider)
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _LowConfidenceOcrProvider(),
+                    provider,
+                    diagnostics_enabled=True,
+                )
 
             self.assertEqual(1, result.processed_files)
             self.assertEqual(1, result.failed_files)
             self.assertTrue((output_root / "good.png").is_file())
+            diagnostic = output_root / "broken.png.diagnostics.json"
+            self.assertTrue(diagnostic.is_file())
+            self.assertEqual(
+                "file_processing_failed",
+                json.loads(diagnostic.read_text(encoding="utf-8"))["entries"][0]["reason_code"],
+            )
             self.assertFalse(any(not request.is_filename for request in provider.requests))
             self.assertIn("broken.png", failure_output.getvalue())
 
@@ -1213,6 +1228,60 @@ class FolderReplacementTests(unittest.TestCase):
             type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
             descendant = cast(DictionaryObject, cast(ArrayObject, type_zero["/DescendantFonts"])[0].get_object())
             self.assertTrue(descendant.get("/W"))
+
+    # Verifies FR-2026-08-27-06.
+    def test_basic_layout_pdf_records_unsupported_portable_text_and_keeps_the_region(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (Hello) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
+                side_effect=PortableTextUnsupportedError(
+                    "portable_font_coverage_unsupported",
+                    "\U0001f9ea",
+                    ("Noto Sans", "Noto Sans Symbols 2"),
+                    replacement_text="\U0001f9ea",
+                ),
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(replacement_text="\U0001f9ea"),
+                    document_text_layout="preserve-basic-layout",
+                    diagnostics_enabled=True,
+                )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(0, result.failed_files)
+            self.assertIn(b"(Hello)", (output_root / "document.pdf").read_bytes())
+            sidecar = json.loads(
+                (output_root / "document.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual("pdf_visual_text", sidecar["entries"][0]["container_kind"])
+            self.assertEqual(
+                ["Noto Sans", "Noto Sans Symbols 2"],
+                sidecar["entries"][0]["candidate_faces"],
+            )
+            self.assertEqual(["U+1F9EA"], sidecar["entries"][0]["code_points"])
+            self.assertEqual("Hello", sidecar["entries"][0]["source_text"])
+            self.assertEqual("\U0001f9ea", sidecar["entries"][0]["replacement_text"])
+            self.assertEqual(
+                "pdf_page_user_space",
+                sidecar["entries"][0]["region_location"]["coordinate_space"],
+            )
+            self.assertEqual(
+                ["source_text", "replacement_text"],
+                list(sidecar["entries"][0])[:2],
+            )
 
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_splits_widely_spaced_tj_fragments_into_visual_regions(self) -> None:
@@ -1942,6 +2011,30 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(0, result.replaced_native_text_items)
             self.assertFalse([request for request in provider.requests if not request.is_filename])
             self.assertIn(b"clip only", (output_root / "document.pdf").read_bytes())
+            self.assertFalse((output_root / "document.pdf.diagnostics.json").exists())
+
+            debug_output_root = root / "debug-output"
+            debug_provider = _RecordingReplacementProvider()
+            debug_result = self._run(
+                input_root,
+                debug_output_root,
+                _EmptyOcrProvider(),
+                debug_provider,
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, debug_result.replaced_native_text_items)
+            self.assertFalse([request for request in debug_provider.requests if not request.is_filename])
+            sidecar = json.loads(
+                (debug_output_root / "document.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            entry = sidecar["entries"][0]
+            self.assertEqual("retained", entry["kind"])
+            self.assertEqual("pdf_text_rendering_mode_ineligible", entry["reason_code"])
+            self.assertEqual("clip only", entry["source_text"])
+            self.assertEqual(1, entry["page"])
+            self.assertEqual("Tj", entry["operator"])
 
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_preserves_a_right_angle_text_orientation(self) -> None:
@@ -2089,10 +2182,10 @@ class FolderReplacementTests(unittest.TestCase):
             fallback_reader = PdfReader(fallback_output / "document.pdf")
             fallback_stream = ContentStream(fallback_reader.pages[0].get_contents(), fallback_reader)
             self.assertTrue(any(
-                operator == b"Tf" and operands[0] == "/PipelineFallback"
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in fallback_stream.operations
             ))
-            self.assertIn(b"<23>", (fallback_output / "document.pdf").read_bytes())
+            self.assertIn(b"<0004>", (fallback_output / "document.pdf").read_bytes())
 
     # Verifies FR-2026-08-23-04.
     def test_type0_pdf_widths_use_w_overrides_and_dw_fallback(self) -> None:
@@ -2278,14 +2371,14 @@ class FolderReplacementTests(unittest.TestCase):
                 document_text_layout="preserve-basic-layout-source-font",
             )
 
-            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(1, result.replaced_native_text_items)
             output_reader = PdfReader(output_root / "document.pdf")
             stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
             self.assertTrue(any(
-                operator == b"Tf" and operands[0] == "/PipelineFallback"
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in stream.operations
             ))
-            self.assertGreaterEqual((output_root / "document.pdf").read_bytes().count(b"<23>"), 2)
+            self.assertGreaterEqual((output_root / "document.pdf").read_bytes().count(b"<0004>"), 1)
 
     # Verifies FR-2026-08-03-03.
     def test_source_font_pdf_falls_back_when_tounicode_lacks_replacement_glyph(self) -> None:
@@ -2322,10 +2415,10 @@ class FolderReplacementTests(unittest.TestCase):
             output_reader = PdfReader(output_root / "document.pdf")
             stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
             self.assertTrue(any(
-                operator == b"Tf" and operands[0] == "/PipelineFallback"
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in stream.operations
             ))
-            self.assertIn(b"<23>", (output_root / "document.pdf").read_bytes())
+            self.assertIn(b"<0004>", (output_root / "document.pdf").read_bytes())
 
     # Verifies FR-2026-08-04-13.
     def test_replaces_pptx_speaker_notes_in_every_document_text_layout_mode(self) -> None:
@@ -2650,6 +2743,7 @@ class FolderReplacementTests(unittest.TestCase):
         progress_factory: ProgressFactory | None = None,
         document_text_layout: str = "preserve-source-formatting",
         include_patterns: tuple[str, ...] = (),
+        diagnostics_enabled: bool = False,
     ) -> FolderReplacementResult:
         typeface = skia.Typeface.MakeFromFile(str(FONT_PATH))
         if typeface is None:
@@ -2664,6 +2758,7 @@ class FolderReplacementTests(unittest.TestCase):
             typeface=typeface,
             document_text_layout=document_text_layout,
             include_patterns=include_patterns,
+            diagnostics_enabled=diagnostics_enabled,
             show_progress=show_progress,
             progress_factory=progress_factory,
         )

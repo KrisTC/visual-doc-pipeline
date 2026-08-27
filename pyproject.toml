@@ -16,6 +16,7 @@ dependencies = [
     "pypdf",
     "python-docx",
     "python-pptx",
+    "regex",
     "skia-python>=144.0.post2",
     "tqdm",
 ]

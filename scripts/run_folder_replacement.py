@@ -23,6 +23,7 @@ import skia  # type: ignore[import-not-found]
 from pipeline.folder_replacement import parse_include_patterns, replace_input_folder
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr import OcrProvider, OcrProviderFactory
+from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementProviderFactory
 
@@ -116,6 +117,11 @@ def _argument_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="PATTERN",
         help="Include matching relative source paths; may repeat or use commas.",
+    )
+    command_options.add_argument(
+        "--debug",
+        action="store_true",
+        help="Write per-document diagnostic JSON sidecars for reportable issues.",
     )
 
     parser.add_argument_group(
@@ -228,6 +234,15 @@ def main() -> int:
     include_patterns = _parse_include_patterns(arguments.include, parser)
     ocr_provider = _create_ocr_provider(arguments.ocr, parser)
     replacement_provider = _create_text_replacement_provider(arguments.text_replacement, parser)
+    try:
+        require_runtime_assets(
+            arguments.target_language, arguments.ocr, arguments.document_text_layout
+        )
+    except RuntimeAssetsRequiredError as error:
+        print("Folder replacement did not start: runtime prerequisites are not met.", file=sys.stderr)
+        print(str(error), file=sys.stderr)
+        print("No input document was processed. Resolve the prerequisite, then rerun.", file=sys.stderr)
+        return 2
     result = replace_input_folder(
         arguments.input_folder,
         arguments.output_folder,
@@ -238,6 +253,7 @@ def main() -> int:
         typeface=_load_default_typeface(),
         document_text_layout=arguments.document_text_layout,
         include_patterns=include_patterns,
+        diagnostics_enabled=arguments.debug,
     )
     print(
         "Folder replacement complete: "
@@ -246,6 +262,11 @@ def main() -> int:
         f"{result.replaced_image_regions} OCR image region(s), "
         f"{result.retained_vector_graphics} vector graphic(s) retained."
     )
+    if result.diagnostic_sidecars:
+        print(
+            "Folder replacement diagnostics: "
+            f"{len(result.diagnostic_sidecars)} sidecar(s) written under {arguments.output_folder}."
+        )
     return 1 if result.failed_files else 0
 
 

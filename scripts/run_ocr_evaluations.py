@@ -38,6 +38,7 @@ from pipeline.ocr import (
     PixelPoint,
 )
 from pipeline.ocr.languages import discover_language_directories
+from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
@@ -888,6 +889,11 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> int:
     arguments = parse_arguments()
+    try:
+        require_runtime_assets("en", "paddleocr", "preserve-source-formatting")
+    except RuntimeAssetsRequiredError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     result = prepare_and_evaluate_ocr_inputs(arguments.input_root, arguments.output_root)
     print(
         "OCR evaluation complete: "

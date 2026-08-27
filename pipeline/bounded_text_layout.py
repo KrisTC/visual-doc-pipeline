@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 import re
 import unicodedata
 
 # skia-python does not publish PEP 561 stubs; this is the native measurement boundary.
 import skia  # type: ignore[import-not-found]
+import regex  # type: ignore[import-untyped]
 
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.portable_fonts import optional_static_typefaces
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +99,7 @@ class FittedTextBox:
     font_scale: float
     fit_status: str
     font_selections: tuple["SourceFontSelection", ...] = ()
+    layout_typefaces: dict[str, skia.Typeface] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +113,41 @@ class FittedTextLine:
     text: str
     width_pixels: float
     height_pixels: float
+    segments: tuple["FittedTextLineSegment", ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class FittedTextLineSegment:
+    """One ordered, explicitly selected output face span on a fitted line."""
+
+    text: str
+    font_classification: str
+    font_size_points: float
+    bold: bool
+    italic: bool
+
+
+class PortableTextUnsupportedError(ValueError):
+    """A portable fitted replacement that must retain its source container."""
+
+    def __init__(
+        self,
+        reason_code: str,
+        characters: str,
+        selected_faces: tuple[str, ...],
+        *,
+        replacement_text: str | None = None,
+    ) -> None:
+        messages = {
+            "portable_bidi_layout_unsupported": "Portable fitted replacement does not support bidirectional text.",
+            "portable_vertical_layout_unsupported": "Portable fitted replacement does not support vertical text.",
+            "portable_font_coverage_unsupported": "No approved portable replacement font covers the text.",
+        }
+        super().__init__(messages.get(reason_code, reason_code))
+        self.reason_code = reason_code
+        self.characters = characters
+        self.selected_faces = selected_faces
+        self.replacement_text = replacement_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -164,8 +203,9 @@ class _Line:
     paragraph: BoundedTextParagraph
 
 
-def noto_typefaces() -> dict[str, skia.Typeface]:
-    """Load only committed Noto faces used by the fitting model."""
+@lru_cache(maxsize=1)
+def _base_noto_typefaces() -> dict[str, skia.Typeface]:
+    """Load the committed fitting faces once for this process."""
     typefaces: dict[str, skia.Typeface] = {}
     for classification, path in FONT_PATHS.items():
         if not path.is_file():
@@ -174,6 +214,13 @@ def noto_typefaces() -> dict[str, skia.Typeface]:
         if typeface is None:
             raise RuntimeError(f"Could not load committed layout font asset {path}.")
         typefaces[classification] = typeface
+    return typefaces
+
+
+def noto_typefaces() -> dict[str, skia.Typeface]:
+    """Return cached base and, when bootstrapped, optional Noto fitting faces."""
+    typefaces = dict(_base_noto_typefaces())
+    typefaces.update(optional_static_typefaces())
     return typefaces
 
 
@@ -365,9 +412,10 @@ def fit_explicit_noto_text_box(
     written output.
     """
     selected_typefaces = typefaces or noto_typefaces()
+    output_box = _select_portable_noto_faces(text_box, selected_typefaces)
     measurement = (
         source_font_measurement(
-            text_box,
+            output_box,
             selected_typefaces,
             embedded_faces=embedded_faces,
             font_manager=font_manager,
@@ -375,7 +423,7 @@ def fit_explicit_noto_text_box(
         if measure_source_fonts
         else None
     )
-    measurement_box = text_box if measurement is None else measurement.text_box
+    measurement_box = output_box if measurement is None else measurement.text_box
     measurement_typefaces = selected_typefaces if measurement is None else measurement.typefaces
     width, height = _content_dimensions(text_box)
     if _is_vertical(text_box):
@@ -386,19 +434,18 @@ def fit_explicit_noto_text_box(
     scale, status = _fit_scale(
         measurement_box.paragraphs, width, height, measurement_typefaces
     )
+    selections_by_key = _selection_keys(output_box, measurement)
     explicit_paragraphs = tuple(
         replace(
             paragraph,
             runs=tuple(
-                replace(
+                _explicit_fitted_run(
                     run,
-                    font_family=(
-                        run.font_family
-                        if preserve_source_font_family and run.font_family
-                        else selected_typefaces[_classification(run)].getFamilyName()
-                    ),
-                    font_size_points=_font_points(run) * scale,
-                    source_typefaces=run.source_typefaces if preserve_source_font_family else (),
+                    scale,
+                    preserve_source_font_family,
+                    selections_by_key.get(run.font_classification),
+                    measurement_typefaces,
+                    selected_typefaces,
                 )
                 for run in paragraph.runs
             ),
@@ -407,13 +454,184 @@ def fit_explicit_noto_text_box(
             )
             * scale,
         )
-        for paragraph in text_box.paragraphs
+        for paragraph in measurement_box.paragraphs
     )
     return FittedTextBox(
-        replace(text_box, paragraphs=explicit_paragraphs),
+        replace(measurement_box, paragraphs=explicit_paragraphs),
         scale,
         status,
         () if measurement is None else measurement.selections,
+        measurement_typefaces,
+    )
+
+
+def _explicit_fitted_run(
+    run: BoundedTextRun,
+    scale: float,
+    preserve_source_font_family: bool,
+    selection: SourceFontSelection | None,
+    measurement_typefaces: dict[str, skia.Typeface],
+    noto_faces: dict[str, skia.Typeface],
+) -> BoundedTextRun:
+    """Write source references only when the selected output face is source-backed."""
+    source_output = (
+        preserve_source_font_family
+        and selection is not None
+        and selection.source in {"embedded-source-face", "installed-source-face"}
+    )
+    if source_output:
+        family = run.font_family or measurement_typefaces[run.font_classification].getFamilyName()
+        references = run.source_typefaces or (SourceTypefaceReference("latin", family),)
+    elif preserve_source_font_family and selection is not None:
+        family = measurement_typefaces[run.font_classification].getFamilyName()
+        references = ()
+    else:
+        family = (
+            run.font_family
+            if preserve_source_font_family and run.font_family
+            else noto_faces[_classification(run)].getFamilyName()
+        )
+        references = run.source_typefaces if preserve_source_font_family else ()
+    classification = run.font_classification
+    if not source_output and selection is not None:
+        classification = next(
+            (
+                name
+                for name, face in noto_faces.items()
+                if face.getFamilyName() == family
+            ),
+            classification,
+        )
+    return replace(
+        run,
+        font_family=family,
+        font_classification=classification,
+        font_size_points=_font_points(run) * scale,
+        source_typefaces=references,
+    )
+
+
+def _selection_keys(
+    text_box: BoundedTextBox, measurement: SourceFontMeasurement | None
+) -> dict[str, SourceFontSelection]:
+    """Associate the resolver's ordered selections with its generated run keys."""
+    if measurement is None:
+        return {}
+    selections = iter(measurement.selections)
+    result: dict[str, SourceFontSelection] = {}
+    for paragraph_index, paragraph in enumerate(text_box.paragraphs):
+        for run_index, run in enumerate(paragraph.runs):
+            for segment_index, _segment in enumerate(_source_font_segments(run)):
+                result[f"source-face-{paragraph_index}-{run_index}-{segment_index}"] = next(selections)
+    return result
+
+
+def _select_portable_noto_faces(
+    text_box: BoundedTextBox, typefaces: dict[str, skia.Typeface]
+) -> BoundedTextBox:
+    """Select whole-run or LTR grapheme-safe portable fallback segments."""
+    fallbacks = tuple(
+        (classification, typefaces[classification])
+        for classification in ("math", "symbols")
+        if classification in typefaces
+    )
+    if not fallbacks:
+        return text_box
+    replacement_text = "\n".join(
+        "".join(run.text for run in paragraph.runs)
+        for paragraph in text_box.paragraphs
+    )
+    paragraphs: list[BoundedTextParagraph] = []
+    for paragraph in text_box.paragraphs:
+        runs: list[BoundedTextRun] = []
+        for run in paragraph.runs:
+            primary = typefaces[_classification(run)]
+            if _glyphs_available(primary, run.text):
+                runs.append(run)
+            else:
+                if _is_vertical(text_box):
+                    raise PortableTextUnsupportedError(
+                        "portable_vertical_layout_unsupported",
+                        run.text,
+                        ( _typeface_name(primary),
+                          *(_typeface_name(face) for _classification, face in fallbacks)),
+                        replacement_text=replacement_text,
+                    )
+                runs.extend(_portable_segments(run, primary, fallbacks, replacement_text))
+        paragraphs.append(replace(paragraph, runs=tuple(runs)))
+    return replace(text_box, paragraphs=tuple(paragraphs))
+
+
+def _portable_segments(
+    run: BoundedTextRun,
+    primary: skia.Typeface,
+    fallbacks: tuple[tuple[str, skia.Typeface], ...],
+    replacement_text: str | None = None,
+) -> tuple[BoundedTextRun, ...]:
+    """Split only LTR text into adjacent base- or Symbols-2-covered clusters."""
+    if _contains_unsupported_bidi(run.text):
+        raise PortableTextUnsupportedError(
+            "portable_bidi_layout_unsupported",
+            "".join(
+                character
+                for character in run.text
+                if unicodedata.bidirectional(character)
+                in {"R", "AL", "LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+            ),
+            (_typeface_name(primary), *(_typeface_name(face) for _classification, face in fallbacks)),
+            replacement_text=replacement_text,
+        )
+    segments: list[BoundedTextRun] = []
+    for cluster in regex.findall(r"\X", run.text):
+        if _glyphs_available(primary, cluster):
+            classification = run.font_classification
+        else:
+            fallback_classification = next(
+                (
+                    fallback_classification
+                    for fallback_classification, face in fallbacks
+                    if _glyphs_available(face, cluster)
+                ),
+                None,
+            )
+            if fallback_classification is None:
+                raise PortableTextUnsupportedError(
+                    "portable_font_coverage_unsupported",
+                    cluster,
+                    (_typeface_name(primary), *(_typeface_name(face) for _classification, face in fallbacks)),
+                    replacement_text=replacement_text,
+                )
+            classification = fallback_classification
+        if segments and segments[-1].font_classification == classification:
+            segments[-1] = replace(segments[-1], text=segments[-1].text + cluster)
+        else:
+            # A segmented fallback is portable output throughout.  Do not emit
+            # a source face for only some of a replacement paragraph.
+            segments.append(
+                replace(
+                    run,
+                    text=cluster,
+                    font_family=None,
+                    font_classification=classification,
+                    bold=False if classification == "math" else run.bold,
+                    italic=False if classification == "math" else run.italic,
+                    source_typefaces=(),
+                )
+            )
+    return tuple(segments)
+
+
+def _typeface_name(typeface: skia.Typeface | str) -> str:
+    """Return a family name while keeping fallback selection unit-testable."""
+    return typeface if isinstance(typeface, str) else typeface.getFamilyName()
+
+
+def _contains_unsupported_bidi(text: str) -> bool:
+    """Reject RTL and bidi-formatting text until the bidi layout feature exists."""
+    return any(
+        unicodedata.bidirectional(character)
+        in {"R", "AL", "LRE", "RLE", "LRO", "RLO", "PDF", "LRI", "RLI", "FSI", "PDI"}
+        for character in text
     )
 
 
@@ -450,13 +668,23 @@ def fitted_text_lines(
     typefaces: dict[str, skia.Typeface] | None = None,
 ) -> tuple[FittedTextLine, ...]:
     """Return the shared engine's wrapped output lines for a fitted text box."""
-    selected_typefaces = typefaces or noto_typefaces()
+    selected_typefaces = typefaces or fitted.layout_typefaces or noto_typefaces()
     width, _height = _content_dimensions(fitted.text_box)
     return tuple(
         FittedTextLine(
             "".join(segment.text for segment in line.segments),
             line.width,
             _line_advance(line),
+            tuple(
+                FittedTextLineSegment(
+                    segment.text,
+                    segment.style.classification,
+                    segment.style.size_pixels / PIXELS_PER_POINT,
+                    segment.style.bold,
+                    segment.style.italic,
+                )
+                for segment in line.segments
+            ),
         )
         for line in _layout_lines(fitted.text_box.paragraphs, width, selected_typefaces, 1.0)
     )

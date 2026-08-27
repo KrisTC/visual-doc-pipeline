@@ -35,6 +35,7 @@ from pipeline.folder_replacement.office_xml import (
     _serialize_with_compatibility_bindings,
 )
 from pipeline.ocr import OcrProvider
+from pipeline.portable_fonts import static_noto_font
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -92,8 +93,8 @@ def replace_xlsx_file(
         replacement,
         source_language,
         target_language,
-        # XLSX has no interoperable, package-level embedded-font path.  Keep
-        # the source face and apply the shared Noto-derived fitted size.
+        # XLSX has no interoperable, package-level embedded-font path. Keep
+        # the source reference while the shared fitter supplies its size.
         preserve_source_font_family=True,
         measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
     )
@@ -241,8 +242,12 @@ def _replace_worksheet(
             preserve_source_font_family=preserve_source_font_family,
             measure_source_fonts=measure_source_fonts,
         )
-        explicit_run = fitted.text_box.paragraphs[0].runs[0]
-        _write_cell_text(cell, explicit_run.text)
+        explicit_runs = fitted.text_box.paragraphs[0].runs
+        explicit_run = explicit_runs[0]
+        if len(explicit_runs) == 1:
+            _write_cell_text(cell, explicit_run.text)
+        else:
+            _write_rich_cell_text(cell, explicit_runs)
         styles.apply_explicit_fit(cell, explicit_run)
         replaced += 1
     return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), replaced
@@ -521,6 +526,31 @@ def _write_cell_text(cell: ElementTree.Element, text: str) -> None:
     value.text = text
     if text[:1].isspace() or text[-1:].isspace():
         value.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+
+
+def _write_rich_cell_text(cell: ElementTree.Element, runs: tuple[BoundedTextRun, ...]) -> None:
+    """Write portable fallback spans as SpreadsheetML rich-text runs."""
+    for child in tuple(cell):
+        if child.tag in {_tag("v"), _tag("is")}:
+            cell.remove(child)
+    cell.set("t", "inlineStr")
+    inline = ElementTree.SubElement(cell, _tag("is"))
+    for run in runs:
+        destination = ElementTree.SubElement(inline, _tag("r"))
+        properties = ElementTree.SubElement(destination, _tag("rPr"))
+        family, _path = static_noto_font(run.font_classification, run.bold)
+        ElementTree.SubElement(properties, _tag("rFont"), {"val": family})
+        ElementTree.SubElement(properties, _tag("sz"), {"val": f"{run.font_size_points or 18.0:.4f}"})
+        if run.bold:
+            ElementTree.SubElement(properties, _tag("b"))
+        if run.italic:
+            ElementTree.SubElement(properties, _tag("i"))
+        if run.underline not in {None, "none"}:
+            ElementTree.SubElement(properties, _tag("u"))
+        value = ElementTree.SubElement(destination, _tag("t"))
+        value.text = run.text
+        if run.text[:1].isspace() or run.text[-1:].isspace():
+            value.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
 
 
 def _column_widths(root: ElementTree.Element) -> dict[int, int]:

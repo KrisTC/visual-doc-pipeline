@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from dataclasses import replace
 import unittest
+from unittest.mock import patch
 
 import skia  # type: ignore[import-not-found]
 
@@ -14,6 +15,8 @@ from pipeline.bounded_text_layout import (
     BoundedTextRun,
     EmbeddedTypefaceCandidate,
     SourceTypefaceReference,
+    fit_explicit_noto_text_box,
+    _portable_segments,
     source_font_measurement,
 )
 
@@ -96,6 +99,23 @@ class SourceFontMeasurementTests(unittest.TestCase):
         self.assertEqual("noto-fallback", measurement.selections[0].source)
         self.assertEqual("source-glyphs-unavailable", measurement.selections[0].fallback_reason)
 
+    # Verifies FR-2026-08-27-02.
+    def test_uses_the_verified_source_reference_for_output_only_when_selected(self) -> None:
+        assert self.typeface is not None
+        fitted = fit_explicit_noto_text_box(
+            self._box(),
+            embedded_faces=(
+                EmbeddedTypefaceCandidate(FONT_FAMILY, self.typeface.fontStyle(), self.typeface),
+            ),
+            font_manager=_FontManager(None),
+            preserve_source_font_family=True,
+            measure_source_fonts=True,
+        )
+
+        output_run = fitted.text_box.paragraphs[0].runs[0]
+        self.assertEqual(FONT_FAMILY, output_run.font_family)
+        self.assertEqual((SourceTypefaceReference("latin", FONT_FAMILY),), output_run.source_typefaces)
+
     # Verifies FR-2026-08-22-04 and FR-2026-08-22-10.
     def test_selects_each_resolved_script_slot_and_reports_the_original_alias(self) -> None:
         assert self.typeface is not None
@@ -130,6 +150,56 @@ class SourceFontMeasurementTests(unittest.TestCase):
         )
 
         self.assertEqual("Noto Serif JP", measurement.selections[0].measured_family)
+
+    # Verifies FR-2026-08-27-05.
+    def test_splits_ltr_fallback_at_grapheme_boundaries_and_combines_matching_faces(self) -> None:
+        run = self._box("AB♜").paragraphs[0].runs[0]
+        coverage = {
+            ("base", "A"): True,
+            ("base", "B"): True,
+            ("base", "♜"): False,
+            ("symbols", "A"): False,
+            ("symbols", "B"): False,
+            ("symbols", "♜"): True,
+        }
+        with patch(
+            "pipeline.bounded_text_layout._glyphs_available",
+            side_effect=lambda face, text: coverage[(face, text)],
+        ):
+            segments = _portable_segments(run, "base", (("symbols", "symbols"),))
+
+        self.assertEqual(["AB", "♜"], [segment.text for segment in segments])
+        self.assertEqual(
+            ["sans-serif", "symbols"],
+            [segment.font_classification for segment in segments],
+        )
+        self.assertTrue(all(not segment.source_typefaces for segment in segments))
+
+    # Verifies FR-2026-08-27-07.
+    def test_prefers_math_fallback_before_symbols(self) -> None:
+        run = self._box("𝐶").paragraphs[0].runs[0]
+        coverage = {
+            ("base", "𝐶"): False,
+            ("math", "𝐶"): True,
+            ("symbols", "𝐶"): True,
+        }
+        with patch(
+            "pipeline.bounded_text_layout._glyphs_available",
+            side_effect=lambda face, text: coverage[(face, text)],
+        ):
+            segments = _portable_segments(
+                run, "base", (("math", "math"), ("symbols", "symbols"))
+            )
+
+        self.assertEqual(["math"], [segment.font_classification for segment in segments])
+        self.assertFalse(segments[0].bold)
+        self.assertFalse(segments[0].italic)
+
+    # Verifies FR-2026-08-27-05.
+    def test_rejects_bidi_fallback_before_segmenting(self) -> None:
+        run = self._box("Aא").paragraphs[0].runs[0]
+        with self.assertRaisesRegex(ValueError, "bidirectional text"):
+            _portable_segments(run, "base", (("symbols", "symbols"),))
 
 
 if __name__ == "__main__":

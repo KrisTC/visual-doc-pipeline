@@ -27,7 +27,7 @@ from pipeline.folder_replacement.office_xml import (
 )
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import RgbColour
-from pipeline.portable_fonts import static_noto_bytes, static_noto_font
+from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -392,8 +392,15 @@ def _embed_docx_static_fonts(path: Path) -> None:
     relationships = _xml_or_new(parts.get(relationships_name), _tag(_PACKAGE_RELATIONSHIPS, "Relationships"))
     additions: dict[str, bytes] = {}
     relationship_ids = {relationship.get("Id", "") for relationship in relationships}
+    classifications: tuple[str, ...] = ("sans-serif", "serif", "fixed-width")
+    optional_faces = optional_static_typefaces()
+    classifications = (*classifications, *(name for name in ("math", "symbols") if name in optional_faces))
     for index, (classification, bold) in enumerate(
-        ((classification, bold) for classification in ("sans-serif", "serif", "fixed-width") for bold in (False, True)),
+        (
+            (classification, bold)
+            for classification in classifications
+            for bold in ((False,) if classification == "math" else (False, True))
+        ),
         start=1,
     ):
         family, _path = static_noto_font(classification, bold)

@@ -138,11 +138,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"Running scenario: {output_root.relative_to(PROJECT_ROOT)}")
         completed_process = run(command, check=False, cwd=PROJECT_ROOT)
+        diagnostic_sidecars = sorted(
+            path.relative_to(output_root).as_posix()
+            for path in output_root.rglob("*.diagnostics.json")
+        )
         run_results.append(
             {
                 "scenario": scenario.manifest_data(),
                 "exit_code": completed_process.returncode,
                 "output_root": output_root.relative_to(PROJECT_ROOT).as_posix(),
+                "diagnostic_sidecars": diagnostic_sidecars,
             }
         )
         _write_manifest(manifest_path, manifest)
@@ -298,6 +303,7 @@ def _folder_replacement_command(
         scenario.ocr,
         "--document-text-layout",
         scenario.document_text_layout,
+        "--debug",
     ]
     for include_option_value in include_option_values:
         command.extend(("--include", include_option_value))

@@ -61,6 +61,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
             self.assertEqual(["*.pptx", "*.pdf", "slides/*.pptx"], manifest["include_patterns"])
             self.assertEqual(4, len(manifest["scenarios"]))
             self.assertTrue(all(result["exit_code"] == 0 for result in manifest["results"]))
+            self.assertTrue(all(result["diagnostic_sidecars"] == [] for result in manifest["results"]))
             for command in recorded_commands:
                 with self.subTest(command=command):
                     self.assertEqual(
@@ -68,6 +69,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                     )
                     self.assertEqual(str(source_folder), command[2])
                     self.assertIn("--include", command)
+                    self.assertIn("--debug", command)
                     self.assertIn("*.pptx,*.pdf", command)
                     self.assertIn("slides/*.pptx", command)
 

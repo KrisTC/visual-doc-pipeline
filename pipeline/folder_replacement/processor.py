@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import os
 import sys
@@ -64,6 +65,7 @@ class FolderReplacementResult:
     replaced_native_text_items: int = 0
     retained_vector_graphics: int = 0
     failures: list[str] = field(default_factory=list)
+    diagnostic_sidecars: list[Path] = field(default_factory=list)
 
 
 def replace_input_folder(
@@ -77,6 +79,7 @@ def replace_input_folder(
     typeface: skia.Typeface,
     document_text_layout: str = "preserve-source-formatting",
     include_patterns: tuple[str, ...] = (),
+    diagnostics_enabled: bool = False,
     show_progress: bool = True,
     progress_factory: ProgressFactory | None = None,
 ) -> FolderReplacementResult:
@@ -109,15 +112,39 @@ def replace_input_folder(
     reserved_paths: set[Path] = set()
     for source_path in sorted(path for path in input_root.rglob("*") if path.is_file()):
         temporary_destination: Path | None = None
+        destination: Path | None = None
         progress = None
         extension = source_path.suffix.lower()
+        relative_source_path = source_path.relative_to(input_root)
         if extension not in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS:
             result.ignored_files += 1
+            if diagnostics_enabled:
+                _write_document_diagnostic(
+                    output_root,
+                    relative_source_path,
+                    None,
+                    _diagnostic_options(
+                        source_language,
+                        target_language,
+                        document_text_layout,
+                        include_patterns,
+                        ocr_provider,
+                        text_replacement_provider,
+                    ),
+                    _empty_document_totals(),
+                    [{
+                        "kind": "ignored",
+                        "reason_code": "unsupported_file_type",
+                        "detail": f"No folder-replacement handler supports {extension or 'files without an extension'}.",
+                    }],
+                    result,
+                )
             continue
-        relative_source_path = source_path.relative_to(input_root)
         if not matches_include_patterns(relative_source_path, include_patterns):
             result.ignored_files += 1
             continue
+        document_diagnostics: list[dict[str, object]] = []
+        counts_before = _document_totals(result)
         try:
             print(f"Processing: {relative_source_path}")
             if show_progress:
@@ -189,6 +216,7 @@ def replace_input_folder(
                     typeface,
                     work_completed,
                     document_text_layout=document_text_layout,
+                    diagnostics=document_diagnostics if diagnostics_enabled else None,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -219,14 +247,134 @@ def replace_input_folder(
             print(f"Failed: {source_path}: {error}", file=sys.stderr)
             if temporary_destination is not None:
                 temporary_destination.unlink(missing_ok=True)
+            document_diagnostics.append(
+                {
+                    "kind": "failed",
+                    "reason_code": "file_processing_failed",
+                    "exception_type": type(error).__name__,
+                    "detail": str(error),
+                }
+            )
+            if diagnostics_enabled:
+                _write_document_diagnostic(
+                    output_root,
+                    relative_source_path,
+                    destination,
+                    _diagnostic_options(
+                        source_language,
+                        target_language,
+                        document_text_layout,
+                        include_patterns,
+                        ocr_provider,
+                        text_replacement_provider,
+                    ),
+                    _document_totals_since(counts_before, result),
+                    document_diagnostics,
+                    result,
+                )
             continue
         else:
             reserved_paths.add(destination)
             result.processed_files += 1
+            if diagnostics_enabled and document_diagnostics:
+                _write_document_diagnostic(
+                    output_root,
+                    relative_source_path,
+                    destination,
+                    _diagnostic_options(
+                        source_language,
+                        target_language,
+                        document_text_layout,
+                        include_patterns,
+                        ocr_provider,
+                        text_replacement_provider,
+                    ),
+                    _document_totals_since(counts_before, result),
+                    document_diagnostics,
+                    result,
+                )
         finally:
             if progress is not None:
                 progress.close()
     return result
+
+
+def _diagnostic_options(
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    include_patterns: tuple[str, ...],
+    ocr_provider: OcrProvider,
+    text_replacement_provider: TextReplacementProvider,
+) -> dict[str, object]:
+    """Return the effective, document-independent options for a sidecar."""
+    return {
+        "source_language": source_language,
+        "target_language": target_language,
+        "document_text_layout": document_text_layout,
+        "include_patterns": list(include_patterns),
+        "ocr_provider": type(ocr_provider).__name__,
+        "text_replacement_provider": type(text_replacement_provider).__name__,
+    }
+
+
+def _document_totals(result: FolderReplacementResult) -> dict[str, int]:
+    """Return the counters used to calculate per-document result totals."""
+    return {
+        "native_text_items": result.replaced_native_text_items,
+        "ocr_image_regions": result.replaced_image_regions,
+        "retained_vector_graphics": result.retained_vector_graphics,
+    }
+
+
+def _empty_document_totals() -> dict[str, int]:
+    """Return zero work totals for a source file that was never processed."""
+    return {
+        "native_text_items": 0,
+        "ocr_image_regions": 0,
+        "retained_vector_graphics": 0,
+    }
+
+
+def _document_totals_since(
+    before: Mapping[str, int], result: FolderReplacementResult
+) -> dict[str, int]:
+    """Return the work counters contributed while one source file was processed."""
+    after = _document_totals(result)
+    return {name: after[name] - before[name] for name in after}
+
+
+def _write_document_diagnostic(
+    output_root: Path,
+    relative_source_path: Path,
+    destination: Path | None,
+    options: Mapping[str, object],
+    totals: Mapping[str, int],
+    entries: list[dict[str, object]],
+    result: FolderReplacementResult,
+) -> None:
+    """Write one local JSON sidecar beside a document's intended output path."""
+    intended_output = destination or output_root / relative_source_path
+    sidecar = intended_output.with_name(f"{intended_output.name}.diagnostics.json")
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    output_path = intended_output.relative_to(output_root).as_posix()
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_path": relative_source_path.as_posix(),
+                "output_path": output_path,
+                "options": dict(options),
+                "totals": dict(totals),
+                "entries": entries,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    result.diagnostic_sidecars.append(sidecar)
 
 
 def _validate_roots(input_root: Path, output_root: Path) -> None:

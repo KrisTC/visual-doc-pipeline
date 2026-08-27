@@ -109,13 +109,24 @@ def _fit_clipped_text(
             preserve_source_font_family=preserve_source_font,
             measure_source_fonts=preserve_source_font,
         )
-        run = fitted.text_box.paragraphs[0].runs[0]
-        element.text = run.text
-        element.set("font-size", f"{(run.font_size_points or 12.0) / 0.75:.4f}px")
-        if not preserve_source_font:
-            family_name, _path = static_noto_font(classification, bold)
-            element.set("font-family", family_name)
-            embedded.add((classification, bool(bold)))
+        runs = fitted.text_box.paragraphs[0].runs
+        if len(runs) == 1:
+            run = runs[0]
+            element.text = run.text
+            element.set("font-size", f"{(run.font_size_points or 12.0) / 0.75:.4f}px")
+            if not preserve_source_font or not run.source_typefaces:
+                family_name, _path = static_noto_font(run.font_classification, run.bold)
+                element.set("font-family", family_name)
+                embedded.add((run.font_classification, bool(run.bold)))
+        else:
+            element.text = None
+            for run in runs:
+                span = ElementTree.SubElement(element, "tspan")
+                span.text = run.text
+                span.set("font-size", f"{(run.font_size_points or 12.0) / 0.75:.4f}px")
+                family_name, _path = static_noto_font(run.font_classification, run.bold)
+                span.set("font-family", family_name)
+                embedded.add((run.font_classification, bool(run.bold)))
         count += 1
         elements.add(id(element))
     return count, embedded, elements
@@ -298,6 +309,10 @@ def _embed_faces(root: ElementTree.Element, faces: set[tuple[str, bool]]) -> Non
 
 def _walk(element: ElementTree.Element, inside_text: bool, replace_text: Callable[[str], str],
           replace_image: Callable[[Image.Image], int] | None, fitted_elements: set[int]) -> tuple[int, int, bool]:
+    if id(element) in fitted_elements:
+        # A multi-face fitted ``text`` element owns its generated ``tspan``
+        # children; do not send them through the generic replacement path.
+        return 0, 0, False
     text_context = inside_text or _name(element.tag) in _TEXT
     items = 0
     if text_context and element.text and id(element) not in fitted_elements:

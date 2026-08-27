@@ -17,6 +17,7 @@ from PIL import Image
 
 from pipeline.ocr import OcrProviderFactory
 from pipeline.text_replacement import TextReplacementProviderFactory
+from scripts import run_folder_replacement
 from scripts.run_folder_replacement import _argument_parser, _load_default_typeface
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -127,6 +128,41 @@ class CliEntryPointTests(unittest.TestCase):
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_loads_its_default_typeface(self) -> None:
         self.assertIsNotNone(_load_default_typeface())
+
+    # Verifies FR-2026-08-27-04.
+    def test_folder_replacement_reports_missing_fitted_layout_font_without_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_folder = root / "input"
+            input_folder.mkdir()
+            error_output = io.StringIO()
+            with patch.dict(
+                os.environ,
+                {"VISUAL_DOC_PIPELINE_FONT_CACHE": str(root / "font-cache")},
+                clear=False,
+            ), patch.object(
+                sys,
+                "argv",
+                [
+                    "run_folder_replacement.py",
+                    str(input_folder),
+                    str(root / "output"),
+                    "--source-language",
+                    "en",
+                    "--ocr",
+                    "no_ocr",
+                    "--document-text-layout",
+                    "preserve-basic-layout",
+                ],
+            ), patch("sys.stderr", error_output):
+                self.assertEqual(2, run_folder_replacement.main())
+
+            message = error_output.getvalue()
+            self.assertIn("Folder replacement did not start", message)
+            self.assertIn("No input document was processed", message)
+            self.assertIn("Noto Sans Symbols 2", message)
+            self.assertIn("scripts/run.sh python scripts/bootstrap_runtime_assets.py", message)
+            self.assertNotIn("usage:", message)
 
     # Verifies FR-2026-08-04-02.
     def test_folder_replacement_selects_no_ocr_and_leaves_a_bitmap_unchanged(self) -> None:

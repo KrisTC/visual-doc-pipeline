@@ -32,6 +32,7 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    PortableTextUnsupportedError,
     fitted_text_lines,
     noto_typefaces,
     replace_and_fit_text_box,
@@ -40,6 +41,7 @@ from pipeline.folder_replacement.bitmap import replace_image as _process_bitmap_
 from pipeline.folder_replacement.common import replace_native_text
 from pipeline.ocr import OcrProvider
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
+from pipeline.runtime_assets import math_font_is_available, symbols_font_is_available
 from pipeline.text_replacement import TextReplacementProvider
 
 
@@ -91,6 +93,7 @@ def replace_pdf_file(
     work_completed: Callable[[str], None],
     *,
     document_text_layout: str = "preserve-source-formatting",
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int]:
     reader = PdfReader(source)
     writer = PdfWriter()
@@ -98,7 +101,7 @@ def replace_pdf_file(
     native_items = 0
     seen_forms: set[int] = set()
     seen_annotations: set[int] = set()
-    for page in writer.pages:
+    for page_index, page in enumerate(writer.pages, start=1):
         native_items += _replace_pdf_content_text(
             page,
             writer,
@@ -108,7 +111,12 @@ def replace_pdf_file(
             seen_forms,
             static_font=document_text_layout == "preserve-basic-layout",
             source_font=document_text_layout == "preserve-basic-layout-source-font",
-            visual_layout=document_text_layout == "preserve-basic-layout",
+            visual_layout=document_text_layout in {
+                "preserve-basic-layout", "preserve-basic-layout-source-font"
+            },
+            page_index=page_index,
+            diagnostics=diagnostics,
+            container_kind="pdf_page_content",
         )
         native_items += _replace_pdf_annotations(
             page,
@@ -346,13 +354,23 @@ def _replace_pdf_bounded_dictionary_text(
         preserve_source_font_family=True,
         measure_source_fonts=measure_source_fonts,
     )
-    run = fitted.text_box.paragraphs[0].runs[0]
-    set_value(NameObject(key), TextStringObject(run.text))
+    runs = fitted.text_box.paragraphs[0].runs
+    run = runs[0]
+    set_value(NameObject(key), TextStringObject("".join(item.text for item in runs)))
     font_size = run.font_size_points or size
-    if embed_noto:
-        font_name, font_reference = _pdf_embedded_noto_font(writer, "sans-serif", bool(run.bold))
+    use_noto_output = embed_noto or len(runs) > 1 or not run.source_typefaces
+    if use_noto_output:
+        classifications = tuple(
+            _pdf_portable_classification(item.font_classification)
+            for item in runs
+        )
+        fonts = {
+            classification: _pdf_embedded_noto_font(writer, classification, False)
+            for classification in set(classifications)
+        }
+        font_name, _font_reference = fonts[classifications[0]]
         set_value(NameObject("/DA"), TextStringObject(f"/{font_name} {font_size:.4f} Tf 0 g"))
-        _pdf_write_appearance(dictionary, font_name, font_reference, run.text, font_size, bounds)
+        _pdf_write_appearance_runs(dictionary, runs, fonts, bounds)
     else:
         set_value(NameObject("/DA"), TextStringObject(f"/{face} {font_size:.4f} Tf 0 g"))
         set_value(NameObject("/AP"), DictionaryObject())
@@ -376,7 +394,13 @@ def _pdf_embedded_noto_font(
 ) -> tuple[str, object]:
     """Create an Identity-H Type0 font whose CIDs are static-font glyph IDs."""
     family, _path = static_noto_font(classification, bold)
-    resource_name = "PipelineNotoBold" if bold else "PipelineNoto"
+    resource_name = (
+        "PipelineNotoMath"
+        if classification == "math"
+        else "PipelineNotoSymbols"
+        if classification == "symbols"
+        else "PipelineNotoBold" if bold else "PipelineNoto"
+    )
     postscript_name = "NotoSansJP-Thin" if classification == "sans-serif" else family.replace(" ", "")
     cached = getattr(writer, "_pipeline_layout_fonts", None)
     if cached is None:
@@ -420,12 +444,17 @@ def _pdf_embedded_noto_font(
     return resource_name, reference
 
 
+def _pdf_portable_classification(classification: str) -> str:
+    """Map shared run classifications to PDF's embeddable portable faces."""
+    return classification if classification in {"math", "symbols"} else "sans-serif"
+
+
 def _pdf_write_appearance(
     dictionary: object, font_name: str, font_reference: object, text: str,
-    font_size: float, bounds: tuple[float, float],
+    font_size: float, bounds: tuple[float, float], classification: str = "sans-serif",
 ) -> None:
     """Regenerate a simple clipped appearance with the embedded static face."""
-    face = noto_typefaces()["sans-serif"]
+    face = noto_typefaces()[classification]
     glyphs = skia.Font(face).textToGlyphs(text)
     encoded = "".join(f"{glyph:04X}" for glyph in glyphs)
     width, height = bounds
@@ -437,6 +466,42 @@ def _pdf_write_appearance(
         NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Form"),
         NameObject("/BBox"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(width), NumberObject(height)]),
         NameObject("/Resources"): DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject(f"/{font_name}"): font_reference})}),
+    })
+    set_value = getattr(dictionary, "__setitem__", None)
+    if callable(set_value):
+        set_value(NameObject("/AP"), DictionaryObject({NameObject("/N"): appearance}))
+
+
+def _pdf_write_appearance_runs(
+    dictionary: object,
+    runs: tuple[BoundedTextRun, ...],
+    fonts: dict[str, tuple[str, object]],
+    bounds: tuple[float, float],
+) -> None:
+    """Regenerate a simple appearance that can switch portable fonts per run."""
+    width, height = bounds
+    content = [
+        f"q 0 0 {width:.4f} {height:.4f} re W n BT 0 g 0 {max(0.0, height - (runs[0].font_size_points or 12.0)):.4f} Td"
+    ]
+    resources = DictionaryObject()
+    for run in runs:
+        classification = _pdf_portable_classification(run.font_classification)
+        font_name, font_reference = fonts[classification]
+        if not _pdf_add_static_glyph_metadata(font_reference, run.text, classification):
+            raise ValueError("Portable PDF appearance font does not cover its replacement run.")
+        encoded = _pdf_static_glyph_bytes(run.text, classification).hex().upper()
+        content.append(
+            f"/{font_name} {run.font_size_points or 12.0:.4f} Tf "
+            f"<{encoded}> Tj"
+        )
+        resources[NameObject(f"/{font_name}")] = font_reference
+    content.append("ET Q")
+    appearance = DecodedStreamObject()
+    appearance.set_data(" ".join(content).encode("ascii"))
+    appearance.update({
+        NameObject("/Type"): NameObject("/XObject"), NameObject("/Subtype"): NameObject("/Form"),
+        NameObject("/BBox"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(width), NumberObject(height)]),
+        NameObject("/Resources"): DictionaryObject({NameObject("/Font"): resources}),
     })
     set_value = getattr(dictionary, "__setitem__", None)
     if callable(set_value):
@@ -490,6 +555,9 @@ def _replace_pdf_content_text(
     static_font: bool = False,
     source_font: bool = False,
     visual_layout: bool = False,
+    page_index: int | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+    container_kind: str = "pdf_page_content",
 ) -> int:
     get_contents = getattr(content_owner, "get_contents", None)
     replace_contents = getattr(content_owner, "replace_contents", None)
@@ -499,12 +567,26 @@ def _replace_pdf_content_text(
     content_stream = ContentStream(contents, writer)
     static_font_name: str | None = None
     static_font_reference: object | None = None
+    fitted_static_fonts: dict[str, tuple[str, object]] = {}
     fallback_font_name: str | None = None
     if visual_layout:
         static_font_name, static_font_reference = _pdf_embedded_noto_font(
             writer, "sans-serif", False
         )
+        fitted_static_fonts["sans-serif"] = (static_font_name, static_font_reference)
         _pdf_add_font_resource(content_owner, static_font_name, static_font_reference)
+        if math_font_is_available():
+            math_font_name, math_font_reference = _pdf_embedded_noto_font(
+                writer, "math", False
+            )
+            fitted_static_fonts["math"] = (math_font_name, math_font_reference)
+            _pdf_add_font_resource(content_owner, math_font_name, math_font_reference)
+        if symbols_font_is_available():
+            symbol_font_name, symbol_font_reference = _pdf_embedded_noto_font(
+                writer, "symbols", False
+            )
+            fitted_static_fonts["symbols"] = (symbol_font_name, symbol_font_reference)
+            _pdf_add_font_resource(content_owner, symbol_font_name, symbol_font_reference)
     elif static_font:
         static_font_name, static_font_reference = _pdf_content_fallback_font(writer)
         _pdf_add_font_resource(content_owner, static_font_name, static_font_reference)
@@ -513,16 +595,19 @@ def _replace_pdf_content_text(
         _pdf_add_font_resource(content_owner, fallback_font_name, fallback_font_reference)
     font_resources = _pdf_font_resources(content_owner)
     properties = _pdf_property_resources(content_owner)
-    if visual_layout and static_font_name is not None and static_font_reference is not None:
+    if visual_layout and fitted_static_fonts:
         replaced_items = _replace_pdf_fitted_operations(
             content_stream,
             replacement_provider,
             source_language,
             target_language,
             font_resources,
-            static_font_name,
-            static_font_reference,
+            fitted_static_fonts,
             properties,
+            source_font=source_font,
+            page_index=page_index,
+            diagnostics=diagnostics,
+            container_kind=container_kind,
         )
     else:
         replaced_items = _replace_pdf_operations(
@@ -568,6 +653,9 @@ def _replace_pdf_content_text(
             static_font=static_font,
             source_font=source_font,
             visual_layout=visual_layout,
+            page_index=page_index,
+            diagnostics=diagnostics,
+            container_kind="pdf_form_xobject",
         )
     return replaced_items
 
@@ -623,9 +711,13 @@ def _replace_pdf_fitted_operations(
     source_language: str,
     target_language: str,
     font_resources: dict[str, object],
-    font_name: str,
-    font_reference: object,
+    static_fonts: dict[str, tuple[str, object]],
     properties: dict[str, object],
+    *,
+    source_font: bool,
+    page_index: int | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+    container_kind: str = "pdf_page_content",
 ) -> int:
     """Replace eligible page text as visual lines or paragraph-like blocks.
 
@@ -785,7 +877,41 @@ def _replace_pdf_fitted_operations(
         else:
             continue
 
-        if text_rendering_mode not in {0, 2} or not position_known:
+        if text_rendering_mode not in {0, 2}:
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_text_rendering_mode_ineligible",
+                operator,
+                _pdf_diagnostic_source_text(
+                    values, operands, operator, current_font, font_resources,
+                    character_spacing, word_spacing, horizontal_scale,
+                ),
+                _pdf_diagnostic_text_location(
+                    text_matrix, ctm, current_font, horizontal_scale, text_rise
+                )
+                if position_known
+                else None,
+                f"PDF text rendering mode {text_rendering_mode} is not safely replaceable.",
+            )
+            barrier += 1
+            position_known = False
+            continue
+        if not position_known:
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_text_position_unknown",
+                operator,
+                _pdf_diagnostic_source_text(
+                    values, operands, operator, current_font, font_resources,
+                    character_spacing, word_spacing, horizontal_scale,
+                ),
+                None,
+                "The source text position cannot be restored safely.",
+            )
             barrier += 1
             position_known = False
             continue
@@ -800,6 +926,18 @@ def _replace_pdf_fitted_operations(
             horizontal_scale,
         )
         if not valid:
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_text_undecodable",
+                operator,
+                None,
+                _pdf_diagnostic_text_location(
+                    text_matrix, ctm, current_font, horizontal_scale, text_rise
+                ),
+                "The source font encoding could not be decoded safely.",
+            )
             undecodable_advance = _pdf_undecodable_text_advance(
                 values,
                 operands[0] if operator == b"TJ" and operands else None,
@@ -821,12 +959,35 @@ def _replace_pdf_fitted_operations(
             continue
         placement = _pdf_text_placement(text_matrix, ctm, current_font, horizontal_scale)
         if placement is None:
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_text_placement_unsupported",
+                operator,
+                "".join(text for text, _start, _end in chunks),
+                None,
+                "The source text transform cannot be safely reconstructed.",
+            )
             barrier += 1
             position_known = False
             continue
         direction, normal, effective_size, horizontal_stretch = placement
         text_matrix_after = _pdf_translate_matrix(text_matrix, advance, 0.0)
-        if not any(marked_content_actual_text):
+        if any(marked_content_actual_text):
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_text_marked_content_actual_text",
+                operator,
+                "".join(text for text, _start, _end in chunks),
+                _pdf_diagnostic_text_location(
+                    text_matrix, ctm, current_font, horizontal_scale, text_rise
+                ),
+                "Marked content supplies /ActualText and is retained to preserve its semantics.",
+            )
+        else:
             for text, start_advance, end_advance in chunks:
                 start = _pdf_transform_point(
                     ctm, _pdf_transform_point(text_matrix, (start_advance, text_rise))
@@ -851,10 +1012,44 @@ def _replace_pdf_fitted_operations(
     source_removals: set[int] = set()
     replacements_by_anchor: dict[int, list[list[tuple[list[object], bytes]]]] = {}
     for region in candidate_regions:
-        replacement = _pdf_fitted_region_operations(
-            region, replacement_provider, source_language, target_language, font_name, font_reference
-        )
+        try:
+            replacement = _pdf_fitted_region_operations(
+                region,
+                replacement_provider,
+                source_language,
+                target_language,
+                static_fonts,
+                font_resources,
+                source_font,
+            )
+        except PortableTextUnsupportedError as error:
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "source_text": region.text,
+                        "replacement_text": error.replacement_text,
+                        "kind": "unsupported",
+                        "reason_code": error.reason_code,
+                        "container_kind": "pdf_visual_text",
+                        "page": page_index,
+                        "candidate_faces": list(error.selected_faces),
+                        "characters": error.characters,
+                        "code_points": [f"U+{ord(character):04X}" for character in error.characters],
+                        "region_location": _pdf_diagnostic_region_location(region),
+                    }
+                )
+            continue
         if replacement is None:
+            _record_pdf_retained_diagnostic(
+                diagnostics,
+                page_index,
+                container_kind,
+                "pdf_visual_region_not_reconstructable",
+                None,
+                region.text,
+                _pdf_diagnostic_region_location(region),
+                "The visual text region cannot be safely reconstructed for replacement.",
+            )
             continue
         for operation_index in region.operation_indexes:
             # The fitted output restores the source text position with a
@@ -889,6 +1084,84 @@ def _pdf_marked_content_has_actual_text(operands: list[object], properties: dict
     get_object = getattr(property_value, "get_object", None)
     dictionary = get_object() if callable(get_object) else property_value
     return isinstance(dictionary, DictionaryObject) and dictionary.get("/ActualText") is not None
+
+
+def _pdf_diagnostic_source_text(
+    values: tuple[object, ...],
+    operands: list[object],
+    operator: bytes,
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+    character_spacing: float,
+    word_spacing: float,
+    horizontal_scale: float,
+) -> str | None:
+    """Decode source text for a debug-only retained entry without replacement."""
+    chunks, _advance, valid = _pdf_shown_text_chunks(
+        values,
+        operands[0] if operator == b"TJ" and operands else None,
+        current_font,
+        font_resources,
+        character_spacing,
+        word_spacing,
+        horizontal_scale,
+    )
+    if not valid:
+        return None
+    text = "".join(item[0] for item in chunks)
+    return text or None
+
+
+def _pdf_diagnostic_text_location(
+    text_matrix: tuple[float, float, float, float, float, float],
+    ctm: tuple[float, float, float, float, float, float],
+    current_font: tuple[object, object] | None,
+    horizontal_scale: float,
+    text_rise: float,
+) -> dict[str, object] | None:
+    """Return one known source-text anchor in PDF page user-space coordinates."""
+    placement = _pdf_text_placement(text_matrix, ctm, current_font, horizontal_scale)
+    if placement is None:
+        return None
+    _direction, normal, font_size, _stretch = placement
+    x, y = _pdf_transform_point(ctm, _pdf_transform_point(text_matrix, (0.0, text_rise)))
+    return {
+        "coordinate_space": "pdf_page_user_space",
+        "top_left": {
+            "x": round(x + normal[0] * font_size * 0.8, 3),
+            "y": round(y + normal[1] * font_size * 0.8, 3),
+        },
+    }
+
+
+def _record_pdf_retained_diagnostic(
+    diagnostics: list[dict[str, object]] | None,
+    page_index: int | None,
+    container_kind: str,
+    reason_code: str,
+    operator: bytes | None,
+    source_text: str | None,
+    location: dict[str, object] | None,
+    detail: str,
+) -> None:
+    """Append one debug-only native-text safety decision without replacement."""
+    if diagnostics is None:
+        return
+    entry: dict[str, object] = {
+        "source_text": source_text,
+        "kind": "retained",
+        "reason_code": reason_code,
+        "container_kind": container_kind,
+        "page": page_index,
+        "detail": detail,
+    }
+    if source_text is None:
+        entry["source_text_status"] = "undecodable"
+    if operator is not None:
+        entry["operator"] = operator.decode("ascii")
+    if location is not None:
+        entry["region_location"] = location
+    diagnostics.append(entry)
 
 
 def _pdf_matrix(operands: list[object]) -> tuple[float, float, float, float, float, float]:
@@ -1505,13 +1778,31 @@ def _pdf_dot(point: tuple[float, float], vector: tuple[float, float]) -> float:
     return point[0] * vector[0] + point[1] * vector[1]
 
 
+def _pdf_diagnostic_region_location(region: _PdfVisualRegion) -> dict[str, object]:
+    """Describe one retained region by its top-left PDF page user-space anchor."""
+    return {
+        "coordinate_space": "pdf_page_user_space",
+        "top_left": {
+            "x": round(
+                region.direction[0] * region.base_start + region.normal[0] * region.top,
+                3,
+            ),
+            "y": round(
+                region.direction[1] * region.base_start + region.normal[1] * region.top,
+                3,
+            ),
+        },
+    }
+
+
 def _pdf_fitted_region_operations(
     region: _PdfVisualRegion,
     replacement_provider: TextReplacementProvider,
     source_language: str,
     target_language: str,
-    font_name: str,
-    font_reference: object,
+    static_fonts: dict[str, tuple[str, object]],
+    font_resources: dict[str, object],
+    source_font: bool,
 ) -> list[tuple[list[object], bytes]] | None:
     restore_operations = _pdf_restore_source_text_state(region.anchor)
     if restore_operations is None:
@@ -1520,30 +1811,78 @@ def _pdf_fitted_region_operations(
         round(region.width / region.horizontal_stretch * 12_700), round(region.height * 12_700), 0, 0, 0, 0, None,
         (BoundedTextParagraph(
             region.alignment, None, None, None, None, 0, None, None, None, None, None,
-            (BoundedTextRun(region.text, None, "sans-serif", region.font_size, False, False, "none", None),),
+            (BoundedTextRun(
+                region.text,
+                _pdf_source_font_family(region.anchor.current_font, font_resources),
+                "sans-serif",
+                region.font_size,
+                False,
+                False,
+                "none",
+                None,
+            ),),
         ),),
     )
     fitted = replace_and_fit_text_box(
-        box, replacement_provider, source_language, target_language, noto_typefaces()
+        box,
+        replacement_provider,
+        source_language,
+        target_language,
+        noto_typefaces(),
+        preserve_source_font_family=source_font,
+        measure_source_fonts=source_font,
     )
     replacement_text = "".join(
         run.text for paragraph in fitted.text_box.paragraphs for run in paragraph.runs
     )
-    if not _pdf_static_font_supports_text(replacement_text):
-        warnings.warn(
-            "Skipped a PDF visual text region because the portable replacement font "
-            "does not cover every replacement character.",
-            RuntimeWarning,
-            stacklevel=2,
+    output_runs = fitted.text_box.paragraphs[0].runs
+    output_run = output_runs[0]
+    source_output = (
+        source_font
+        and len(output_runs) == 1
+        and bool(output_run.source_typefaces)
+        and _pdf_source_font_supports_text(
+            replacement_text, region.anchor.current_font, font_resources
         )
-        return None
+    )
+    static_classifications = tuple(
+        _pdf_portable_classification(run.font_classification)
+        for run in output_runs
+    )
+    if not source_output and any(
+        static_fonts.get(classification) is None
+        or not _pdf_static_font_supports_text(run.text, classification)
+        for run, classification in zip(output_runs, static_classifications, strict=True)
+    ):
+        unsupported_text = "".join(
+            run.text
+            for run, classification in zip(output_runs, static_classifications, strict=True)
+            if (
+                static_fonts.get(classification) is None
+                or not _pdf_static_font_supports_text(run.text, classification)
+            )
+        )
+        selected_faces = tuple(
+            dict.fromkeys(
+                "Noto Sans Math" if classification == "math"
+                else "Noto Sans Symbols 2" if classification == "symbols"
+                else "Noto Sans"
+                for classification in static_classifications
+            )
+        )
+        raise PortableTextUnsupportedError(
+            "portable_font_coverage_unsupported",
+            unsupported_text,
+            selected_faces,
+            replacement_text=replacement_text,
+        )
     if fitted.fit_status == "overflow":
         warnings.warn(
             "A PDF visual text region overflowed at the minimum readable font size.",
             RuntimeWarning,
             stacklevel=2,
         )
-    font_size = fitted.text_box.paragraphs[0].runs[0].font_size_points or region.font_size
+    font_size = output_run.font_size_points or region.font_size
     cursor = region.top - font_size * 0.8
     result: list[tuple[list[object], bytes]] = []
     result.extend((
@@ -1555,14 +1894,26 @@ def _pdf_fitted_region_operations(
         # information.  The replacement retains its fill paint state but uses
         # the predictable fill-only presentation required by FR-2026-08-23-03.
         ([NumberObject(0)], b"Tr"),
-        ([NameObject(f"/{font_name}"), FloatObject(font_size)], b"Tf"),
     ))
-    for line in fitted_text_lines(fitted, noto_typefaces()):
+    if source_output and region.anchor.current_font is not None:
+        result.append(
+            ([region.anchor.current_font[0], FloatObject(font_size)], b"Tf")
+        )
+        active_static_font: tuple[str, float] | None = None
+    elif static_classifications:
+        initial_font = static_fonts.get(static_classifications[0])
+        if initial_font is None:
+            return None
+        result.append(
+            ([NameObject(f"/{initial_font[0]}"), FloatObject(font_size)], b"Tf")
+        )
+        active_static_font = (initial_font[0], font_size)
+    else:
+        active_static_font = None
+    for line in fitted_text_lines(fitted):
         if not line.text:
             cursor -= line.height_pixels * 0.75
             continue
-        if not _pdf_add_static_glyph_metadata(font_reference, line.text):
-            return None
         width = line.width_pixels * 0.75 * region.horizontal_stretch
         offset = 0.0
         if region.alignment == "right":
@@ -1592,12 +1943,35 @@ def _pdf_fitted_region_operations(
             local_direction[0] * region.horizontal_stretch,
             local_direction[1] * region.horizontal_stretch,
         )
-        result.extend((
+        result.append(
             ([FloatObject(local_direction[0]), FloatObject(local_direction[1]),
               FloatObject(local_normal[0]), FloatObject(local_normal[1]),
-              FloatObject(local_origin[0]), FloatObject(local_origin[1])], b"Tm"),
-            ([ByteStringObject(_pdf_static_glyph_bytes(line.text))], b"Tj"),
-        ))
+              FloatObject(local_origin[0]), FloatObject(local_origin[1])], b"Tm")
+        )
+        if source_output:
+            result.append(([_pdf_text_operand(line.text, None, "sans-serif")], b"Tj"))
+        else:
+            for segment in line.segments:
+                classification = (
+                    _pdf_portable_classification(segment.font_classification)
+                )
+                static_font = static_fonts.get(classification)
+                if static_font is None:
+                    return None
+                font_name, font_reference = static_font
+                if not _pdf_add_static_glyph_metadata(
+                    font_reference, segment.text, classification
+                ):
+                    return None
+                selected_font = (font_name, segment.font_size_points)
+                if selected_font != active_static_font:
+                    result.append(
+                        ([NameObject(f"/{font_name}"), FloatObject(segment.font_size_points)], b"Tf")
+                    )
+                    active_static_font = selected_font
+                result.append(
+                    ([_pdf_text_operand(segment.text, font_name, classification)], b"Tj")
+                )
         cursor -= line.height_pixels * 0.75
     result.extend(restore_operations)
     return result
@@ -1653,7 +2027,9 @@ def _pdf_matrix_translation_delta(
     )
 
 
-def _pdf_add_static_glyph_metadata(font_reference: object, text: str) -> bool:
+def _pdf_add_static_glyph_metadata(
+    font_reference: object, text: str, classification: str
+) -> bool:
     """Add CID widths and unambiguous Unicode mappings for emitted glyphs.
 
     The emitted CID is the static face's glyph ID.  A CIDFont's `/DW` cannot
@@ -1673,11 +2049,9 @@ def _pdf_add_static_glyph_metadata(font_reference: object, text: str) -> bool:
     if widths is None:
         widths = {}
         setattr(descendant, "_pipeline_static_glyph_widths", widths)
-    _family, path = static_noto_font("sans-serif", False)
-    typeface = skia.Typeface.MakeFromFile(str(path))
-    if typeface is None:
-        raise RuntimeError("Could not load the committed static Noto Sans face for PDF output.")
-    font = skia.Font(typeface, 1000.0)
+    # The shared layout face cache also prevents each PDF region from reopening
+    # the optional Symbols 2 file while constructing CID metadata.
+    font = skia.Font(noto_typefaces()[classification], 1000.0)
     glyphs = font.textToGlyphs(text)
     if len(glyphs) != len(text):
         return False
@@ -1737,8 +2111,8 @@ def _pdf_static_tounicode_cmap(unicode_by_glyph: dict[int, str]) -> bytes:
     return ("\n".join(body) + "\n").encode("ascii")
 
 
-def _pdf_static_font_supports_text(text: str) -> bool:
-    _family, path = static_noto_font("sans-serif", False)
+def _pdf_static_font_supports_text(text: str, classification: str = "sans-serif") -> bool:
+    _family, path = static_noto_font(classification, False)
     typeface = skia.Typeface.MakeFromFile(str(path))
     if typeface is None:
         raise RuntimeError("Could not load the committed static Noto Sans face for PDF output.")
@@ -1866,6 +2240,25 @@ def _pdf_font_resources(content_owner: object) -> dict[str, object]:
         str(name): font.get_object()
         for name, font in fonts.get_object().items()
     }
+
+
+def _pdf_source_font_family(
+    current_font: tuple[object, object] | None, font_resources: dict[str, object]
+) -> str | None:
+    """Return a concrete source-family request without trusting a PDF subset tag."""
+    if current_font is None:
+        return None
+    font = font_resources.get(str(current_font[0]))
+    if not isinstance(font, DictionaryObject):
+        return None
+    base_font = font.get("/BaseFont")
+    if not isinstance(base_font, NameObject):
+        return None
+    family = str(base_font).lstrip("/")
+    subset, separator, remainder = family.partition("+")
+    if separator and len(subset) == 6 and subset.isupper():
+        family = remainder
+    return family or None
 
 
 def _pdf_property_resources(content_owner: object) -> dict[str, object]:
@@ -2394,20 +2787,21 @@ def _pdf_operand_bytes(value: TextStringObject | ByteStringObject) -> bytes | No
     return bytes(original_bytes) if isinstance(original_bytes, bytes) else None
 
 
-def _pdf_text_operand(text: str, static_font_name: str | None) -> TextStringObject | ByteStringObject:
+def _pdf_text_operand(
+    text: str, static_font_name: str | None, classification: str = "sans-serif"
+) -> TextStringObject | ByteStringObject:
     if static_font_name is None:
         return TextStringObject(text)
     if static_font_name == "PipelineFallback":
         return ByteStringObject(text.encode("latin-1", "replace"))
-    return ByteStringObject(_pdf_static_glyph_bytes(text))
+    return ByteStringObject(_pdf_static_glyph_bytes(text, classification))
 
 
-def _pdf_static_glyph_bytes(text: str) -> bytes:
-    _family, path = static_noto_font("sans-serif", False)
-    typeface = skia.Typeface.MakeFromFile(str(path))
-    if typeface is None:
-        raise RuntimeError("Could not load the committed static Noto Sans face for PDF output.")
-    return b"".join(glyph.to_bytes(2, "big") for glyph in skia.Font(typeface).textToGlyphs(text))
+def _pdf_static_glyph_bytes(text: str, classification: str = "sans-serif") -> bytes:
+    return b"".join(
+        glyph.to_bytes(2, "big")
+        for glyph in skia.Font(noto_typefaces()[classification]).textToGlyphs(text)
+    )
 
 
 def _pdf_add_font_resource(content_owner: object, font_name: str, font_reference: object) -> None:

@@ -20,6 +20,7 @@ from pipeline.ocr_plugins.paddleocr import (
     PaddleOcrProvider,
     _EngineRecord,
     _create_engine,
+    bootstrap_models,
 )
 
 
@@ -46,6 +47,20 @@ def _empty_result() -> list[dict[str, object]]:
 
 
 class PaddleOcrProviderTests(unittest.TestCase):
+    # Verifies FR-2026-08-27-04.
+    def test_bootstrap_initializes_every_supported_language(self) -> None:
+        automatic_record = _EngineRecord(cast(PaddleOcrEngine, _Engine(_empty_result())), AUTO_DEVICE)
+
+        with patch(
+            "pipeline.ocr_plugins.paddleocr._create_engine", return_value=automatic_record
+        ) as create_engine:
+            bootstrap_models()
+
+        self.assertEqual(
+            [("en", AUTO_DEVICE), ("japan", AUTO_DEVICE)],
+            [call.args for call in create_engine.call_args_list],
+        )
+
     # Verifies FR-2026-08-27-01.
     def test_palette_byte_transparency_is_flattened_without_a_pillow_warning(self) -> None:
         provider = PaddleOcrProvider()

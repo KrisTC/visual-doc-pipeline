@@ -101,7 +101,9 @@ A provider abstraction permits the pipeline to use a consistent OCR result model
 
 "OCI API" in the source request means the OCR-provider factory and OCR-task abstraction, rather than an OCI-related integration.
 
-PaddleOCR may download its official model artifacts when first instantiated. This creates a runtime network and artifact-supply-chain trust boundary that is separate from the project's locked Python dependency policy. Model downloads shall be limited to PaddleOCR's configured official model source and local cache. A failed download shall raise an OCR-provider error without a fallback to an alternative source.
+FR-2026-08-27-04 defines an optional bootstrap that pre-triggers PaddleOCR's
+normal model download. PaddleOCR retains ownership of its normal model cache;
+the project does not add a separate model cache or model-integrity system.
 
 The OCR-task abstraction shall accept BCP 47 language tags. Each plugin shall map them to its own language convention. Output text items have no public identifier. The factory shall reject duplicate provider names and raise a distinct error when a requested provider is unavailable. OCR-provider failures shall raise a distinct provider error.
 
@@ -839,7 +841,12 @@ The command-line option name and its exact accepted values remain to be defined.
 
 Before implementation, define the bounding-box source and fitting behaviour for each format, including PowerPoint shapes and grouped shapes, Word text boxes and embedded diagrams, Excel cells and drawing text, and PDF content/form/annotation text. Also define the target-language-to-Noto-face mapping, handling when no committed Noto face supports the target language, wrapping, and overflow behaviour when a minimum readable font size cannot fit.
 
-The `preserve-basic-layout` implementation shall use a repository-owned, redistributable Noto font asset. It shall not depend on operating-system fonts or runtime font downloads. The font selection and all fitting calculations shall be deterministic for the same input, options, and font assets.
+The `preserve-basic-layout` implementation shall use a repository-owned,
+redistributable Noto font asset. It shall not depend on operating-system fonts
+or runtime font downloads. Additional Noto assets supplied by the local
+bootstrap cache of FR-2026-08-27-04 are project-selected assets for this
+purpose. The font selection and all fitting calculations shall be deterministic
+for the same input, options, and font assets.
 
 Automated tests shall use synthetic documents and fonts only. They shall verify the default mode retains source font settings, the fitting mode selects the specified Noto font and reduces or increases size as needed, and each supported document format's output remains valid.
 
@@ -1375,7 +1382,10 @@ PDF page-content and Form XObject text-showing operations do not define a reliab
 
 When changing a page-content or Form-XObject text operand, the adapter shall decode composite Type0 text through its `/ToUnicode` CMap using the CMap's actual character-code widths. It shall not assume that `/Identity-H` implies two-byte character codes. A `/ToUnicode` map is decoding evidence only and shall not be reversed to select a CID for replacement text. If the active Type0 font, or a subsetted simple font, cannot safely encode the replacement, the adapter shall select the existing ASCII-safe fallback used for masking and redaction.
 
-When a simple source font has an available character map, `preserve-basic-layout-source-font` may retain it only when that map demonstrates support for every replacement character. A map that lacks a replacement character shall select the ASCII-safe fallback. This mode remains best effort for unbounded PDF page content; it does not promise source-font metric equivalence or layout fitting.
+`preserve-basic-layout-source-font` is defined by FR-2026-08-27-02. Its
+source-font measurement and output-font selection supersede this requirement's
+historical source-font fallback rule. All other PDF-specific rules in this
+requirement remain in effect.
 
 ### Rationale
 
@@ -1989,98 +1999,26 @@ replaces, deterministic automated package validation.
 |----------|-------|
 | Title | Measure source-font fitted layout with the best verified source face |
 | Owner | |
-| Status | Implemented |
+| Status | Superseded |
 | Source | User request |
 | Date Added | 2026-08-22 |
 | Related Requirements | FR-2026-08-03-14, FR-2026-08-04-06, FR-2026-08-04-07 |
 
 ### Description
 
-This requirement supersedes the fitting-measurement rule in
-FR-2026-08-04-06. `--document-text-layout preserve-basic-layout-source-font`
-shall retain its existing source-font output behaviour and shall measure each
-replacement run or script segment with the best verified source face available
-to the pipeline. The selection order shall be: an exact face embedded in the
-input document; an exact face installed on the host operating system; then the
-committed Noto face selected by the run's broad family classification.
-
-An exact source face shall have a resolved family name and a matching requested
-weight, width, and slant. A host-font lookup shall not accept a font-manager
-substitution merely because a lookup returned a face: it shall compare the
-returned face's resolved family and style with the source request. A selected
-embedded or installed source face shall provide a non-zero glyph for every
-character in the replacement text. A failed identity, style, font-loading, or
-glyph-coverage check shall select the committed Noto fallback rather than a
-near-match. Existing target-language coverage and overflow behaviour apply if
-that Noto fallback does not cover the replacement text.
-
-The source-font mode shall use the selected face consistently when it derives
-an original occupied fit rectangle and when it wraps and fits the replacement.
-It shall continue to write the resolved source typeface reference where the
-format permits, even when Noto was required for measurement. It shall not add,
-replace, expand, subset, or redistribute a source document's embedded font.
-Existing document font parts and relationships shall be retained.
-
-The shared bounded-text layout and font-handling code shall be independent of
-document packaging. A document-format adapter shall provide the common font
-resolver with concrete source-face requests and any safely decoded, in-memory
-embedded-face candidates from that document. Before doing so, the adapter shall
-resolve any format-specific typeface indirection, including theme aliases,
-style inheritance, or script-specific font slots. It shall not pass an opaque
-placeholder such as a DrawingML `+mj-lt` token to the common resolver.
-
-When one source run selects different faces for different scripts, the adapter
-shall preserve those selections as distinct measurement and rendering segments.
-It shall retain the original source reference(s) when serializing source-font
-output; resolving a reference for measurement shall not rewrite it to a host or
-theme-resolved family. The common resolver shall perform candidate priority,
-identity and glyph validation, Skia-typeface loading, fallback selection, and
-measurement. Format adapters shall remain responsible for locating font parts,
-decoding their format-specific representation, and preserving their package or
-file content. The resolver shall not fetch a font, URL, or filesystem path
-named by an input document.
-
-The result of source-face selection shall be available to the caller as an
-explicit diagnostic that identifies `embedded-source-face`,
-`installed-source-face`, or `noto-fallback` and the fallback reason when
-applicable. Where the source uses an indirect typeface reference, the
-diagnostic shall record both that original reference and its concrete resolved
-family. The mode is intentionally machine-dependent when it selects an
-installed font. `preserve-basic-layout` shall remain the deterministic Noto
-measurement and output mode.
+FR-2026-08-27-02 supersedes this requirement. It defines the current
+source-font measurement, output-font selection, and fallback behaviour.
 
 ### Rationale
 
-Source-font output is most accurately fitted with the same font metrics. An
-embedded source face makes that result independent of the host; an exact host
-face is a useful best-effort alternative. A strict fallback retains the
-existing predictable result when neither is usable and prevents an arbitrary
-platform substitution from being mistaken for the original design font.
-
-Although `preserve-basic-layout`, is safest from preserving layout, it isn't doesn't necessarily produce the most visually compatible transformation of the documents which might have specifically selected stylistic fonts.
+The new definition separates source measurement from replacement/output-font
+selection, giving missing glyphs one predictable Noto fallback.
 
 ### Notes
 
-This requirement changes the meaning of the existing
-`preserve-basic-layout-source-font` mode; it does not add another command-line
-mode. It does not make the output portable when it retains an unembedded source
-reference.
-
-The current shared resolver and evaluator support direct family names and the
-embedded-candidate interface. Theme and other indirect-reference resolution is
-not implemented until the applicable format requirement is implemented.
-FR-2026-08-22-10 defines the first such adapter work for PPTX. DOCX theme-font
-attributes, XLSX major/minor font schemes, and SVG CSS font inheritance or
-stacks require separate format requirements before they can participate. PDF,
-EMF, and WMF use their active font resource or face name rather than an OOXML
-theme alias.
-
-Automated tests shall use only synthetic documents and repository-owned test
-fonts. They shall test resolver priority, exact-family/style rejection,
-replacement-glyph rejection, Noto fallback, source-bound measurement, direct
-and indirect source-reference diagnostics, and script-segment selection. They
-shall inject embedded and host-face candidates into the common resolver and
-shall not depend on fonts installed on the test host.
+The shared resolver remains the implementation mechanism. Its safe in-memory
+embedded-font boundary and indirect-reference resolution requirements remain
+applicable where they do not conflict with FR-2026-08-27-02.
 
 ---
 
@@ -3102,3 +3040,553 @@ preservation of the following operation's visual position after the source
 showing operation is removed or rewritten; and marked content with an
 `/ActualText` value. Tests shall verify semantic behavior with an independent
 PDF text extractor and visual behavior with an independent PDF renderer.
+
+---
+
+## FR-2026-08-27-02
+
+| Property | Value |
+|----------|-------|
+| Title | Apply the PPTX source-font fitted-layout interpretation consistently across document formats |
+| Owner | |
+| Status | Implemented |
+| Source | User request following cross-format layout review |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-04-09, FR-2026-08-04-10, FR-2026-08-22-04, FR-2026-08-22-05, FR-2026-08-22-07, FR-2026-08-22-08, FR-2026-08-22-11, FR-2026-08-22-12, FR-2026-08-22-13, FR-2026-08-23-01, FR-2026-08-24-02, FR-2026-08-27-05 |
+
+### Description
+
+`preserve-basic-layout-source-font` shall have one meaning for every supported
+fitted document-text container: PPTX, DOCX drawing text, XLSX cells and
+drawing text, PDF text, and SVG text.
+
+For each eligible text container, the adapter shall resolve the effective
+source font request, including any applicable theme, style, CSS, or selected
+font-object indirection.  It shall first attempt to measure the source text
+with that source face, so that any source-derived bounds reflect the source
+document's actual typography.  An exact embedded source face is preferred,
+then an exact installed source face.  If neither is available or usable, it
+shall use the appropriate committed Noto face for source measurement.
+
+The adapter shall separately select the font used for the fitted replacement
+and output.  It shall use the source face only when that face is available,
+can render every replacement glyph, and can be safely represented by the
+output format.  Otherwise it shall use the appropriate committed Noto face.
+Replacement fitting shall use the same face that the output uses.
+FR-2026-08-27-05 supersedes this single-face fallback rule only for a
+replacement that requires multiple portable faces; it does not change the
+source-font measurement rule.
+
+The mode shall always use the normal bounded-layout replacement, wrapping, and
+font-size fitting path.  It shall not retain the original size or bypass
+fitting merely because the source face is unavailable or cannot render the
+replacement.  `preserve-basic-layout` remains the deterministic Noto mode.
+
+This requirement does not widen fitted-layout eligibility.  A container that
+is unbounded, cannot be safely rewritten, or cannot be decoded safely shall
+continue to use its existing `preserve-source-formatting` fallback.  Source
+font parts, resources, references, and relationships shall remain unchanged;
+the pipeline shall not fetch, modify, expand, subset, or redistribute a source
+font.
+
+For PDF, all existing rules for visual-region inference, paint state, text
+semantics, encoding, FreeText annotations, AcroForm fields, and safe fallbacks
+remain unchanged.  The only change is that source-font mode shall use the
+source-measurement and output-font-selection rules above instead of direct
+text-operand substitution.  If a PDF source font cannot safely encode the
+replacement, the existing portable Noto Unicode output path shall be used.
+
+This requirement supersedes the source-font-mode clauses of
+FR-2026-08-04-09 and FR-2026-08-22-04.  It does not supersede any other PDF
+or format-specific safety rule.
+
+### Rationale
+
+Using the source face for source measurement gives more accurate source-derived
+bounds.  Selecting the replacement/output face separately prevents missing
+glyphs or a non-embeddable source font from producing unreadable output.  This
+makes the mode predictable across formats without changing their existing
+format-specific safety behaviour.
+
+### Notes
+
+The mode remains machine-dependent when it uses an installed source face.
+Embedded-source-font support remains separately scoped by the related
+requirements.  PDF portable Unicode output depends on FR-2026-08-04-10; the
+existing ASCII masking fallback is not an acceptable source-font output.
+
+Automated tests shall use synthetic documents and repository-owned fonts only.
+For each eligible adapter, they shall verify source-font measurement, source
+font output when it covers the replacement, Noto output when it does not, and
+fitted output in every case.  PDF tests shall additionally retain the existing
+visual, encoding, copy/search, and appearance validation.
+
+---
+
+## FR-2026-08-27-03
+
+| Property | Value |
+|----------|-------|
+| Title | Provide portable Noto fallback coverage for fitted PDF page visual text |
+| Owner | |
+| Status | Implemented |
+| Source | Implementation review following Google Cloud Translation run |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-10, FR-2026-08-27-02, FR-2026-08-27-05, FR-2026-08-27-06, FR-2026-08-27-07, FR-2026-08-27-09 |
+
+### Description
+
+For every eligible fitted PDF page-content visual-text region in both
+`preserve-basic-layout` and `preserve-basic-layout-source-font`, a replacement
+shall not be skipped solely because the initially selected portable Noto face
+lacks a replacement glyph. The adapter shall select a project-selected,
+static, embeddable Noto fallback that covers every non-whitespace replacement
+character and shall use that same face for fitting and output.
+
+The portable fallback shall be selected deterministically from the requested
+target-language BCP 47 tag and replacement text. The project shall maintain a
+small explicit mapping from supported target-language/scripts to static Noto
+faces and weights. It shall identify the official Noto download source and SIL
+OFL licence for each additional face. It shall also define any
+script-segmentation rule if no one selected face covers a complete replacement.
+The pipeline shall not download fonts during document processing or use
+host-installed fonts for this portable fallback.
+
+Initially, English (`en`), Danish (`da`), French (`fr`), Spanish (`es`), and
+Japanese (`ja`) use the committed Noto Sans JP, Noto Serif JP, and Noto Sans
+Mono faces by broad classification. Chinese is not initially supported by this
+requirement. The optional Noto Sans Math and Noto Sans Symbols 2 faces and
+their bootstrap are defined by FR-2026-08-27-07 and FR-2026-08-27-04. The PDF
+adapter selects portable segments in the base-to-math-to-symbol order defined
+by FR-2026-08-27-07.
+
+For a target language outside the approved portable-coverage set, or a
+replacement that no approved fallback can cover, the PDF adapter shall retain
+only the affected visual text region and, in a debug run, report it once as
+unsupported under FR-2026-08-27-06. It shall not warn once per region, replace
+unsupported characters with unrelated glyphs, or use the ASCII masking
+fallback for translation output.
+
+This requirement completes the portable Unicode output required by
+FR-2026-08-27-02 for eligible fitted PDF page visual text. The PDF eligibility,
+painting, encoding, and copy/search rules remain unchanged. Unbounded PDF
+page-content and Form-XObject text remain controlled by FR-2026-08-04-10.
+PDF FreeText annotations and AcroForm fields, together with all non-PDF
+adapters, are separately controlled by FR-2026-08-27-09.
+
+### Rationale
+
+The current committed static faces are Japanese/Latin-focused. Selecting an
+approved portable face before fitting prevents a glyph-coverage failure from
+turning an otherwise eligible PDF visual region into an unexplained omission.
+
+### Notes
+
+The committed Japanese/Latin base assets remain available without bootstrap,
+including for synthetic tests and the existing offline path. Optional math and
+symbol faces are obtained only by the local bootstrap specified in
+FR-2026-08-27-04; they are not committed merely to make every possible target
+script available.
+
+Automated tests shall use synthetic replacement text. They shall verify that a
+first-choice face without a glyph selects an approved covering fallback, the
+fitted PDF output is renderable and parser-loadable, and no individual-region
+coverage warning is emitted. Tests shall verify the debug unsupported outcome
+for an unapproved target language or an uncovered character.
+
+---
+
+## FR-2026-08-27-04
+
+| Property | Value |
+|----------|-------|
+| Title | Bootstrap optional font packs and PaddleOCR models before processing |
+| Owner | |
+| Status | Implemented |
+| Source | User request following runtime-asset review |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-03-14, FR-2026-08-24-03, FR-2026-08-27-03 |
+
+### Description
+
+The project shall provide `scripts/bootstrap_runtime_assets.py`. It shall be a
+simple, idempotent local setup command: it downloads every optional static Noto
+font pack selected by the project's supported target-language/script mapping,
+initially Noto Sans Math Regular and Noto Sans Symbols 2 Regular,
+to one platform-standard, per-user font-cache directory outside a repository
+checkout, then initializes PaddleOCR once for each of its currently supported
+English and Japanese languages. It shall use the official Noto download source
+selected by the project and PaddleOCR's normal official download mechanism. It
+shall print the font-cache directory and PaddleOCR model-cache directory it
+used, together with a short result, and fail clearly when a download or
+PaddleOCR initialization fails.
+
+The committed Japanese/Latin Noto faces shall remain the bootstrap-free base
+font assets. They shall continue to support synthetic tests and the existing
+offline Japanese/Latin layout path. Optional packs shall remain outside Git;
+the project shall not acquire the entire upstream Noto collection merely
+because it exists. A future mapping update shall add only the font packs needed
+for its approved language/script coverage.
+
+The exact replacement text is not known until translation, so every normal
+folder-replacement invocation using either fitted layout mode for an approved
+portable-coverage target language shall require every optional pack in that
+mapping before it starts. Initially that means Noto Sans Math Regular and Noto
+Sans Symbols 2 Regular.
+The normal processing path shall use only the local font cache, select the
+fallback defined by FR-2026-08-27-03, and use the selected face for both
+fitting and output. It shall not fetch a font, inspect a host font, or silently
+skip an eligible region during processing. If a required pack is absent, it
+shall fail before processing any input document.
+
+The folder-replacement script shall finish that preflight failure with one
+concise, clearly labelled summary. It shall state that no input document was
+processed, name each missing runtime asset and its shared-cache location, show
+the bootstrap command that installs or initializes it, and tell the user to
+rerun the folder replacement after bootstrap succeeds. It shall not emit a
+per-region warning or argparse usage for this prerequisite failure. The
+existing base fonts remain usable for synthetic tests and non-fitted paths;
+the upfront optional-pack prerequisite is required only to guarantee the
+fitted-layout behaviour of FR-2026-08-27-03.
+
+PaddleOCR retains ownership of its normal local model cache and download
+behaviour. The bootstrap exists only to pre-trigger that behaviour; it shall
+not create a second model cache, lock model bytes, or alter PaddleOCR's cache
+configuration. Adding a PaddleOCR language shall add one initialization step
+to the bootstrap command.
+
+The user-facing document-processing and OCR-evaluation scripts shall call one
+small shared helper before starting work. The helper shall check the fitted
+layout's optional packs and, when PaddleOCR is selected, whether the bootstrap
+has been run successfully. It shall report all missing selected prerequisites
+with a concise instruction to run the bootstrap command. `scripts/run.sh` and
+`scripts/run.ps1` shall remain unchanged.
+
+### Rationale
+
+Downloading fonts or OCR models while a document is being processed causes
+late, network-dependent failures. A small explicit setup step makes those
+downloads happen at a convenient time without turning the wrappers or the
+normal processing path into an asset-management system.
+
+### Notes
+
+The optional-font cache shall use the platform's normal per-user cache location
+so multiple repository checkouts share it. Its location may be configurable by
+an explicit environment variable. PaddleOCR models retain the default local
+cache required by FR-2026-08-01-02, which is likewise shared independently of
+the checkout. A small success marker may sit beside the optional font cache; it
+shall not contain source document content, paths, text, credentials, or
+translation responses.
+
+The source and licence for each optional Noto pack shall be recorded beside the
+font mapping. The project deliberately trusts the selected official Noto source
+for this convenience feature; it does not require a separate artifact manifest,
+download-size check, or checksum verification process.
+
+Automated tests shall mock the downloads and PaddleOCR initialization. They
+shall verify the bootstrap invokes every selected font and existing PaddleOCR
+language, the fitted-layout font-cache prerequisite fails before processing,
+the folder-replacement summary names the missing font and bootstrap command,
+the successful marker is recognized, and the wrappers remain unchanged.
+
+---
+
+## FR-2026-08-27-05
+
+| Property | Value |
+|----------|-------|
+| Title | Support multi-face portable fallback segments in fitted document text |
+| Owner | |
+| Status | Proposed |
+| Source | User request following portable-font fallback review |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-10, FR-2026-08-27-02, FR-2026-08-27-03, FR-2026-08-27-04, FR-2026-08-27-07, FR-2026-08-27-09 |
+
+### Description
+
+The shared fitted-text model shall support one replacement run being represented
+by ordered output segments, each with an approved portable Noto face. This is
+a core document-text-layout feature for both `preserve-basic-layout` and
+`preserve-basic-layout-source-font`; it is not a PDF-only feature.
+
+When no one approved portable face covers an entire replacement, the shared
+layout path shall deterministically select covering faces for contiguous output
+segments, then measure, wrap, and fit those segments together as one text box.
+It shall not split a grapheme cluster, use a host-installed font, download a
+font while processing, or substitute an unrelated glyph. Source-font mode
+shall retain FR-2026-08-27-02's independent source-measurement rule; this
+requirement changes only portable output selection and fitting.
+
+The first implementation shall support left-to-right horizontal replacement
+text only. It shall cover the approved English, Danish, French, Spanish, and
+Japanese target-language set. A replacement containing a strong right-to-left
+character or a bidirectional formatting control shall use the existing safe
+unsupported outcome rather than approximate bidi layout. Vertical text and
+full bidi layout remain later extensions. For this first implementation,
+segment choice shall prefer the run's normal broad-classification base Noto
+face, then Noto Sans Math, then Noto Sans Symbols 2; adjacent segments using
+the same face shall be combined. If none covers a complete grapheme cluster,
+the applicable safe unsupported outcome shall apply.
+
+Every eligible format adapter shall serialize the selected segments using its
+native multi-run representation and retain its existing safety rules. In PDF,
+this includes switching the selected embedded font within generated text while
+retaining correct painting, glyph encoding, `/ToUnicode`, copy/search, and
+appearance behaviour. This requirement does not widen PDF eligibility or
+change the rules for unbounded PDF page-content or Form-XObject text.
+
+The fitted-run model refactor shall preserve the ordered segment representation
+defined here. Full bidi and vertical-layout behaviour shall be specified before
+those extensions are implemented.
+
+### Rationale
+
+PDF and the other supported native document formats can represent adjacent
+runs with different fonts. Modelling this once in the shared layout pipeline
+avoids inconsistent format-specific fallback decisions.
+
+### Notes
+
+Automated tests shall use synthetic mixed-script and symbol replacements. They
+shall verify deterministic segment selection, jointly fitted wrapping, valid
+output for each eligible adapter, and PDF visual and copy/search behaviour.
+
+---
+
+## FR-2026-08-27-06
+
+| Property | Value |
+|----------|-------|
+| Title | Write a per-document folder-replacement diagnostic report when work is ignored or unsupported |
+| Owner | |
+| Status | Implemented |
+| Source | User request following identity-provider regression diagnosis |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-27-03, FR-2026-08-27-05, FR-2026-08-27-09 |
+
+### Description
+
+For each source document with an unsupported file type, failed, or unsupported
+work, a debug-enabled run shall write one JSON sidecar beside that document's
+intended output path. `scripts/run_folder_replacement.py` shall enable this
+with an explicit `--debug` flag; ordinary runs shall not create diagnostic
+sidecars. `scripts/run_development_folder_replacement.py` shall always pass
+`--debug` to each scenario. A file excluded by `--include` is intentional run
+selection and shall be counted as ignored without producing a diagnostic
+sidecar. Its name shall be the intended output filename followed by
+`.diagnostics.json`; for example, `report.pdf.diagnostics.json`. This avoids
+collisions between otherwise identically named source files with different
+extensions. A document with no reportable issue need not have a sidecar. The
+final terminal summary shall state how many diagnostic sidecars were written
+and their output root.
+
+Each sidecar shall contain the run options, per-document totals, and entries
+for every reportable ignored, failed, or unsupported item in that document. Entries shall
+provide a stable reason code, useful exception or fallback detail, and relevant
+location and font-selection information. For an unsupported portable-font
+cluster, this includes its container kind and the candidate fallback faces
+considered for that cluster, and the
+uncovered Unicode characters and code points. A PDF visual-text unsupported
+entry shall begin with the original extracted region text and the complete
+replacement text returned by the plugin, followed by the other diagnostic
+fields. It shall include a page-user-space top-left anchor for the region, not
+a full quadrilateral. This makes it clear whether an unsupported character was
+already in the source or was introduced by the replacement, and lets a
+developer find the retained region on the stated page. The diagnostic sidecar
+is local output alongside the converted document and may contain the
+document-specific data needed to debug that conversion. The development
+scenario manifest shall list the sidecars generated for each scenario; it
+shall not copy their contents into the manifest.
+
+For fitted PDF page visual text, FR-2026-08-27-03's safe unsupported
+outcome shall leave only the affected region unchanged, record one unsupported
+entry, and allow the rest of that input document and the remaining folder to
+continue. It shall not fail the complete PDF solely because a replacement
+cluster is not covered or uses unsupported bidi or vertical layout. Other
+format adapters retain their existing failure behaviour until their
+format-specific safe-container handling is implemented under FR-2026-08-27-09.
+
+### Rationale
+
+The identity provider reveals the exact source characters, whereas masking
+output may not. A companion report makes fallback and selection problems
+debuggable without making a local development run depend on terminal output.
+
+### Notes
+
+Reports derived from confidential samples remain local evaluation artifacts and
+must not be staged, committed, uploaded, or quoted. Automated tests shall use
+synthetic files and verify sidecar naming and content for ignored files,
+ordinary file failures, and unsupported portable-font output.
+
+---
+
+## FR-2026-08-27-07
+
+| Property | Value |
+|----------|-------|
+| Title | Add portable Noto Math fallback for editable scientific notation |
+| Owner | |
+| Status | Implemented |
+| Source | User request for scientific-document mathematical text coverage |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-27-03, FR-2026-08-27-04, FR-2026-08-27-05, FR-2026-08-27-06 |
+
+### Description
+
+FR-2026-08-27-07 extends the approved optional portable-font mapping with
+Noto Sans Math Regular from the official `notofonts/math` release, licensed
+under SIL OFL 1.1. It shall be downloaded by the existing bootstrap command to
+the existing shared user font cache, remain outside Git, and be required by
+the same fitted-layout preflight as Noto Sans Symbols 2. The project shall not
+download it on demand while processing a document.
+
+For left-to-right horizontal editable text in either fitted layout mode, the
+shared portable selection shall try the normal broad-classification base Noto
+face, then Noto Sans Math, then Noto Sans Symbols 2. It shall select and fit
+ordered grapheme-safe segments as defined by FR-2026-08-27-05. Noto Sans Math
+shall be embedded or referenced through each eligible adapter's existing
+portable multi-run output path, including PDF glyph encoding and `/ToUnicode`.
+It shall not be treated as synthetic bold or italic when a matching static
+math face is not supplied.
+
+This adds coverage for editable Unicode mathematical notation, including the
+Mathematical Alphanumeric Symbols block (for example `U+1D436`). It does not
+recognize, edit, or reconstruct equations that are raster images, vector
+outlines, or non-text equation objects; their existing OCR/vector safety rules
+remain unchanged. Unsupported mathematical text still follows the existing
+safe unsupported outcome and diagnostic reporting.
+
+FR-2026-08-27-07 extends the portable-font mapping used by the related
+requirements; its base-to-math-to-symbol selection order is controlling where
+those requirements refer to portable fallback selection.
+
+### Rationale
+
+Scientific documents commonly encode mathematical letters as Unicode text
+rather than ordinary Latin characters. The existing base and Symbols 2 faces
+do not cover every such character, while a single explicitly approved math
+face is much smaller and simpler than a generic font-discovery system.
+
+### Notes
+
+Automated tests shall use synthetic editable mathematical text. They shall
+verify bootstrap/preflight handling, deterministic base-to-math-to-symbol
+selection, the `U+1D436` regression, and valid PDF output with correct
+copy/search mapping. Tests shall also verify that an unsupported mathematical
+character retains its container and diagnostic behaviour.
+
+---
+
+## FR-2026-08-27-08
+
+| Property | Value |
+|----------|-------|
+| Title | Diagnose safely retained native PDF text in debug runs |
+| Owner | |
+| Status | Implemented |
+| Source | User request following review of unmasked PDF text |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-10, FR-2026-08-27-06 |
+
+### Description
+
+In a `--debug` folder-replacement run using either fitted layout mode, the PDF
+adapter shall add a `retained` diagnostic entry whenever it safely leaves a
+non-empty native PDF text showing operation or visual text region unchanged
+because it is not eligible for replacement. This is distinct from an
+`unsupported` entry: it records that the adapter did not attempt replacement,
+rather than that portable output coverage rejected replacement text.
+
+Each entry shall give a stable reason code and page number. When the source
+text can be decoded safely, it shall begin with `source_text`; otherwise it
+shall state that the source text was undecodable. It shall identify whether
+the retained container is page content or a Form XObject, include the relevant
+text-showing operator or visual-region eligibility detail, and include the
+page-user-space top-left location when it is known. It shall not call the text
+replacement provider solely to populate a retained entry, and shall not
+diagnose non-text drawing operations, raster text, or vector outlines as
+native PDF text.
+
+The implementation shall report common safe-retention reasons including an
+undecodable source encoding, missing or unsafe placement information,
+ineligible text rendering mode, marked content with `/ActualText`, and a
+visual region that cannot safely be reconstructed. Related operations shall be
+reported as one retained entry where that is possible; the report shall not
+emit one entry per glyph.
+
+### Rationale
+
+Visible source text can remain in a converted PDF for deliberate safety
+reasons. A debug sidecar should make that distinction reviewable without
+changing the conservative PDF-editing rules or misleading a reviewer into
+thinking that the replacement provider was invoked.
+
+### Notes
+
+Automated tests shall use synthetic PDFs for each retained reason and verify
+that normal runs remain silent, debug runs report the reason and safely decoded
+source text where available, and no additional replacement-provider call is
+made for retained content.
+
+---
+
+## FR-2026-08-27-09
+
+| Property | Value |
+|----------|-------|
+| Title | Safely retain unsupported fitted text in non-page and non-PDF containers |
+| Owner | |
+| Status | Proposed |
+| Source | Requirement split from FR-2026-08-27-03 after PDF page-text implementation |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-27-02, FR-2026-08-27-03, FR-2026-08-27-05, FR-2026-08-27-06, FR-2026-08-27-07 |
+
+### Description
+
+For either fitted layout mode, a portable-font coverage or supported-layout
+failure for one eligible text container shall leave only that container
+unchanged and allow the remainder of the document and folder run to continue.
+This requirement applies to PDF FreeText annotations and AcroForm fields, and
+to eligible editable text containers in the DOCX, PPTX, XLSX, SVG, EMF, and
+WMF adapters. It does not widen the existing eligibility or safety rules for
+those formats.
+
+The affected adapter shall use the shared base-to-math-to-symbol portable
+selection defined by FR-2026-08-27-05 and FR-2026-08-27-07. If no approved face
+covers a complete replacement grapheme cluster, or the replacement requires
+unsupported bidirectional or vertical layout, it shall retain that container
+rather than fail the complete document, substitute an unrelated glyph, or use
+the ASCII masking fallback. Existing source-font measurement and independent
+source-font output rules remain unchanged.
+
+In a debug-enabled run, the adapter shall add one `unsupported` diagnostic entry
+under FR-2026-08-27-06 for each retained container. Where available, the entry
+shall begin with `source_text` and `replacement_text`, then identify the
+container kind and its document location (for example page, slide, sheet, part,
+or object). It shall include the uncovered characters and code points and the
+candidate portable faces considered. The diagnostic path shall not invoke the
+replacement provider again merely to populate the report. Normal runs remain
+silent except for the existing end-of-run missing-font guidance.
+
+The adapter shall serialize successfully selected multi-face segments using its
+native representation, as required by FR-2026-08-27-05, before applying this
+container-level recovery. Raster images, vector outlines, and ineligible
+non-text drawing operations remain governed by their current OCR and vector
+safety rules; this requirement does not attempt to recognize, reconstruct, or
+replace them.
+
+### Rationale
+
+Fitted PDF page visual text already has safe, region-level recovery. Other
+editable text containers should have the same failure isolation without
+claiming that all document formats already implement it.
+
+### Notes
+
+Automated tests shall use synthetic documents for every affected adapter. They
+shall verify that one unsupported container does not fail the document, eligible
+neighbouring containers are still replaced, the unchanged container remains
+valid in the output, and debug diagnostics identify it without a repeated
+replacement-provider call.
