@@ -1670,8 +1670,8 @@ class FolderReplacementTests(unittest.TestCase):
             type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
             self.assertIsNotNone(type_zero.get("/ToUnicode"))
 
-    # Verifies FR-2026-08-24-02.
-    def test_basic_layout_pdf_retains_marked_content_with_actual_text(self) -> None:
+    # Verifies FR-2026-08-24-02 and FR-2026-08-28-04.
+    def test_basic_layout_pdf_replaces_a_text_only_actual_text_scope(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
@@ -1692,15 +1692,70 @@ class FolderReplacementTests(unittest.TestCase):
                 document_text_layout="preserve-basic-layout",
             )
 
-            self.assertEqual(1, result.replaced_native_text_items)
-            self.assertEqual(["replaceable"], [
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(["protected", "replaceable"], [
                 request.text for request in provider.requests if not request.is_filename
             ])
             output = PdfReader(output_root / "document.pdf")
+            self.assertNotIn("protected", output.pages[0].extract_text())
+            self.assertNotIn("alternate", output.pages[0].extract_text())
+            self.assertIn("replacement", output.pages[0].extract_text())
             stream = ContentStream(output.pages[0].get_contents(), output)
             self.assertTrue(any(
-                operator == b"Tj" and operands and str(operands[0]) == "protected"
+                operator == b"BDC" and len(operands) >= 2
+                and isinstance(operands[1], DictionaryObject)
+                and "/ActualText" not in operands[1]
                 for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-28-04.
+    def test_basic_layout_pdf_rewrites_only_the_replaced_actual_text_invocation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(150, 100)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Properties"): DictionaryObject({
+                    NameObject("/Shared"): DictionaryObject({
+                        NameObject("/ActualText"): TextStringObject("alternate"),
+                    }),
+                }),
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 10 Td /Span /Shared BDC (replaceable) Tj EMC "
+                b"0 -20 Td /Span /Shared BDC /Artifact BMC (retained) Tj EMC EMC ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="replacement"),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            shared_scopes = [
+                operands for operands, operator in stream.operations
+                if operator == b"BDC" and len(operands) >= 2
+            ]
+            self.assertIsInstance(shared_scopes[0][1], DictionaryObject)
+            self.assertNotIn("/ActualText", shared_scopes[0][1])
+            self.assertEqual("/Shared", str(shared_scopes[1][1]))
+            resources = cast(DictionaryObject, output.pages[0].get("/Resources"))
+            properties = cast(DictionaryObject, resources.get("/Properties"))
+            shared_property = cast(DictionaryObject, properties.get("/Shared"))
+            self.assertEqual("alternate", str(shared_property.get("/ActualText")))
+            diagnostic = json.loads((output_root / "document.pdf.diagnostics.json").read_text())
+            self.assertTrue(any(
+                entry.get("reason_code") == "pdf_text_marked_content_actual_text"
+                for entry in diagnostic["entries"]
             ))
 
     # Verifies FR-2026-08-23-02 and FR-2026-08-24-02.

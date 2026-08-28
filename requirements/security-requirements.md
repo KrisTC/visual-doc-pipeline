@@ -9,7 +9,7 @@
 | Property | Value |
 |----------|-------|
 | Title | |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | |
 | Date Added | YYYY-MM-DD |
@@ -34,7 +34,7 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 | Property | Value |
 |----------|-------|
 | Title | Dependency cooldown and source-build prevention |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -59,7 +59,7 @@ uv enforces the cooldown through `exclude-newer = "7 days"` and prevents source-
 | Property | Value |
 |----------|-------|
 | Title | Approved registry exceptions and artifact verification |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request to make non-default registry controls reusable |
 | Date Added | 2026-08-21 |
@@ -94,7 +94,7 @@ The artifact-approval and verified-installation workflows shall use `tqdm` byte-
 | Property | Value |
 |----------|-------|
 | Title | Official Paddle CUDA wheel registry exception |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User-approved exception for opportunistic NVIDIA GPU OCR acceleration |
 | Date Added | 2026-08-21 |
@@ -123,7 +123,7 @@ The existing seven-day artifact cooldown remains mandatory for every PyPI-source
 | Property | Value |
 |----------|-------|
 | Title | Do not dereference external resources from vector graphics |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -148,7 +148,7 @@ An SVG `data:` URI is self-contained data, not an external resource, and is perm
 | Property | Value |
 |----------|-------|
 | Title | Google Cloud Translation credentials and remote-data boundary |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-24 |
@@ -187,7 +187,7 @@ Automated tests shall use synthetic configuration values and mocked Google clien
 | Property | Value |
 |----------|-------|
 | Title | Secure local persistence of opt-in provider-result caches |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-27 |

@@ -9,7 +9,7 @@
 | Property | Value |
 |----------|-------|
 | Title | |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | |
 | Date Added | YYYY-MM-DD |
@@ -34,7 +34,7 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 | Property | Value |
 |----------|-------|
 | Title | Prepare OCR-evaluation image inputs |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -77,7 +77,7 @@ The output hierarchy shall continue to mirror the eligible source hierarchy. The
 | Property | Value |
 |----------|-------|
 | Title | Pluggable OCR-provider API |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -126,7 +126,7 @@ For every non-skipped rotated case, the contract test shall verify that the prov
 | Property | Value |
 |----------|-------|
 | Title | PaddleOCR Windows and accelerator runtime support |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following Windows PaddleOCR runtime failure |
 | Date Added | 2026-08-21 |
@@ -157,7 +157,7 @@ Automated tests shall mock Paddle runtime availability and engine behavior to ve
 | Property | Value |
 |----------|-------|
 | Title | Generate manual OCR-evaluation results and viewer |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -192,7 +192,7 @@ Each provider root shall contain a checksum representing its complete evaluation
 | Property | Value |
 |----------|-------|
 | Title | Report OCR-evaluation progress |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -217,7 +217,7 @@ Images directly in a language-code directory shall be represented by that langua
 | Property | Value |
 |----------|-------|
 | Title | Present OCR text regions in the evaluation viewer |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -242,7 +242,7 @@ The viewer shall retain the input and black-masked comparison images above the t
 | Property | Value |
 |----------|-------|
 | Title | Render OCR-evaluation progress with tqdm |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -267,7 +267,7 @@ The command shall render one folder bar at a time, labelled with the folder. It 
 | Property | Value |
 |----------|-------|
 | Title | Show OCR confidence in the evaluation viewer |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -292,7 +292,7 @@ Confidence shall be a narrow third column in the existing one-row-per-detected-r
 | Property | Value |
 |----------|-------|
 | Title | Prepare OCR-evaluation inputs before evaluation |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -317,7 +317,7 @@ The command shall invoke preparation internally with `sample-data/` as its sourc
 | Property | Value |
 |----------|-------|
 | Title | Pluggable text-replacement API |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -350,7 +350,7 @@ The test suite shall include generic model, factory, and response-shape contract
 | Property | Value |
 |----------|-------|
 | Title | Include context and clip-local coordinates in OCR-evaluation text clips |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -381,7 +381,7 @@ The field shall be named `padded_image_path`. It shall be a POSIX-style path rel
 | Property | Value |
 |----------|-------|
 | Title | Handle cached OCR-evaluation artifacts after output-format changes |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | Implementation review |
 | Date Added | 2026-08-02 |
@@ -406,7 +406,7 @@ The evaluator-artifact format version shall be incremented whenever a change wou
 | Property | Value |
 |----------|-------|
 | Title | Estimate, document, and evaluate OCR text-region colours |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -463,7 +463,7 @@ The initial implementation may use Pillow and NumPy. Adding OpenCV requires a se
 | Property | Value |
 |----------|-------|
 | Title | Render replacement text into OCR regions with Skia |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -510,7 +510,7 @@ Automated tests shall use synthetic images and fonts only; they shall not use sa
 | Property | Value |
 |----------|-------|
 | Title | Add deterministic text-replacement test providers |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -541,7 +541,7 @@ The providers shall have provider-owned behavioural tests and continue to partic
 | Property | Value |
 |----------|-------|
 | Title | Generate text-replacement artifacts within OCR evaluations |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-02 |
@@ -582,7 +582,7 @@ Automated tests shall create synthetic OCR inputs, registered local test provide
 | Property | Value |
 |----------|-------|
 | Title | Package OCR and text-replacement providers in name-derived directories |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -623,7 +623,7 @@ Factory tests shall verify that package-directory names determine provider names
 | Property | Value |
 |----------|-------|
 | Title | Use separate background and text passes for complete replacement images |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -658,7 +658,7 @@ Automated tests shall use synthetic adjacent OCR regions and verify both explici
 | Property | Value |
 |----------|-------|
 | Title | Process a folder of documents and bitmap images for visible-text replacement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -701,7 +701,7 @@ No source or output content may be sent to external services. The selected provi
 | Property | Value |
 |----------|-------|
 | Title | Flatten transparent raster images for OCR using the source page or slide background |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-27 |
@@ -728,7 +728,7 @@ The scope is limited to preparing raster pixels for OCR. It does not require gen
 | Property | Value |
 |----------|-------|
 | Title | Report folder-replacement progress |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -755,7 +755,7 @@ The progress bar shall show its current native-text or embedded-image work item 
 | Property | Value |
 |----------|-------|
 | Title | Replace editable text in embedded vector graphics directly |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | Implementation diagnosis |
 | Date Added | 2026-08-03 |
@@ -790,7 +790,7 @@ A renderer that requires a commercial license shall not be used in evaluation mo
 | Property | Value |
 |----------|-------|
 | Title | Comment on unsupported images in Office documents |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -815,7 +815,7 @@ Before implementation, define which conditions create a comment (for example, a 
 | Property | Value |
 |----------|-------|
 | Title | Select native document-text layout-preservation mode |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -857,7 +857,7 @@ Automated tests shall use synthetic documents and fonts only. They shall verify 
 | Property | Value |
 |----------|-------|
 | Title | Preserve OOXML markup-compatibility namespace bindings |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | Implementation diagnosis |
 | Date Added | 2026-08-03 |
@@ -882,7 +882,7 @@ The implementation shall use only synthetic OOXML package data in automated test
 | Property | Value |
 |----------|-------|
 | Title | Replace raster DIBs embedded in EMF graphics |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -911,7 +911,7 @@ Automated tests shall use a synthetic EMF containing a DIB payload. They shall v
 | Property | Value |
 |----------|-------|
 | Title | Separate vector format handlers and support standalone vector inputs |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -936,7 +936,7 @@ The existing shared bitmap handler remains the sole raster text-replacement impl
 | Property | Value |
 |----------|-------|
 | Title | Replace self-contained SVG raster images |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -961,7 +961,7 @@ Nested SVG, video, canvas, foreign-object content, malformed data URIs, and non-
 | Property | Value |
 |----------|-------|
 | Title | Replace self-contained WMF DIB bitmap records |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -986,7 +986,7 @@ The initial scope is `META_STRETCHDIB`. Other WMF bitmap records, compressed DIB
 | Property | Value |
 |----------|-------|
 | Title | Evaluate native text-element layout for preserve-basic-layout |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -1033,7 +1033,7 @@ Automated tests shall use synthetic documents only. They shall verify property e
 | Property | Value |
 |----------|-------|
 | Title | Apply preserve-basic-layout to bounded native document text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -1068,7 +1068,7 @@ Automated tests shall use synthetic documents and fonts only. They shall verify 
 | Property | Value |
 |----------|-------|
 | Title | Apply preserve-basic-layout to PPTX text frames |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -1097,7 +1097,7 @@ Automated tests shall build synthetic PPTX files with ordinary, placeholder, and
 | Property | Value |
 |----------|-------|
 | Title | Replace and fit PowerPoint table-cell text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
@@ -1124,7 +1124,7 @@ Automated tests shall use synthetic PPTX tables with ordinary cells and merged c
 | Property | Value |
 |----------|-------|
 | Title | Derive fit bounds for PowerPoint no-autofit text frames |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1157,7 +1157,7 @@ Automated tests shall use synthetic PPTX text frames with explicit `noAutofit` a
 | Property | Value |
 |----------|-------|
 | Title | Preview PowerPoint no-autofit derived fit bounds |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1186,7 +1186,7 @@ The evaluator may share or delegate to the existing bounded-text layout core rat
 | Property | Value |
 |----------|-------|
 | Title | Preserve PowerPoint no-autofit width and derive its natural text height |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User clarification |
 | Date Added | 2026-08-04 |
@@ -1217,7 +1217,7 @@ Automated tests shall use a synthetic no-autofit text frame whose source text ne
 | Property | Value |
 |----------|-------|
 | Title | Preserve source typeface references during best-effort PPTX fitting |
-| Owner | |
+| Owner | KrisTC |
 | Status | Superseded |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1236,7 +1236,7 @@ FR-2026-08-22-04.
 | Property | Value |
 |----------|-------|
 | Title | Select an empty OCR provider for local pipeline testing |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1267,7 +1267,7 @@ Automated tests shall use synthetic images and temporary folders. They shall ver
 | Property | Value |
 |----------|-------|
 | Title | Report actionable folder-replacement command-line errors |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1300,7 +1300,7 @@ Automated tests shall invoke the script as a subprocess with synthetic temporary
 | Property | Value |
 |----------|-------|
 | Title | Apply preserve-basic-layout to bounded vector, Word, and PDF text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1337,7 +1337,7 @@ Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. T
 | Property | Value |
 |----------|-------|
 | Title | Translate structured XLSX table headers safely |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1366,7 +1366,7 @@ Automated tests shall use synthetic workbooks containing tables, structured form
 | Property | Value |
 |----------|-------|
 | Title | Safely replace currently supported PDF text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request and implementation review |
 | Date Added | 2026-08-04 |
@@ -1404,7 +1404,7 @@ Automated tests shall use synthetic PDFs only. They shall cover Type0 `/ToUnicod
 | Property | Value |
 |----------|-------|
 | Title | Support complete Unicode replacement in unbounded PDF content |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | Implementation review |
 | Date Added | 2026-08-04 |
@@ -1429,7 +1429,7 @@ Automated tests shall use synthetic non-ASCII replacements and verify embedded f
 | Property | Value |
 |----------|-------|
 | Title | Configure Windows Paddle CUDA runtime environment |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-24 |
@@ -1466,7 +1466,7 @@ The `.env.local` file shall be added to `.gitignore` when this requirement is im
 | Property | Value |
 |----------|-------|
 | Title | Translate text and filenames with Google Cloud Translation |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-24 |
@@ -1507,7 +1507,7 @@ Provider-owned automated tests shall use synthetic text and filenames only. They
 | Property | Value |
 |----------|-------|
 | Title | Configure and verify Google Cloud Translation credentials |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-24 |
@@ -1542,7 +1542,7 @@ Automated tests shall use temporary synthetic credential files and a mocked Goog
 | Property | Value |
 |----------|-------|
 | Title | Replace editable SmartArt and WordArt text in PPTX files |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request and local output diagnosis |
 | Date Added | 2026-08-04 |
@@ -1573,7 +1573,7 @@ Automated tests shall use synthetic PPTX files only. They shall include a SmartA
 | Property | Value |
 |----------|-------|
 | Title | Translate text and filenames with Argos Translate |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1610,7 +1610,7 @@ Provider-owned behavioural tests shall use synthetic text and filename cases wit
 | Property | Value |
 |----------|-------|
 | Title | Replace PowerPoint speaker-note text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1637,7 +1637,7 @@ Automated tests shall create a synthetic PPTX package with a speaker-note part a
 | Property | Value |
 |----------|-------|
 | Title | Report native text-replacement evaluation progress |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-04 |
@@ -1662,7 +1662,7 @@ PowerPoint temporary lock files remain ineligible and shall not contribute to a 
 | Property | Value |
 |----------|-------|
 | Title | Preserve advanced PPTX text styling during fitted replacement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User clarification and local output diagnosis |
 | Date Added | 2026-08-05 |
@@ -1738,7 +1738,7 @@ rewriting generated diagram shapes. Tests must use synthetic data only.
 | Property | Value |
 |----------|-------|
 | Title | Run repeatable preset folder-replacement development scenarios |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -1837,7 +1837,7 @@ workflow.
 | Property | Value |
 |----------|-------|
 | Title | Filter folder-replacement input files by glob pattern |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -1881,7 +1881,7 @@ zero-match runs.
 | Property | Value |
 |----------|-------|
 | Title | Produce Word-repair-free DOCX output when embedding fitted fonts |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | Word compatibility diagnosis |
 | Date Added | 2026-08-22 |
@@ -1998,7 +1998,7 @@ replaces, deterministic automated package validation.
 | Property | Value |
 |----------|-------|
 | Title | Measure source-font fitted layout with the best verified source face |
-| Owner | |
+| Owner | KrisTC |
 | Status | Superseded |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2027,7 +2027,7 @@ applicable where they do not conflict with FR-2026-08-27-02.
 | Property | Value |
 |----------|-------|
 | Title | Use embedded DOCX source fonts for source-font layout measurement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2079,7 +2079,7 @@ glyphs fall back without corrupting or expanding the existing font parts.
 | Property | Value |
 |----------|-------|
 | Title | Use embedded PPTX source fonts for source-font layout measurement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2124,7 +2124,7 @@ content.
 | Property | Value |
 |----------|-------|
 | Title | Use embedded PDF source fonts for source-font layout measurement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Deferred |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2170,7 +2170,7 @@ filesystem access, and valid output appearances.
 | Property | Value |
 |----------|-------|
 | Title | Use embedded SVG source fonts for source-font layout measurement |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2211,7 +2211,7 @@ available.
 | Property | Value |
 |----------|-------|
 | Title | Preview source-font fitted layout in the native-text evaluator |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2283,7 +2283,7 @@ fonts installed on the test host.
 | Property | Value |
 |----------|-------|
 | Title | Resolve PPTX theme typeface aliases for source-font fitting |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request and source-font evaluation diagnosis |
 | Date Added | 2026-08-22 |
@@ -2348,7 +2348,7 @@ written output, and no dependency on fonts installed on the test host.
 | Property | Value |
 |----------|-------|
 | Title | Resolve DOCX theme fonts for source-font fitting |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2401,7 +2401,7 @@ fallbacks, and unchanged serialized source references.
 | Property | Value |
 |----------|-------|
 | Title | Resolve XLSX workbook theme fonts for source-font fitting |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2452,7 +2452,7 @@ unchanged source style references.
 | Property | Value |
 |----------|-------|
 | Title | Resolve SVG CSS font inheritance and stacks for source-font fitting |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-22 |
@@ -2507,7 +2507,7 @@ external reference is opened.
 | Property | Value |
 |----------|-------|
 | Title | Fit replacement text in inferred PDF visual text regions |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following PDF layout review |
 | Date Added | 2026-08-23 |
@@ -2655,7 +2655,7 @@ renderer.
 | Property | Value |
 |----------|-------|
 | Title | Preserve PDF text paint state when fitting visual regions |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF layout evaluation |
 | Date Added | 2026-08-23 |
@@ -2709,7 +2709,7 @@ independent PDF renderer.
 | Property | Value |
 |----------|-------|
 | Title | Use fill-only portable replacement for fill-and-stroke PDF text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF layout evaluation |
 | Date Added | 2026-08-23 |
@@ -2760,7 +2760,7 @@ and verify that both regions are replaced without a reset text matrix.
 | Property | Value |
 |----------|-------|
 | Title | Use Type0 CID width tables for PDF visual-region geometry |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following PDF measurement review |
 | Date Added | 2026-08-23 |
@@ -2805,7 +2805,7 @@ mapping shall take the documented fallback without emitting an invented CID.
 | Property | Value |
 |----------|-------|
 | Title | Preserve PDF text positioning across undecodable source text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF layout evaluation |
 | Date Added | 2026-08-23 |
@@ -2860,7 +2860,7 @@ unknown code-to-CID mapping retains the conservative barrier.
 | Property | Value |
 |----------|-------|
 | Title | Recover Unicode from embedded Identity CID fonts when `/ToUnicode` is incomplete |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF text-replacement evaluation |
 | Date Added | 2026-08-23 |
@@ -2935,7 +2935,7 @@ eligible operation.
 | Property | Value |
 |----------|-------|
 | Title | Reliably decode Type0 PDF text when high-level decoding yields whitespace |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF text-replacement evaluation |
 | Date Added | 2026-08-24 |
@@ -2984,7 +2984,7 @@ independent PDF renderer.
 | Property | Value |
 |----------|-------|
 | Title | Make fitted replacement text authoritative for PDF copy and search |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following native-PDF text-replacement evaluation |
 | Date Added | 2026-08-24 |
@@ -3048,7 +3048,7 @@ PDF text extractor and visual behavior with an independent PDF renderer.
 | Property | Value |
 |----------|-------|
 | Title | Apply the PPTX source-font fitted-layout interpretation consistently across document formats |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following cross-format layout review |
 | Date Added | 2026-08-27 |
@@ -3128,7 +3128,7 @@ visual, encoding, copy/search, and appearance validation.
 | Property | Value |
 |----------|-------|
 | Title | Provide portable Noto fallback coverage for fitted PDF page visual text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | Implementation review following Google Cloud Translation run |
 | Date Added | 2026-08-27 |
@@ -3201,7 +3201,7 @@ for an unapproved target language or an uncovered character.
 | Property | Value |
 |----------|-------|
 | Title | Bootstrap optional font packs and PaddleOCR models before processing |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following runtime-asset review |
 | Date Added | 2026-08-27 |
@@ -3297,7 +3297,7 @@ the successful marker is recognized, and the wrappers remain unchanged.
 | Property | Value |
 |----------|-------|
 | Title | Support multi-face portable fallback segments in fitted document text |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request following portable-font fallback review |
 | Date Added | 2026-08-27 |
@@ -3359,7 +3359,7 @@ output for each eligible adapter, and PDF visual and copy/search behaviour.
 | Property | Value |
 |----------|-------|
 | Title | Write a per-document folder-replacement diagnostic report when work is ignored or unsupported |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following identity-provider regression diagnosis |
 | Date Added | 2026-08-27 |
@@ -3427,7 +3427,7 @@ ordinary file failures, and unsupported portable-font output.
 | Property | Value |
 |----------|-------|
 | Title | Add portable Noto Math fallback for editable scientific notation |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request for scientific-document mathematical text coverage |
 | Date Added | 2026-08-27 |
@@ -3484,7 +3484,7 @@ character retains its container and diagnostic behaviour.
 | Property | Value |
 |----------|-------|
 | Title | Diagnose safely retained native PDF text in debug runs |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following review of unmasked PDF text |
 | Date Added | 2026-08-27 |
@@ -3537,7 +3537,7 @@ made for retained content.
 | Property | Value |
 |----------|-------|
 | Title | Safely retain unsupported fitted text in non-page and non-PDF containers |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | Requirement split from FR-2026-08-27-03 after PDF page-text implementation |
 | Date Added | 2026-08-27 |
@@ -3598,7 +3598,7 @@ replacement-provider call.
 | Property | Value |
 |----------|-------|
 | Title | Transparently cache OCR and text-replacement provider results beside source files |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-27 |
@@ -3702,7 +3702,7 @@ failures.
 | Property | Value |
 |----------|-------|
 | Title | Reuse one provider-cache SQLite connection for each source file |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request and performance diagnosis |
 | Date Added | 2026-08-27 |
@@ -3768,7 +3768,7 @@ form-pass, and embedded-image progress units and labels.
 | Property | Value |
 |----------|-------|
 | Title | Reuse Google Cloud Translation client within a provider instance |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following PDF native-text performance diagnosis |
 | Date Added | 2026-08-28 |
@@ -3820,7 +3820,7 @@ contents behaviour.
 | Property | Value |
 |----------|-------|
 | Title | Preserve underlying provider names in cache-aware diagnostics |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-28 |
@@ -3860,7 +3860,7 @@ configuration.
 | Property | Value |
 |----------|-------|
 | Title | Record safe structured context for folder-replacement file failures |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request following insufficient Word failure diagnostics |
 | Date Added | 2026-08-28 |
@@ -3915,3 +3915,137 @@ an embedded-image failure entry, the expected safe request metadata and
 document-local location, the absence of request text and chained exception
 messages, document-level atomic failure, and continuation to the next source
 file.
+
+---
+
+## FR-2026-08-28-04
+
+| Property | Value |
+|----------|-------|
+| Title | Replace fully covered PDF text marked with alternate text |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following review of retained native PDF text |
+| Date Added | 2026-08-28 |
+| Related Requirements | FR-2026-08-24-02, FR-2026-08-27-08 |
+
+### Description
+
+For fitted PDF replacement, a `/ActualText` marked-content scope shall not by
+itself make otherwise eligible source text ineligible. The adapter shall
+replace the visible text and remove that scope's `/ActualText` value when all
+text-showing operations in the scope are successfully replaced and the scope
+contains no nested marked content or non-text content whose semantics could
+depend on `/ActualText`. The generated replacement text and its existing
+`/ToUnicode` mapping shall then be the authoritative text for extraction,
+selection, copy, search, and accessibility.
+
+The adapter shall remove `/ActualText` only from the particular `BDC`
+invocation being replaced. It shall not mutate a shared named Properties
+resource, because another marked-content invocation may use that resource and
+remain unchanged.
+
+If any text operation in the scope is unsupported, undecodable, or otherwise
+not replaced, or the scope has nested marked content or other semantic content,
+the adapter shall retain every text operation in that scope unchanged. A debug
+run shall record the retained result using the existing marked-content
+`/ActualText` reason code.
+
+### Rationale
+
+`/ActualText` is a hidden semantic label. Leaving it unchanged after a visible
+replacement can expose the original text through copy, search, or assistive
+technology. Removing it from a fully replaced, text-only scope makes the
+replacement's Unicode mapping authoritative without risking an unrelated
+marked-content use of the same shared property resource.
+
+### Notes
+
+Automated tests shall use synthetic PDFs. They shall verify replacement and
+extraction of a text-only `/ActualText` scope; preservation of another
+invocation that shares the original named Properties resource; and retention
+of a scope with a nested marked-content operation or a source operation that
+cannot be replaced.
+
+---
+
+## FR-2026-08-29-01
+
+| Property | Value |
+|----------|-------|
+| Title | OCR-replace outlined PDF vector text without rasterizing the page |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request following review of OCR-detectable outlined PDF text |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-04-09, FR-2026-08-27-08 |
+
+### Description
+
+For a PDF page, the folder-replacement pipeline shall additionally process
+visible text that is painted as vector drawing operations rather than as a
+native PDF text-showing operation or an embedded raster image. It shall do so
+by rendering the relevant vector-painted page content to an in-memory raster
+image, passing that image through the selected existing OCR provider, and
+using the resulting OCR polygons to draw background wipes and replacement text
+back into the original PDF page coordinate system.
+
+The pipeline shall retain the original PDF page's vector and raster content.
+It shall not flatten or rasterize an entire output page. Each successful
+replacement shall cover only its detected OCR region and write replacement
+text using the existing PDF portable-font output path. The source vector
+outlines have no authoritative text semantics; the inserted replacement text
+shall be selectable and extractable through its existing PDF Unicode mapping.
+
+The vector-content OCR pass shall not reprocess text that the PDF adapter has
+already handled as native editable text or as an embedded raster image. A
+region shall be eligible only when it is visible in the rendered vector
+content, meets the existing normalized OCR-confidence threshold, can be mapped
+to a finite non-degenerate page-space polygon, and has a safe estimated
+background for a local wipe. It shall retain a region unchanged when these
+conditions are not met or when the replacement cannot be rendered with the
+existing portable-font policy.
+
+The selected OCR provider, replacement provider, source and target languages,
+and existing text-region colour estimation and rendering behaviour shall apply
+to eligible vector-content OCR regions. The `preserve-basic-layout-source-font`
+mode shall use the existing portable fallback for this path because vector
+outlines do not identify a reusable source font.
+
+In a debug-enabled run, the diagnostic sidecar shall record one safe summary
+per PDF page that receives the vector-content OCR pass. The summary shall give
+the page number and counts for OCR-detected, confidence-rejected,
+replacement-written, and safely-retained regions, together with stable reason
+codes for any retained categories. It shall not contain OCR text, replacement
+text, image pixels, raw OCR polygons, or rendered-page artefacts.
+
+### Rationale
+
+Some PDF producers convert visibly clear text into drawing paths. That text is
+neither a PDF text operation nor an embedded bitmap, so the current native
+text and embedded-image paths cannot reach it even when the selected OCR
+provider recognizes a raster rendering with high confidence. A localized
+render-and-overlay path closes this gap while preserving the rest of the page
+as PDF content.
+
+### Notes
+
+This feature needs a separately approved local PDF rendering-engine decision,
+including its supported platforms, rendering resolution, dependency policy,
+and security review, before implementation. It must not send rendered pages or
+OCR inputs to a remote service beyond the selected provider's already approved
+data boundary.
+
+The render pass must preserve enough of the PDF graphics state to identify
+visible vector content, including clipping, transforms, opacity, and overlap.
+It must not use a rendered whole-page image as the output page, and it must not
+apply an OCR replacement twice where native-text or embedded-bitmap processing
+already owns the visible source content.
+
+Automated tests shall use synthetic PDFs only. They shall include high-contrast
+outlined text over a uniform background, nearby native editable text, and a
+nearby embedded raster image. They shall verify that only the outlined text is
+replaced, the page retains vector content outside replacement wipes, the
+generated replacement is extractable, a low-confidence or unsafe-background
+case is retained, and debug diagnostics contain only the specified safe
+metadata.

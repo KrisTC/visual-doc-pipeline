@@ -11,7 +11,7 @@
 | Property | Value |
 |----------|-------|
 | Title | |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | |
 | Date Added | YYYY-MM-DD |
@@ -36,7 +36,7 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 | Property | Value |
 |----------|-------|
 | Title | Dependency policy validation remains dependency-agnostic |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-26 |
@@ -61,7 +61,7 @@ The checker validates metadata relationships. The verified-installation workflow
 | Property | Value |
 |----------|-------|
 | Title | Python dependency management uses uv |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -86,7 +86,7 @@ Dependencies shall be declared in `pyproject.toml`, locked in `uv.lock`, and ins
 | Property | Value |
 |----------|-------|
 | Title | Python libraries for document-file processing |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -111,7 +111,7 @@ The initial document libraries are `pypdf` (PDF), `python-pptx` (PowerPoint), `p
 | Property | Value |
 |----------|-------|
 | Title | Centralised test suite and runner |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -144,7 +144,7 @@ FR-2026-08-24-03 supersedes this requirement's direct `uv run` invocation: each 
 | Property | Value |
 |----------|-------|
 | Title | Strict Python type checking |
-| Owner | |
+| Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
@@ -171,7 +171,7 @@ The mypy configuration is stored in `pyproject.toml`, the dependency is locked i
 | Property | Value |
 |----------|-------|
 | Title | Isolate folder-processor format handlers and shared helpers |
-| Owner | |
+| Owner | KrisTC |
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |

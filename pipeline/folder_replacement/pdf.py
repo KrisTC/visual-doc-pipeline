@@ -697,6 +697,17 @@ class _PdfShownText:
     text_rendering_mode: int
 
 
+@dataclass(slots=True)
+class _PdfActualTextScope:
+    """One marked-content scope whose alternate text must be kept coherent."""
+
+    begin_operation_index: int
+    text_operation_indexes: set[int]
+    source_text_by_operation: dict[int, str]
+    location_by_operation: dict[int, dict[str, object]]
+    has_ambiguous_content: bool = False
+
+
 @dataclass(frozen=True, slots=True)
 class _PdfVisualRegion:
     """A safely replaceable visual line or paragraph-like block."""
@@ -715,6 +726,14 @@ class _PdfVisualRegion:
     insertion_index: int
     ctm: tuple[float, float, float, float, float, float]
     anchor: _PdfShownText
+
+
+_PDF_ACTUAL_TEXT_TEXT_ONLY_OPERATORS = frozenset({
+    b"BT", b"ET", b"Tf", b"Tm", b"Td", b"TD", b"T*", b"TL", b"Tc", b"Tw",
+    b"Tz", b"Ts", b"Tr", b"Tj", b"TJ", b"'", b'"', b"q", b"Q", b"cm", b"gs",
+    b"w", b"J", b"j", b"M", b"d", b"ri", b"i", b"g", b"G", b"rg", b"RG",
+    b"k", b"K", b"cs", b"CS", b"sc", b"SC", b"scn", b"SCN", b"BMC", b"BDC", b"EMC",
+})
 
 
 def _replace_pdf_fitted_operations(
@@ -758,14 +777,35 @@ def _replace_pdf_fitted_operations(
     graphics_stack: list[tuple[float, float, float, float, float, float]] = []
     graphics_context = 0
     barrier = 0
-    marked_content_actual_text: list[bool] = []
+    marked_content_actual_text: list[int | None] = []
+    actual_text_scopes: dict[int, _PdfActualTextScope] = {}
 
     for index, (operands, operator) in enumerate(operations):
+        active_actual_text_scopes = tuple(
+            scope_index for scope_index in marked_content_actual_text
+            if scope_index is not None
+        )
+        if (
+            active_actual_text_scopes
+            and operator not in _PDF_ACTUAL_TEXT_TEXT_ONLY_OPERATORS
+        ):
+            for scope_index in active_actual_text_scopes:
+                actual_text_scopes[scope_index].has_ambiguous_content = True
         if operator == b"BMC":
-            marked_content_actual_text.append(False)
+            for scope_index in active_actual_text_scopes:
+                actual_text_scopes[scope_index].has_ambiguous_content = True
+            marked_content_actual_text.append(None)
             continue
         if operator == b"BDC":
-            marked_content_actual_text.append(_pdf_marked_content_has_actual_text(operands, properties))
+            for scope_index in active_actual_text_scopes:
+                actual_text_scopes[scope_index].has_ambiguous_content = True
+            marked_scope_index: int | None = None
+            if _pdf_marked_content_has_actual_text(operands, properties):
+                marked_scope_index = index
+                actual_text_scopes[marked_scope_index] = _PdfActualTextScope(
+                    index, set(), {}, {}
+                )
+            marked_content_actual_text.append(marked_scope_index)
             graphics_context += 1
             continue
         if operator == b"EMC":
@@ -889,6 +929,9 @@ def _replace_pdf_fitted_operations(
         else:
             continue
 
+        for scope_index in active_actual_text_scopes:
+            actual_text_scopes[scope_index].text_operation_indexes.add(index)
+
         if text_rendering_mode not in {0, 2}:
             _record_pdf_retained_diagnostic(
                 diagnostics,
@@ -986,43 +1029,54 @@ def _replace_pdf_fitted_operations(
             continue
         direction, normal, effective_size, horizontal_stretch = placement
         text_matrix_after = _pdf_translate_matrix(text_matrix, advance, 0.0)
-        if any(marked_content_actual_text):
-            _record_pdf_retained_diagnostic(
-                diagnostics,
-                page_index,
-                container_kind,
-                "pdf_text_marked_content_actual_text",
-                operator,
-                "".join(text for text, _start, _end in chunks),
-                _pdf_diagnostic_text_location(
-                    text_matrix, ctm, current_font, horizontal_scale, text_rise
-                ),
-                "Marked content supplies /ActualText and is retained to preserve its semantics.",
+        source_text = "".join(text for text, _start, _end in chunks)
+        location = _pdf_diagnostic_text_location(
+            text_matrix, ctm, current_font, horizontal_scale, text_rise
+        )
+        for scope_index in active_actual_text_scopes:
+            scope = actual_text_scopes[scope_index]
+            scope.source_text_by_operation[index] = source_text
+            if location is not None:
+                scope.location_by_operation[index] = location
+        for text, start_advance, end_advance in chunks:
+            start = _pdf_transform_point(
+                ctm, _pdf_transform_point(text_matrix, (start_advance, text_rise))
             )
-        else:
-            for text, start_advance, end_advance in chunks:
-                start = _pdf_transform_point(
-                    ctm, _pdf_transform_point(text_matrix, (start_advance, text_rise))
-                )
-                end = _pdf_transform_point(
-                    ctm, _pdf_transform_point(text_matrix, (end_advance, text_rise))
-                )
-                shown.append(_PdfShownText(
-                    index, text_object_index, text, start, end, direction, normal,
-                    horizontal_stretch, effective_size, graphics_context + barrier, ctm, line_matrix,
-                    text_matrix_after, current_font, character_spacing, word_spacing,
-                    horizontal_scale, text_rise, text_rendering_mode,
-                ))
+            end = _pdf_transform_point(
+                ctm, _pdf_transform_point(text_matrix, (end_advance, text_rise))
+            )
+            shown.append(_PdfShownText(
+                index, text_object_index, text, start, end, direction, normal,
+                horizontal_stretch, effective_size, graphics_context + barrier, ctm, line_matrix,
+                text_matrix_after, current_font, character_spacing, word_spacing,
+                horizontal_scale, text_rise, text_rendering_mode,
+            ))
         # PDF advances are in text space.  The text matrix applies the
         # placement transform exactly once when deriving the next position.
         text_matrix = text_matrix_after
 
     candidate_regions = _pdf_visual_regions(shown, text_object_ends)
+
+    def record_retained_actual_text_scope(scope: _PdfActualTextScope) -> None:
+        first_operation_index = min(scope.text_operation_indexes)
+        _record_pdf_retained_diagnostic(
+            diagnostics,
+            page_index,
+            container_kind,
+            "pdf_text_marked_content_actual_text",
+            operations[first_operation_index][1],
+            "".join(scope.source_text_by_operation.get(index, "") for index in sorted(scope.text_operation_indexes)) or None,
+            scope.location_by_operation.get(first_operation_index),
+            "Marked content supplies /ActualText and cannot be safely updated as a complete text-only scope.",
+        )
+
     if not candidate_regions:
+        for scope in actual_text_scopes.values():
+            if scope.text_operation_indexes:
+                record_retained_actual_text_scope(scope)
         return 0
 
-    source_removals: set[int] = set()
-    replacements_by_anchor: dict[int, list[list[tuple[list[object], bytes]]]] = {}
+    prepared_replacements: list[tuple[_PdfVisualRegion, list[tuple[list[object], bytes]]]] = []
     for region in candidate_regions:
         try:
             replacement = _pdf_fitted_region_operations(
@@ -1078,6 +1132,69 @@ def _replace_pdf_fitted_operations(
                 "The visual text region cannot be safely reconstructed for replacement.",
             )
             continue
+        prepared_replacements.append((region, replacement))
+
+    if not prepared_replacements:
+        for scope in actual_text_scopes.values():
+            if scope.text_operation_indexes:
+                record_retained_actual_text_scope(scope)
+        return 0
+
+    actual_text_scopes_by_operation: dict[int, set[int]] = {}
+    for scope_index, scope in actual_text_scopes.items():
+        for operation_index in scope.text_operation_indexes:
+            actual_text_scopes_by_operation.setdefault(operation_index, set()).add(scope_index)
+
+    def scopes_for_region(region: _PdfVisualRegion) -> set[int]:
+        return set().union(
+            *(actual_text_scopes_by_operation.get(index, set()) for index in region.operation_indexes)
+        )
+
+    def safely_rewritable_scope_indexes(
+        permitted_operations: set[int],
+    ) -> set[int]:
+        return {
+            scope_index
+            for scope_index, scope in actual_text_scopes.items()
+            if (
+                scope.text_operation_indexes
+                and not scope.has_ambiguous_content
+                and scope.text_operation_indexes <= permitted_operations
+                and _pdf_without_actual_text(operations[scope.begin_operation_index][0], properties)
+                is not None
+            )
+        }
+
+    successful_operations = {
+        operation_index
+        for region, _replacement in prepared_replacements
+        for operation_index in region.operation_indexes
+    }
+    safe_actual_text_scopes = safely_rewritable_scope_indexes(successful_operations)
+    while True:
+        permitted_replacements = [
+            (region, replacement)
+            for region, replacement in prepared_replacements
+            if scopes_for_region(region) <= safe_actual_text_scopes
+        ]
+        permitted_operations = {
+            operation_index
+            for region, _replacement in permitted_replacements
+            for operation_index in region.operation_indexes
+        }
+        next_safe_actual_text_scopes = safely_rewritable_scope_indexes(permitted_operations)
+        if next_safe_actual_text_scopes == safe_actual_text_scopes:
+            break
+        safe_actual_text_scopes = next_safe_actual_text_scopes
+
+    for scope_index, scope in actual_text_scopes.items():
+        if scope_index in safe_actual_text_scopes or not scope.text_operation_indexes:
+            continue
+        record_retained_actual_text_scope(scope)
+
+    source_removals: set[int] = set()
+    replacements_by_anchor: dict[int, list[list[tuple[list[object], bytes]]]] = {}
+    for region, replacement in permitted_replacements:
         for operation_index in region.operation_indexes:
             # The fitted output restores the source text position with a
             # numeric TJ adjustment after it is painted.  Dropping the source
@@ -1092,7 +1209,13 @@ def _replace_pdf_fitted_operations(
     updated: list[tuple[list[object], bytes]] = []
     replaced_items = 0
     for index, operation in enumerate(operations):
-        if index not in source_removals:
+        operands, operator = operation
+        if index in safe_actual_text_scopes:
+            rewritten_operands = _pdf_without_actual_text(operands, properties)
+            if rewritten_operands is None:
+                raise ValueError("A validated PDF /ActualText property could not be rewritten.")
+            updated.append((rewritten_operands, operator))
+        elif index not in source_removals:
             updated.append(operation)
         for replacement in replacements_by_anchor.get(index, ()):
             updated.extend(replacement)
@@ -1111,6 +1234,32 @@ def _pdf_marked_content_has_actual_text(operands: list[object], properties: dict
     get_object = getattr(property_value, "get_object", None)
     dictionary = get_object() if callable(get_object) else property_value
     return isinstance(dictionary, DictionaryObject) and dictionary.get("/ActualText") is not None
+
+
+def _pdf_without_actual_text(
+    operands: list[object], properties: dict[str, object]
+) -> list[object] | None:
+    """Return one BDC operand list with its local alternate-text value removed.
+
+    A named Properties entry may be shared by several BDC invocations.  Emit a
+    direct copy instead of mutating that shared dictionary, so only the scope
+    whose source text is replaced loses its stale semantic text.
+    """
+    if len(operands) < 2:
+        return None
+    property_value = operands[1]
+    if isinstance(property_value, NameObject):
+        property_value = properties.get(str(property_value))
+    get_object = getattr(property_value, "get_object", None)
+    dictionary = get_object() if callable(get_object) else property_value
+    if not isinstance(dictionary, DictionaryObject) or dictionary.get("/ActualText") is None:
+        return None
+    rewritten_property = DictionaryObject({
+        NameObject(str(key)): value
+        for key, value in dictionary.items()
+        if str(key) != "/ActualText"
+    })
+    return [*operands[:1], rewritten_property, *operands[2:]]
 
 
 def _pdf_diagnostic_source_text(
