@@ -34,6 +34,7 @@ from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
 )
+from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.ocr import OcrProvider
 from pipeline.portable_fonts import static_noto_font
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
@@ -64,13 +65,15 @@ def replace_xlsx_file(
     typeface: skia.Typeface,
     completed: Callable[[str], None],
     document_text_layout: str = "preserve-source-formatting",
+    failure_context: FailureContext | None = None,
 ) -> tuple[int, int, int]:
     """Replace XLSX cells without rewriting unrelated workbook package parts."""
     from pipeline.folder_replacement.processor import _replace_office_file
 
     if document_text_layout == "preserve-source-formatting":
         return _replace_office_file(
-            source, destination, ocr, replacement, source_language, target_language, typeface, completed
+            source, destination, ocr, replacement, source_language, target_language, typeface, completed,
+            failure_context=failure_context,
         )
     if document_text_layout not in {
         "preserve-basic-layout",
@@ -87,6 +90,7 @@ def replace_xlsx_file(
         typeface,
         completed,
         skip_native_xml_part=_is_custom_xlsx_part,
+        failure_context=failure_context,
     )
     native_items += _replace_xlsx_cells(
         destination,
@@ -97,6 +101,7 @@ def replace_xlsx_file(
         # the source reference while the shared fitter supplies its size.
         preserve_source_font_family=True,
         measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+        failure_context=failure_context,
     )
     completed("native text layout")
     return native_items, image_regions, retained_vectors
@@ -119,8 +124,15 @@ def _replace_xlsx_cells(
     *,
     preserve_source_font_family: bool,
     measure_source_fonts: bool,
+    failure_context: FailureContext | None = None,
 ) -> int:
     """Fit explicitly bounded cells and retain all unknown package parts byte-for-byte."""
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="xlsx_fitted_layout_read",
+            container_kind="xlsx_document",
+            operation="read",
+        )
     with ZipFile(path) as archive:
         entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
     parts = {entry.filename: data for entry, data in entries}
@@ -134,6 +146,13 @@ def _replace_xlsx_cells(
     for name, data in parts.items():
         if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
             continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="xlsx_fitted_layout",
+                container_kind="xlsx_worksheet",
+                operation="text_replacement",
+                package_part=name,
+            )
         updated, count = _replace_worksheet(
             data,
             shared_strings,
@@ -151,6 +170,13 @@ def _replace_xlsx_cells(
     for name, data in parts.items():
         if not name.startswith("xl/drawings/") or not name.endswith(".xml"):
             continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="xlsx_fitted_layout",
+                container_kind="xlsx_drawing",
+                operation="text_replacement",
+                package_part=name,
+            )
         updated, count = _replace_drawing(
             data, replacement, source_language, target_language, typefaces,
             preserve_source_font_family, measure_source_fonts, theme,
@@ -164,7 +190,20 @@ def _replace_xlsx_cells(
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         for entry, data in entries:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="xlsx_fitted_layout_write",
+                    container_kind="xlsx_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
             archive.writestr(entry, changed_parts.get(entry.filename, data))
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="xlsx_fitted_layout_write",
+            container_kind="xlsx_document",
+            operation="write",
+        )
     path.write_bytes(output.getvalue())
     return replacements
 

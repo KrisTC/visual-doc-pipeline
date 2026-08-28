@@ -72,6 +72,13 @@ class _CountingOcrProvider(_EmptyOcrProvider):
         return OcrResult(())
 
 
+class _FailingOcrProvider(_EmptyOcrProvider):
+    def recognize(self, request: OcrRequest) -> OcrResult:
+        raise RuntimeError("Synthetic OCR failed.") from ValueError(
+            "Synthetic OCR chained detail must not be recorded."
+        )
+
+
 class _LowConfidenceOcrProvider(_EmptyOcrProvider):
     def recognize(self, request: OcrRequest) -> OcrResult:
         return OcrResult(
@@ -105,6 +112,16 @@ class _RecordingReplacementProvider:
         if request.is_filename:
             return TextReplacementResult(request.text, 1.0)
         return TextReplacementResult(self.replacement_text or "#" * len(request.text), 1.0)
+
+
+class _FailingReplacementProvider(_RecordingReplacementProvider):
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        self.requests.append(request)
+        if request.is_filename:
+            return TextReplacementResult(request.text, 1.0)
+        raise RuntimeError("Synthetic text replacement failed.") from ValueError(
+            "Synthetic chained detail must not be recorded."
+        )
 
 
 class _RecordedProgress:
@@ -1209,6 +1226,113 @@ class FolderReplacementTests(unittest.TestCase):
             )
             self.assertFalse(any(not request.is_filename for request in provider.requests))
             self.assertIn("broken.png", failure_output.getvalue())
+
+    # Verifies FR-2026-08-28-03.
+    def test_word_failure_records_safe_native_text_context_and_continues(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            with ZipFile(input_root / "document.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    """<?xml version="1.0"?>
+                    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+                      <w:body><w:p><w:r><w:t>synthetic request text</w:t></w:r></w:p></w:body>
+                    </w:document>""",
+                )
+            self._write_png(input_root / "good.png")
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _FailingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.failed_files)
+            self.assertEqual(1, result.processed_files)
+            self.assertFalse((output_root / "document.docx").exists())
+            self.assertTrue((output_root / "good.png").exists())
+            diagnostic = json.loads(
+                (output_root / "document.docx.diagnostics.json").read_text(encoding="utf-8")
+            )
+            entry = diagnostic["entries"][0]
+            self.assertEqual("RuntimeError", entry["exception_type"])
+            self.assertEqual(["ValueError"], entry["exception_cause_types"])
+            self.assertEqual(
+                {
+                    "stage": "native_xml",
+                    "container_kind": "office_xml",
+                    "operation": "text_replacement",
+                    "location": {"package_part": "word/document.xml"},
+                    "request": {
+                        "kind": "text_replacement",
+                        "source_language": "en",
+                        "target_language": "en",
+                        "is_filename": False,
+                        "input_character_count": 22,
+                    },
+                },
+                entry["failure_context"],
+            )
+            serialized = json.dumps(diagnostic)
+            self.assertNotIn("synthetic request text", serialized)
+            self.assertNotIn("Synthetic chained detail", serialized)
+
+    # Verifies FR-2026-08-28-03.
+    def test_word_embedded_image_failure_records_safe_ocr_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            image_bytes = BytesIO()
+            Image.new("RGB", (7, 5), (16, 32, 48)).save(image_bytes, format="PNG")
+            with ZipFile(input_root / "document.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    """<?xml version="1.0"?>
+                    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>""",
+                )
+                archive.writestr("word/media/image1.png", image_bytes.getvalue())
+
+            result = self._run(
+                input_root,
+                output_root,
+                _FailingOcrProvider(),
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.failed_files)
+            entry = json.loads(
+                (output_root / "document.docx.diagnostics.json").read_text(encoding="utf-8")
+            )["entries"][0]
+            self.assertEqual("RuntimeError", entry["exception_type"])
+            self.assertEqual(["ValueError"], entry["exception_cause_types"])
+            self.assertEqual(
+                {
+                    "stage": "embedded_bitmap",
+                    "container_kind": "embedded_bitmap",
+                    "operation": "ocr",
+                    "location": {
+                        "package_part": "word/media/image1.png",
+                        "item_index": 1,
+                    },
+                    "request": {
+                        "kind": "ocr",
+                        "language": "en",
+                        "image_width": 7,
+                        "image_height": 5,
+                        "image_mode": "RGB",
+                    },
+                },
+                entry["failure_context"],
+            )
+            self.assertNotIn("Synthetic OCR chained detail", json.dumps(entry))
 
     # Verifies FR-2026-08-03-03.
     def test_replaces_native_pdf_text_content(self) -> None:

@@ -3812,3 +3812,106 @@ ordinary replacement calls, no initialization for empty or same-language calls,
 fresh configuration for a new provider instance, initialization retry after a
 construction failure, and unchanged endpoint, error-sanitization, and request
 contents behaviour.
+
+---
+
+## FR-2026-08-28-02
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve underlying provider names in cache-aware diagnostics |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-28 |
+| Related Requirements | FR-2026-08-27-10, FR-2026-08-27-06 |
+
+### Description
+
+Folder-replacement diagnostic sidecars shall identify a caching-proxy provider
+by its wrapped provider's concrete type name followed by ` (cached)`. For
+example, a cached `PaddleOcrProvider` shall be recorded as
+`PaddleOcrProvider (cached)`, and a cached `GoogleCloudTranslateProvider` as
+`GoogleCloudTranslateProvider (cached)`. An unwrapped provider shall retain the
+existing concrete type-name value.
+
+The label shall report only the wrapper state and underlying provider type. It
+shall not expose cache paths, cache keys, request text, provider configuration,
+credential information, or implementation-object representations.
+
+### Rationale
+
+Transparent cache proxies should not obscure which OCR or replacement provider
+actually processed a document. Retaining the existing name and explicitly
+showing cache use makes diagnostic sidecars accurate and readable.
+
+### Notes
+
+The label may be supplied by a shared provider-diagnostic naming helper or a
+small proxy interface; the folder processor shall not need to know individual
+plugin classes. Automated tests shall use synthetic providers and verify cached
+and unwrapped diagnostic labels without using a source document or provider
+configuration.
+
+---
+
+## FR-2026-08-28-03
+
+| Property | Value |
+|----------|-------|
+| Title | Record safe structured context for folder-replacement file failures |
+| Owner | |
+| Status | Implemented |
+| Source | User request following insufficient Word failure diagnostics |
+| Date Added | 2026-08-28 |
+| Related Requirements | FR-2026-08-27-06, FR-2026-08-27-09, SR-2026-08-24-01 |
+
+### Description
+
+For a debug-enabled folder-replacement run, a `file_processing_failed`
+diagnostic entry shall retain the existing exception type and safe detail, and
+shall add the last known structured failure context. The context shall identify
+the processing stage, container kind, operation, and document-local location
+when known. The Office handlers shall identify package parts for native XML,
+embedded bitmap, and embedded vector work; their fitted-layout paths shall at
+least identify the document-local part, slide, worksheet, or document-layout
+phase that was active.
+
+When the failed operation invokes OCR, the context shall record the request
+language and source image width, height, and mode. When it invokes text
+replacement, it shall record the source and target languages, whether the
+request is for a filename, and the input character count. The sidecar shall
+also retain the per-document totals accumulated before failure. It shall not
+record raw replacement text, OCR text, image pixels, cache keys or paths,
+provider configuration, credentials, credential paths, API responses, or a
+raw traceback or chained-exception message. Exception-cause information may be
+recorded as exception type names only.
+
+The existing file-atomic behaviour remains unchanged. A failure escaping an
+Office handler shall discard its temporary output and stop processing the
+remainder of that document, while the folder run continues with later source
+files. A malformed individual XML part that an existing adapter already
+retains unchanged shall continue to be non-fatal. Per-container continuation
+after other OCR, replacement, or layout failures is outside this requirement
+and remains governed by the format-specific safe-container work of
+FR-2026-08-27-09.
+
+### Rationale
+
+An exception type alone does not reveal whether a failure occurred while
+selecting an output filename, replacing native document text, OCRing an
+embedded image, or writing an output package. Request metadata and a
+document-local location make a local sidecar actionable without copying the
+document's text or weakening the Google credential and remote-data boundary.
+
+### Notes
+
+The new fields are additive to the existing sidecar schema so existing local
+consumers can continue to read their required fields. Reports derived from
+confidential samples remain local evaluation artifacts and must not be staged,
+committed, uploaded, or quoted. Automated tests shall use synthetic Office
+documents and failing synthetic providers. They shall verify a native-text and
+an embedded-image failure entry, the expected safe request metadata and
+document-local location, the absence of request text and chained exception
+messages, document-level atomic failure, and continuation to the next source
+file.

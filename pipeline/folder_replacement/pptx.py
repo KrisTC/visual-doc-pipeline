@@ -42,6 +42,7 @@ from pipeline.folder_replacement.office_xml import (
     replace_drawing_diagram_xml_text,
     replace_office_xml_text,
 )
+from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -105,10 +106,17 @@ def replace_pptx_file(
     typeface: skia.Typeface,
     completed: Callable[[str], None],
     document_text_layout: str = "preserve-source-formatting",
+    failure_context: FailureContext | None = None,
 ) -> tuple[int, int, int]:
     """Replace PPTX content, optionally fitting bounded slide text frames."""
     from pipeline.folder_replacement.processor import _replace_office_file
 
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="pptx_package_analysis",
+            container_kind="pptx_document",
+            operation="read",
+        )
     smartart_parts, smartart_data_parts = _reachable_smartart_parts(source)
     ocr_backgrounds = _pptx_ocr_backgrounds(source)
     if document_text_layout == "preserve-source-formatting":
@@ -123,6 +131,7 @@ def replace_pptx_file(
             completed,
             skip_native_xml_part=smartart_parts.__contains__,
             ocr_backgrounds=ocr_backgrounds,
+            failure_context=failure_context,
         )
         native_items += _replace_smartart_data_parts(
             destination,
@@ -130,6 +139,7 @@ def replace_pptx_file(
             replacement,
             source_language,
             target_language,
+            failure_context,
         )
         return native_items, image_regions, retained_vectors
     if document_text_layout not in {
@@ -153,6 +163,7 @@ def replace_pptx_file(
         completed,
         replace_native_xml=False,
         ocr_backgrounds=ocr_backgrounds,
+        failure_context=failure_context,
     )
     native_items += _replace_smartart_data_parts(
         destination,
@@ -160,10 +171,25 @@ def replace_pptx_file(
         replacement,
         source_language,
         target_language,
+        failure_context,
     )
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="pptx_fitted_layout_read",
+            container_kind="pptx_document",
+            operation="read",
+        )
     presentation = Presentation(str(destination))
     layout_typefaces = noto_typefaces()
     for slide_index, slide in enumerate(presentation.slides):
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="pptx_fitted_layout",
+                container_kind="pptx_slide",
+                operation="text_replacement",
+                package_part=f"ppt/slides/slide{slide_index + 1}.xml",
+                item_index=slide_index + 1,
+            )
         native_items += _replace_slide_text_frames(
             slide.shapes,
             slide.slide_layout,
@@ -174,12 +200,19 @@ def replace_pptx_file(
             preserve_source_font_family,
             slide_themes[slide_index] if slide_index < len(slide_themes) else None,
         )
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="pptx_fitted_layout_write",
+            container_kind="pptx_document",
+            operation="write",
+        )
     presentation.save(str(destination))
     native_items += _replace_speaker_note_parts(
         destination,
         replacement,
         source_language,
         target_language,
+        failure_context,
     )
     completed("native text layout")
     return native_items, image_regions, retained_vectors
@@ -324,10 +357,17 @@ def _replace_smartart_data_parts(
     replacement: TextReplacementProvider,
     source_language: str,
     target_language: str,
+    failure_context: FailureContext | None = None,
 ) -> int:
     """Replace only canonical SmartArt labels, not generated diagram drawings."""
     if not data_parts:
         return 0
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="pptx_smartart_read",
+            container_kind="pptx_document",
+            operation="read",
+        )
     temporary_path = presentation_path.with_name(f".{presentation_path.name}.smartart.tmp")
     replaced_items = 0
     try:
@@ -336,8 +376,22 @@ def _replace_smartart_data_parts(
             ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
         ):
             for entry in source_archive.infolist():
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="pptx_smartart_read",
+                        container_kind="pptx_package_part",
+                        operation="read",
+                        package_part=entry.filename,
+                    )
                 data = source_archive.read(entry.filename)
                 if entry.filename in data_parts:
+                    if failure_context is not None:
+                        failure_context.set_location(
+                            stage="pptx_smartart",
+                            container_kind="pptx_smartart_data",
+                            operation="text_replacement",
+                            package_part=entry.filename,
+                        )
                     data, replaced = replace_drawing_diagram_xml_text(
                         data,
                         replacement,
@@ -345,6 +399,13 @@ def _replace_smartart_data_parts(
                         target_language,
                     )
                     replaced_items += replaced
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="pptx_smartart_write",
+                        container_kind="pptx_package_part",
+                        operation="write",
+                        package_part=entry.filename,
+                    )
                 destination_archive.writestr(entry, data)
         os.replace(temporary_path, presentation_path)
     finally:
@@ -358,8 +419,15 @@ def _replace_speaker_note_parts(
     replacement: TextReplacementProvider,
     source_language: str,
     target_language: str,
+    failure_context: FailureContext | None = None,
 ) -> int:
     """Directly replace editable text in PPTX speaker-note slide parts."""
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="pptx_notes_read",
+            container_kind="pptx_document",
+            operation="read",
+        )
     with ZipFile(presentation_path) as archive:
         note_parts = frozenset(
             entry.filename for entry in archive.infolist() if _is_speaker_note_part(entry.filename)
@@ -375,12 +443,33 @@ def _replace_speaker_note_parts(
             ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
         ):
             for entry in source_archive.infolist():
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="pptx_notes_read",
+                        container_kind="pptx_package_part",
+                        operation="read",
+                        package_part=entry.filename,
+                    )
                 data = source_archive.read(entry.filename)
                 if entry.filename in note_parts:
+                    if failure_context is not None:
+                        failure_context.set_location(
+                            stage="pptx_speaker_notes",
+                            container_kind="pptx_speaker_notes",
+                            operation="text_replacement",
+                            package_part=entry.filename,
+                        )
                     data, replaced = replace_office_xml_text(
                         data, replacement, source_language, target_language
                     )
                     replaced_items += replaced
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="pptx_notes_write",
+                        container_kind="pptx_package_part",
+                        operation="write",
+                        package_part=entry.filename,
+                    )
                 destination_archive.writestr(entry, data)
         os.replace(temporary_path, presentation_path)
     finally:

@@ -25,6 +25,7 @@ from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
 )
+from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import RgbColour
 from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
@@ -68,9 +69,16 @@ def replace_docx_file(
     source: Path, destination: Path, ocr: OcrProvider, replacement: TextReplacementProvider,
     source_language: str, target_language: str, typeface: skia.Typeface,
     completed: Callable[[str], None], document_text_layout: str = "preserve-source-formatting",
+    failure_context: FailureContext | None = None,
 ) -> tuple[int, int, int]:
     """Fit Word DrawingML text boxes while retaining ordinary flow text behaviour."""
     from pipeline.folder_replacement.processor import _replace_office_file
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="docx_background_detection",
+            container_kind="docx_document",
+            operation="read",
+        )
     ocr_backgrounds = _docx_ocr_backgrounds(source)
     if document_text_layout == "preserve-source-formatting":
         return _replace_office_file(
@@ -83,16 +91,24 @@ def replace_docx_file(
             typeface,
             completed,
             ocr_backgrounds=ocr_backgrounds,
+            failure_context=failure_context,
         )
     native, images, vectors = _replace_office_file(
         source, destination, ocr, replacement, source_language, target_language, typeface,
         completed,
         skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
         ocr_backgrounds=ocr_backgrounds,
+        failure_context=failure_context,
     )
     native += _replace_docx_parts(destination, replacement, source_language, target_language,
-        document_text_layout == "preserve-basic-layout-source-font")
+        document_text_layout == "preserve-basic-layout-source-font", failure_context)
     if document_text_layout == "preserve-basic-layout":
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="docx_font_embedding",
+                container_kind="docx_document",
+                operation="write",
+            )
         _embed_docx_static_fonts(destination)
     completed("native text layout")
     return native, images, vectors
@@ -125,7 +141,20 @@ def _rgb_value(value: str | None) -> RgbColour | None:
         return None
 
 
-def _replace_docx_parts(path: Path, provider: TextReplacementProvider, source: str, target: str, preserve_font: bool) -> int:
+def _replace_docx_parts(
+    path: Path,
+    provider: TextReplacementProvider,
+    source: str,
+    target: str,
+    preserve_font: bool,
+    failure_context: FailureContext | None = None,
+) -> int:
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="docx_fitted_layout_read",
+            container_kind="docx_document",
+            operation="read",
+        )
     with ZipFile(path) as archive:
         entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
     changed: dict[str, bytes] = {}
@@ -135,13 +164,33 @@ def _replace_docx_parts(path: Path, provider: TextReplacementProvider, source: s
     for entry, data in entries:
         if not entry.filename.startswith("word/") or not entry.filename.endswith(".xml"):
             continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="docx_fitted_layout",
+                container_kind="docx_xml",
+                operation="text_replacement",
+                package_part=entry.filename,
+            )
         updated, changed_count = _replace_docx_xml(data, provider, source, target, faces, preserve_font, font_resolver)
         changed[entry.filename] = updated
         count += changed_count
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         for entry, data in entries:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="docx_fitted_layout_write",
+                    container_kind="docx_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
             archive.writestr(entry, changed.get(entry.filename, data))
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="docx_fitted_layout_write",
+            container_kind="docx_document",
+            operation="write",
+        )
     path.write_bytes(output.getvalue())
     return count
 

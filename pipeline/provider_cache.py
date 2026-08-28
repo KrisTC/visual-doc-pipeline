@@ -45,6 +45,13 @@ def is_cache_sidecar(path: Path) -> bool:
     )
 
 
+def provider_diagnostic_name(provider: object) -> str:
+    """Return a concise diagnostic label without exposing cache internals."""
+    if isinstance(provider, (CachingOcrProvider, CachingTextReplacementProvider)):
+        return f"{type(provider.wrapped_provider).__name__} (cached)"
+    return type(provider).__name__
+
+
 class _SourceCacheSession:
     """Own one lazily opened SQLite connection for a source-cache scope."""
 
@@ -138,6 +145,11 @@ class CachingOcrProvider:
         self._cache_identity = cache_identity
 
     @property
+    def wrapped_provider(self) -> OcrProvider:
+        """Return the provider whose normalized results this proxy caches."""
+        return self._provider
+
+    @property
     def supported_languages(self) -> frozenset[str]:
         return self._provider.supported_languages
 
@@ -172,6 +184,11 @@ class CachingTextReplacementProvider:
     def __init__(self, provider: TextReplacementProvider, cache_identity: str) -> None:
         self._provider = provider
         self._cache_identity = cache_identity
+
+    @property
+    def wrapped_provider(self) -> TextReplacementProvider:
+        """Return the provider whose normalized results this proxy caches."""
+        return self._provider
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Return a cached text-replacement result when available."""

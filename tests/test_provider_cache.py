@@ -14,7 +14,14 @@ from PIL import Image
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
-from pipeline.provider_cache import CACHE_FILENAME_SUFFIX, source_cache_scope
+from pipeline.folder_replacement.processor import _diagnostic_options
+from pipeline.provider_cache import (
+    CACHE_FILENAME_SUFFIX,
+    CachingOcrProvider,
+    CachingTextReplacementProvider,
+    provider_diagnostic_name,
+    source_cache_scope,
+)
 from pipeline.text_replacement.factory import TextReplacementProviderFactory
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 
@@ -100,6 +107,31 @@ class ProviderCacheTests(unittest.TestCase):
 
         with patch.dict("os.environ", {}, clear=True):
             self.assertIs(provider, factory.create("fake"))
+
+    # Verifies FR-2026-08-28-02.
+    def test_diagnostic_names_preserve_wrapped_provider_types(self) -> None:
+        ocr_provider = _RecordingOcrProvider()
+        text_provider = _RecordingTextProvider()
+
+        self.assertEqual("_RecordingOcrProvider", provider_diagnostic_name(ocr_provider))
+        self.assertEqual(
+            "_RecordingOcrProvider (cached)",
+            provider_diagnostic_name(CachingOcrProvider(ocr_provider, "fake:v1")),
+        )
+        self.assertEqual(
+            "_RecordingTextProvider (cached)",
+            provider_diagnostic_name(CachingTextReplacementProvider(text_provider, "fake:v1")),
+        )
+        options = _diagnostic_options(
+            "en",
+            "fr",
+            "preserve-source-formatting",
+            (),
+            CachingOcrProvider(ocr_provider, "fake:v1"),
+            CachingTextReplacementProvider(text_provider, "fake:v1"),
+        )
+        self.assertEqual("_RecordingOcrProvider (cached)", options["ocr_provider"])
+        self.assertEqual("_RecordingTextProvider (cached)", options["text_replacement_provider"])
 
     # Verifies SR-2026-08-27-01's malformed-cache recovery rule.
     def test_malformed_cached_result_is_ignored_and_replaced(self) -> None:

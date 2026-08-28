@@ -18,7 +18,13 @@ from tqdm import tqdm
 
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
-from pipeline.provider_cache import is_cache_sidecar, source_cache_scope
+from pipeline.folder_replacement.failure_diagnostics import (
+    ContextualOcrProvider,
+    ContextualTextReplacementProvider,
+    FailureContext,
+    exception_cause_types,
+)
+from pipeline.provider_cache import is_cache_sidecar, provider_diagnostic_name, source_cache_scope
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.vector_text import replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
@@ -148,6 +154,14 @@ def replace_input_folder(
             continue
         document_diagnostics: list[dict[str, object]] = []
         counts_before = _document_totals(result)
+        failure_context = FailureContext() if diagnostics_enabled else None
+        processing_ocr: OcrProvider = ocr_provider
+        processing_replacement: TextReplacementProvider = text_replacement_provider
+        if failure_context is not None:
+            processing_ocr = ContextualOcrProvider(ocr_provider, failure_context)
+            processing_replacement = ContextualTextReplacementProvider(
+                text_replacement_provider, failure_context
+            )
         cache_scope = source_cache_scope(source_path)
         cache_scope.__enter__()
         try:
@@ -161,11 +175,17 @@ def replace_input_folder(
                     progress.set_postfix_str(label)
                     progress.update()
 
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="output_filename",
+                    container_kind="source_filename",
+                    operation="text_replacement",
+                )
             destination = _destination_path(
                 input_root,
                 output_root,
                 source_path,
-                text_replacement_provider,
+                processing_replacement,
                 source_language,
                 target_language,
                 reserved_paths,
@@ -173,11 +193,17 @@ def replace_input_folder(
             destination.parent.mkdir(parents=True, exist_ok=True)
             temporary_destination = destination.with_name(f".{destination.name}.tmp")
             if extension in BITMAP_EXTENSIONS:
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="standalone_bitmap",
+                        container_kind="bitmap_file",
+                        operation="ocr",
+                    )
                 image_regions = _replace_bitmap_file(
                     source_path,
                     temporary_destination,
-                    ocr_provider,
-                    text_replacement_provider,
+                    processing_ocr,
+                    processing_replacement,
                     source_language,
                     target_language,
                     typeface,
@@ -185,23 +211,29 @@ def replace_input_folder(
                 result.replaced_image_regions += image_regions
                 work_completed("bitmap")
             elif extension in VECTOR_EXTENSIONS:
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="standalone_vector",
+                        container_kind="vector_graphic",
+                        operation="text_replacement",
+                    )
                 vector_result = replace_vector_text(
                     source_path.read_bytes(),
                     extension,
                     lambda text: _replace_native_text(
-                        text, text_replacement_provider, source_language, target_language
+                        text, processing_replacement, source_language, target_language
                     ),
                     source_language,
                     lambda image: _replace_image_text(
                         image,
-                        ocr_provider,
-                        text_replacement_provider,
+                        processing_ocr,
+                        processing_replacement,
                         source_language,
                         target_language,
                         typeface,
                     ),
                     document_text_layout=document_text_layout,
-                    replacement_provider=text_replacement_provider,
+                    replacement_provider=processing_replacement,
                     target_language=target_language,
                 )
                 temporary_destination.write_bytes(vector_result.data)
@@ -211,11 +243,17 @@ def replace_input_folder(
                     result.retained_vector_graphics += 1
                 work_completed("vector graphic")
             elif extension == ".pdf":
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="pdf_document",
+                        container_kind="pdf_document",
+                        operation="text_replacement",
+                    )
                 native_items, image_regions = replace_pdf_file(
                     source_path,
                     temporary_destination,
-                    ocr_provider,
-                    text_replacement_provider,
+                    processing_ocr,
+                    processing_replacement,
                     source_language,
                     target_language,
                     typeface,
@@ -234,13 +272,14 @@ def replace_input_folder(
                 native_items, image_regions, retained_vectors = office_handler(
                     source_path,
                     temporary_destination,
-                    ocr_provider,
-                    text_replacement_provider,
+                    processing_ocr,
+                    processing_replacement,
                     source_language,
                     target_language,
                     typeface,
                     work_completed,
                     document_text_layout=document_text_layout,
+                    failure_context=failure_context,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -258,8 +297,16 @@ def replace_input_folder(
                     "reason_code": "file_processing_failed",
                     "exception_type": type(error).__name__,
                     "detail": str(error),
+                    "failure_context": (
+                        failure_context.as_diagnostic()
+                        if failure_context is not None
+                        else {"stage": "document_setup"}
+                    ),
                 }
             )
+            cause_types = exception_cause_types(error)
+            if cause_types:
+                document_diagnostics[-1]["exception_cause_types"] = cause_types
             if diagnostics_enabled:
                 _write_document_diagnostic(
                     output_root,
@@ -319,8 +366,8 @@ def _diagnostic_options(
         "target_language": target_language,
         "document_text_layout": document_text_layout,
         "include_patterns": list(include_patterns),
-        "ocr_provider": type(ocr_provider).__name__,
-        "text_replacement_provider": type(text_replacement_provider).__name__,
+        "ocr_provider": provider_diagnostic_name(ocr_provider),
+        "text_replacement_provider": provider_diagnostic_name(text_replacement_provider),
     }
 
 
@@ -505,6 +552,7 @@ def _replace_office_file(
     replace_native_xml: bool = True,
     skip_native_xml_part: Callable[[str], bool] | None = None,
     ocr_backgrounds: Mapping[str, RgbColour] | None = None,
+    failure_context: FailureContext | None = None,
 ) -> tuple[int, int, int]:
     native_items = 0
     image_regions = 0
@@ -513,9 +561,24 @@ def _replace_office_file(
     retained_vectors = 0
     with ZipFile(source) as source_archive, ZipFile(destination, "w", ZIP_DEFLATED) as destination_archive:
         for entry in source_archive.infolist():
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="office_package_read",
+                    container_kind="office_package_part",
+                    operation="read",
+                    package_part=entry.filename,
+                )
             data = source_archive.read(entry.filename)
             if _is_office_bitmap_part(entry.filename):
                 embedded_image_index += 1
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="embedded_bitmap",
+                        container_kind="embedded_bitmap",
+                        operation="ocr",
+                        package_part=entry.filename,
+                        item_index=embedded_image_index,
+                    )
                 data, replaced = _replace_bitmap_bytes(
                     data,
                     ocr_provider,
@@ -531,6 +594,14 @@ def _replace_office_file(
                 work_completed(f"embedded image {embedded_image_index}")
             elif _is_office_vector_part(entry.filename):
                 vector_graphic_index += 1
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="embedded_vector",
+                        container_kind="embedded_vector",
+                        operation="text_replacement",
+                        package_part=entry.filename,
+                        item_index=vector_graphic_index,
+                    )
                 vector_result = replace_vector_text(
                     data,
                     Path(entry.filename).suffix,
@@ -559,10 +630,24 @@ def _replace_office_file(
                 and entry.filename.endswith(".xml")
                 and not (skip_native_xml_part and skip_native_xml_part(entry.filename))
             ):
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="native_xml",
+                        container_kind="office_xml",
+                        operation="text_replacement",
+                        package_part=entry.filename,
+                    )
                 data, replaced = replace_office_xml_text(
                     data, replacement_provider, source_language, target_language
                 )
                 native_items += replaced
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="office_package_write",
+                    container_kind="office_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
             destination_archive.writestr(entry, data)
     work_completed("native text")
     return native_items, image_regions, retained_vectors
