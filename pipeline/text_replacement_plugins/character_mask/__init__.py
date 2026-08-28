@@ -5,6 +5,11 @@ from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.text_replacement_plugins._masking import mask_non_whitespace_characters
 
 
+def cache_identity() -> str:
+    """Return the output-compatible implementation version for result caching."""
+    return "character_mask:v1"
+
+
 class CharacterMaskProvider:
     """Mask ordinary text while retaining filenames and Unicode whitespace unchanged."""
 

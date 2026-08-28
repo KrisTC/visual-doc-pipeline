@@ -16,5 +16,11 @@ __pycache__/
 # Local developer configuration, including provider credentials
 .env.local
 
+# Local source-adjacent provider-result caches
+*.plugin-cache.sqlite3
+*.plugin-cache.sqlite3-journal
+*.plugin-cache.sqlite3-shm
+*.plugin-cache.sqlite3-wal
+
 # MacOS
 .DS_Store

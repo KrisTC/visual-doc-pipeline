@@ -1088,6 +1088,44 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(2, progress_bars[0].updates)
             self.assertTrue(progress_bars[0].closed)
 
+    # Verifies FR-2026-08-27-11.
+    def test_reports_pdf_native_text_progress_for_each_page_and_form_pass(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(100, 100)
+            writer.add_blank_page(100, 100)
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+            progress_bars: list[_RecordedProgress] = []
+
+            def make_progress(total: int, label: str) -> ProgressReporter:
+                progress = _RecordedProgress(total, label)
+                progress_bars.append(progress)
+                return progress
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                show_progress=True,
+                progress_factory=make_progress,
+            )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(1, len(progress_bars))
+            self.assertEqual(3, progress_bars[0].total)
+            self.assertEqual(
+                ["native text page 1/2", "native text page 2/2", "native form fields"],
+                progress_bars[0].postfixes,
+            )
+            self.assertEqual(3, progress_bars[0].updates)
+
     # Verifies FR-2026-08-03-05.
     def test_replaces_editable_svg_vector_text_without_ocr(self) -> None:
         with TemporaryDirectory() as temporary_directory:

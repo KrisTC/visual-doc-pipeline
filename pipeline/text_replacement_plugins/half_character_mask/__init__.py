@@ -5,6 +5,11 @@ from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.text_replacement_plugins._masking import half_mask_non_whitespace_sequences
 
 
+def cache_identity() -> str:
+    """Return the output-compatible implementation version for result caching."""
+    return "half_character_mask:v1"
+
+
 class HalfCharacterMaskProvider:
     """Halve ordinary non-whitespace sequences while retaining whitespace unchanged."""
 

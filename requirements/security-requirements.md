@@ -181,3 +181,59 @@ The project shall provide a concise Google Cloud Translation setup guide. It sha
 Automated tests shall use synthetic configuration values and mocked Google clients. They shall verify that missing or invalid service-account credential configuration fails without secret disclosure, that API-key-only configuration is rejected without a network request, and that the local-evaluation path cannot invoke the remote provider.
 
 ---
+
+## SR-2026-08-27-01
+
+| Property | Value |
+|----------|-------|
+| Title | Secure local persistence of opt-in provider-result caches |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-27-10, FR-2026-08-24-04, SR-2026-08-24-01 |
+
+### Description
+
+The opt-in provider-result cache defined by FR-2026-08-27-10 may persist OCR
+text and normalized text-replacement results only in the cache sidecar adjacent
+to the source file that established its cache scope. It shall never persist
+credentials, credential paths, access tokens, authorization headers, remote API
+request or response objects, source/output paths as cache values, or diagnostic
+logs.
+
+Cache databases and their contents shall be treated as untrusted local input.
+The implementation shall use parameterized SQLite statements, bounded parsing,
+and strict normalized-model validation on every cache read. It shall not use
+pickle, dynamic code loading, object deserialization, or string interpolation
+to execute cache content. A missing, unreadable, locked, malformed, or corrupted
+cache shall not expose cached content in an error or log; processing shall
+continue with a normal provider call when that is safe to do so.
+
+Cache access shall be explicitly opt-in through `PIPELINE_PLUGIN_CACHE=1` in
+the process environment. Its absence or an unrecognized value shall be treated
+as disabled. The cache must be Git-ignored, and cache sidecars shall be excluded
+from source discovery so they cannot be accidentally treated as documents or
+copied to output. The repository's confidential-sample restrictions continue to
+apply: confidential cache sidecars and artifacts derived from them remain local,
+must not be staged, committed, uploaded, or disclosed.
+
+### Rationale
+
+Source-adjacent caching makes expensive OCR and translation reruns practical,
+but it deliberately retains text that may be sensitive. Explicit activation,
+safe data-only decoding, conservative error handling, and exclusion from source
+processing prevent that local optimization from becoming a new disclosure or
+code-execution path.
+
+### Notes
+
+This requirement permits the narrow local persistence exception for Google
+translation defined by FR-2026-08-27-10. It does not widen Google Cloud's remote
+data boundary, permit another authentication mechanism, or authorize caching
+raw Google API responses. Tests shall use synthetic cache data only and verify
+that corrupt or malicious-shaped records cannot construct arbitrary objects,
+that cache diagnostics contain no request text or secrets, and that source-cache
+files are ignored by discovery and Git.
+
+---

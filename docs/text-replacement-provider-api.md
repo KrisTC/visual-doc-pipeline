@@ -59,6 +59,16 @@ Use `extra` only for optional provider-specific information. No shared schema is
 
 The generic contract test checks only the stable result shape. Each provider must add behavioural tests with independently specified expected output; semantic validation is necessarily provider-specific for translation and other replacement tasks.
 
+## Optional result-cache identity
+
+When `PIPELINE_PLUGIN_CACHE=1` is set and a source-processing operation supplies
+a source-cache scope, the provider factory can wrap a plugin in a transparent
+result-cache proxy. A cacheable package exposes a no-argument module-level
+`cache_identity()` function that returns a non-empty compatibility identifier.
+Change it whenever an output-affecting implementation, model, or configuration
+change makes old replacements unsafe to reuse. A package without this function
+is used normally without result caching.
+
 ## Built-in providers
 
 ### Deterministic providers

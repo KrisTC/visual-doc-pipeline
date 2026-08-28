@@ -10,12 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from pipeline.text_replacement.errors import TextReplacementProviderError
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement_plugins.google_cloud_translate import (
     GoogleCloudTranslateProvider,
+    _Configuration,
     _GoogleModules,
     _TranslationClient,
 )
@@ -96,6 +97,9 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
             patch(
                 "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules"
             ) as load_modules,
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_configuration"
+            ) as load_configuration,
             patch.dict(os.environ, {}, clear=True),
         ):
             empty_result = provider.replace(TextReplacementRequest("", False, "en", "fr"))
@@ -106,6 +110,85 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         self.assertEqual("", empty_result.text)
         self.assertEqual("Hello", same_language_result.text)
         load_modules.assert_not_called()
+        load_configuration.assert_not_called()
+
+    # Verifies FR-2026-08-28-01.
+    def test_reuses_one_configuration_and_client_for_multiple_replacements(self) -> None:
+        client_factory = _FakeClientFactory(
+            _FakeResponse([_FakeTranslation("translated")])
+        )
+        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        modules = _GoogleModules(cast(Callable[[str], _TranslationClient], client_factory.create_client))
+        provider = GoogleCloudTranslateProvider()
+        with (
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_configuration",
+                return_value=configuration,
+            ) as load_configuration,
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules",
+                return_value=modules,
+            ) as load_modules,
+        ):
+            provider.replace(TextReplacementRequest("first", False, "en", "fr"))
+            provider.replace(TextReplacementRequest("second", False, "en", "fr"))
+
+        load_configuration.assert_called_once_with()
+        load_modules.assert_called_once_with()
+        self.assertEqual(["translate.googleapis.com"], client_factory.endpoints)
+        self.assertEqual(2, len(client_factory.client.requests))
+
+    # Verifies FR-2026-08-28-01.
+    def test_retries_client_initialization_after_construction_failure(self) -> None:
+        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        client = _FakeClient(_FakeResponse([_FakeTranslation("translated")]))
+        create_client = Mock(side_effect=[RuntimeError("temporary"), client])
+        modules = _GoogleModules(cast(Callable[[str], _TranslationClient], create_client))
+        provider = GoogleCloudTranslateProvider()
+        request = TextReplacementRequest("text", False, "en", "fr")
+        with (
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_configuration",
+                return_value=configuration,
+            ) as load_configuration,
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules",
+                return_value=modules,
+            ),
+        ):
+            with self.assertRaisesRegex(TextReplacementProviderError, "could not translate"):
+                provider.replace(request)
+            self.assertEqual("translated", provider.replace(request).text)
+
+        self.assertEqual(2, create_client.call_count)
+        self.assertEqual(2, load_configuration.call_count)
+
+    # Verifies FR-2026-08-28-01.
+    def test_a_new_provider_instance_loads_fresh_configuration(self) -> None:
+        client_factory = _FakeClientFactory(_FakeResponse([_FakeTranslation("translated")]))
+        modules = _GoogleModules(cast(Callable[[str], _TranslationClient], client_factory.create_client))
+        configurations = [
+            _Configuration("first-project", "global", "translate.googleapis.com"),
+            _Configuration("second-project", "europe-west1", "translate-eu.googleapis.com"),
+        ]
+        request = TextReplacementRequest("text", False, "en", "fr")
+        with (
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_configuration",
+                side_effect=configurations,
+            ) as load_configuration,
+            patch(
+                "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules",
+                return_value=modules,
+            ),
+        ):
+            GoogleCloudTranslateProvider().replace(request)
+            GoogleCloudTranslateProvider().replace(request)
+
+        self.assertEqual(2, load_configuration.call_count)
+        self.assertEqual(
+            ["translate.googleapis.com", "translate-eu.googleapis.com"], client_factory.endpoints
+        )
 
     # Verifies FR-2026-08-24-04 and SR-2026-08-24-01.
     def test_rejects_missing_or_invalid_configuration_without_loading_the_client(self) -> None:

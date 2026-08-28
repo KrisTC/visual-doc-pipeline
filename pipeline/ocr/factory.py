@@ -11,6 +11,7 @@ from typing import cast
 
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.provider import OcrProvider
+from pipeline.provider_cache import CachingOcrProvider, caching_is_enabled
 
 
 ProviderCreator = Callable[[], OcrProvider]
@@ -24,8 +25,13 @@ class OcrProviderFactory:
         self,
         creators: Mapping[str, ProviderCreator] | None = None,
         descriptions: Mapping[str, str | None] | None = None,
+        cache_identities: Mapping[str, Callable[[], str] | None] | None = None,
     ) -> None:
         self._creators = dict(creators or {})
+        self._cache_identities = {
+            name: cache_identities.get(name) if cache_identities is not None else None
+            for name in self._creators
+        }
         self._provider_descriptions: Mapping[str, str | None] = MappingProxyType(
             {
                 name: descriptions.get(name) if descriptions is not None else None
@@ -40,6 +46,7 @@ class OcrProviderFactory:
         package_paths = _package_paths(plugin_package)
         creators: dict[str, ProviderCreator] = {}
         descriptions: dict[str, str | None] = {}
+        cache_identities: dict[str, Callable[[], str] | None] = {}
         for module_info in iter_modules(package_paths, f"{PLUGIN_PACKAGE}."):
             if not module_info.ispkg:
                 continue
@@ -47,7 +54,8 @@ class OcrProviderFactory:
             provider_name = module_info.name.rpartition(".")[2]
             creators[provider_name] = _provider_creator(plugin_module)
             descriptions[provider_name] = _description(plugin_module.__doc__)
-        return cls(creators, descriptions)
+            cache_identities[provider_name] = _cache_identity(plugin_module)
+        return cls(creators, descriptions, cache_identities)
 
     def create(self, name: str) -> OcrProvider:
         """Create the provider stored under its package-derived ``name``."""
@@ -56,7 +64,17 @@ class OcrProviderFactory:
         except KeyError as error:
             message = f"No OCR provider is registered under {name!r}."
             raise OcrProviderNotFoundError(message) from error
-        return creator()
+        provider = creator()
+        cache_identity = self._cache_identities[name]
+        if not caching_is_enabled() or cache_identity is None:
+            return provider
+        try:
+            identity = cache_identity()
+        except Exception:
+            return provider
+        if not isinstance(identity, str) or not identity.strip():
+            return provider
+        return CachingOcrProvider(provider, f"{name}:{identity}")
 
     @property
     def provider_names(self) -> tuple[str, ...]:
@@ -91,3 +109,14 @@ def _description(docstring: str | None) -> str | None:
     if docstring is None:
         return None
     return cleandoc(docstring) or None
+
+
+def _cache_identity(plugin_module: ModuleType) -> Callable[[], str] | None:
+    """Return a plugin's optional output-compatibility cache identity."""
+    identity = getattr(plugin_module, "cache_identity", None)
+    if identity is None:
+        return None
+    if not callable(identity):
+        message = f"OCR plugin package {plugin_module.__name__!r} has an invalid cache_identity."
+        raise RuntimeError(message)
+    return cast(Callable[[], str], identity)

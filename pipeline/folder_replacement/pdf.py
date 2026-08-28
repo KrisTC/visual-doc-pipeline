@@ -79,7 +79,7 @@ def pdf_work_total(source: Path) -> int:
                 inline_image_count += 1
             else:
                 image_references.add(reference.idnum)
-    return 1 + len(image_references) + inline_image_count
+    return len(reader.pages) + 1 + len(image_references) + inline_image_count
 
 
 def replace_pdf_file(
@@ -128,6 +128,7 @@ def replace_pdf_file(
             seen_annotations,
             document_text_layout,
         )
+        work_completed(f"native text page {page_index}/{len(writer.pages)}")
     acro_form = writer._root_object.get("/AcroForm")
     if acro_form is not None:
         native_items += _replace_pdf_form_fields(
@@ -140,7 +141,7 @@ def replace_pdf_file(
             seen_annotations,
             document_text_layout,
         )
-    work_completed("native text")
+    work_completed("native form fields")
     image_regions = 0
     seen_images: set[int] = set()
     embedded_image_index = 0

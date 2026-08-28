@@ -11,6 +11,7 @@ from typing import cast
 
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from pipeline.text_replacement.provider import TextReplacementProvider
+from pipeline.provider_cache import CachingTextReplacementProvider, caching_is_enabled
 
 
 ProviderCreator = Callable[[], TextReplacementProvider]
@@ -25,6 +26,7 @@ class TextReplacementProviderFactory:
         creators: Mapping[str, ProviderCreator] | None = None,
         descriptions: Mapping[str, str | None] | None = None,
         local_evaluation_eligibility: Mapping[str, bool] | None = None,
+        cache_identities: Mapping[str, Callable[[], str] | None] | None = None,
     ) -> None:
         self._creators = dict(creators or {})
         self._provider_descriptions: Mapping[str, str | None] = MappingProxyType(
@@ -43,6 +45,10 @@ class TextReplacementProviderFactory:
                 for name in self._creators
             }
         )
+        self._cache_identities = {
+            name: cache_identities.get(name) if cache_identities is not None else None
+            for name in self._creators
+        }
 
     @classmethod
     def discover_default_plugins(cls) -> "TextReplacementProviderFactory":
@@ -52,6 +58,7 @@ class TextReplacementProviderFactory:
         creators: dict[str, ProviderCreator] = {}
         descriptions: dict[str, str | None] = {}
         local_evaluation_eligibility: dict[str, bool] = {}
+        cache_identities: dict[str, Callable[[], str] | None] = {}
         for module_info in iter_modules(package_paths, f"{PLUGIN_PACKAGE}."):
             if not module_info.ispkg:
                 continue
@@ -60,7 +67,8 @@ class TextReplacementProviderFactory:
             creators[provider_name] = _provider_creator(plugin_module)
             descriptions[provider_name] = _description(plugin_module.__doc__)
             local_evaluation_eligibility[provider_name] = _local_evaluation_eligible(plugin_module)
-        return cls(creators, descriptions, local_evaluation_eligibility)
+            cache_identities[provider_name] = _cache_identity(plugin_module)
+        return cls(creators, descriptions, local_evaluation_eligibility, cache_identities)
 
     def create(self, name: str) -> TextReplacementProvider:
         """Create the provider stored under its package-derived ``name``."""
@@ -69,7 +77,17 @@ class TextReplacementProviderFactory:
         except KeyError as error:
             message = f"No text-replacement provider is registered under {name!r}."
             raise TextReplacementProviderNotFoundError(message) from error
-        return creator()
+        provider = creator()
+        cache_identity = self._cache_identities[name]
+        if not caching_is_enabled() or cache_identity is None:
+            return provider
+        try:
+            identity = cache_identity()
+        except Exception:
+            return provider
+        if not isinstance(identity, str) or not identity.strip():
+            return provider
+        return CachingTextReplacementProvider(provider, f"{name}:{identity}")
 
     @property
     def provider_names(self) -> tuple[str, ...]:
@@ -124,3 +142,17 @@ def _local_evaluation_eligible(plugin_module: ModuleType) -> bool:
         )
         raise RuntimeError(message)
     return eligibility
+
+
+def _cache_identity(plugin_module: ModuleType) -> Callable[[], str] | None:
+    """Return a plugin's optional output-compatibility cache identity."""
+    identity = getattr(plugin_module, "cache_identity", None)
+    if identity is None:
+        return None
+    if not callable(identity):
+        message = (
+            f"Text-replacement plugin package {plugin_module.__name__!r} has an invalid "
+            "cache_identity."
+        )
+        raise RuntimeError(message)
+    return cast(Callable[[], str], identity)

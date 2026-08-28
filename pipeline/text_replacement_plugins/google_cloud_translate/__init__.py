@@ -24,6 +24,13 @@ _GLOBAL_ENDPOINT = "translate.googleapis.com"
 _EU_ENDPOINT = "translate-eu.googleapis.com"
 
 
+def cache_identity() -> str:
+    """Return the non-secret output-affecting Google configuration for cache keys."""
+    project = os.environ.get(_PROJECT_ENVIRONMENT_VARIABLE, "").strip()
+    location = os.environ.get(_LOCATION_ENVIRONMENT_VARIABLE, "global").strip() or "global"
+    return f"google_cloud_translate:v3:v1:{project}:{location}"
+
+
 class _Translation(Protocol):
     """The response fields used from one Google translation result."""
 
@@ -64,6 +71,10 @@ class _Configuration:
 class GoogleCloudTranslateProvider:
     """Translate text through Cloud Translation Advanced v3."""
 
+    def __init__(self) -> None:
+        self._configuration: _Configuration | None = None
+        self._client: _TranslationClient | None = None
+
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Translate one request, retaining an input filename's suffix unchanged."""
         if not request.text or request.source_language.casefold() == request.target_language.casefold():
@@ -76,8 +87,10 @@ class GoogleCloudTranslateProvider:
             filename_suffix = filename.suffix
             text = filename.stem
 
-        configuration = _load_configuration()
-        translated = self._translate(text, request.source_language, request.target_language, configuration)
+        configuration, client = self._initialized_client()
+        translated = self._translate(
+            text, request.source_language, request.target_language, configuration, client
+        )
         if request.is_filename:
             _validate_filename_stem(translated)
             translated = f"{translated}{filename_suffix}"
@@ -89,6 +102,7 @@ class GoogleCloudTranslateProvider:
         source_language: str,
         target_language: str,
         configuration: _Configuration,
+        client: _TranslationClient,
     ) -> str:
         """Issue one pre-trained NMT translation request."""
         request: Mapping[str, object] = {
@@ -99,9 +113,7 @@ class GoogleCloudTranslateProvider:
             "target_language_code": target_language,
         }
         try:
-            response = _load_google_modules().create_client(configuration.endpoint).translate_text(
-                request=request
-            )
+            response = client.translate_text(request=request)
         except TextReplacementProviderError:
             raise
         except Exception as error:
@@ -112,6 +124,22 @@ class GoogleCloudTranslateProvider:
             message = "Google Cloud Translation returned no translation."
             raise TextReplacementProviderError(message)
         return response.translations[0].translated_text
+
+    def _initialized_client(self) -> tuple[_Configuration, _TranslationClient]:
+        """Lazily initialize and retain the configuration and endpoint client."""
+        if self._configuration is not None and self._client is not None:
+            return self._configuration, self._client
+        configuration = _load_configuration()
+        try:
+            client = _load_google_modules().create_client(configuration.endpoint)
+        except TextReplacementProviderError:
+            raise
+        except Exception as error:
+            message = "Google Cloud Translation could not translate the requested text."
+            raise TextReplacementProviderError(message) from error
+        self._configuration = configuration
+        self._client = client
+        return configuration, client
 
 
 def create_provider() -> TextReplacementProvider:

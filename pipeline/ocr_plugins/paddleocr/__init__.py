@@ -18,6 +18,11 @@ from pipeline.ocr.models import BoundingPolygon, OcrRequest, OcrResult, OcrText,
 from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip, OcrProvider
 
 
+def cache_identity() -> str:
+    """Return the output-compatible PaddleOCR implementation version for caching."""
+    return "paddleocr:3.7.0:paddlepaddle:3.3.1:v1"
+
+
 class PaddleOcrEngine(Protocol):
     """The portion of PaddleOCR's runtime API used by this provider."""
 

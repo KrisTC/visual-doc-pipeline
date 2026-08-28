@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
+from pipeline.provider_cache import is_cache_sidecar, source_cache_scope
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.vector_text import replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
@@ -110,7 +111,9 @@ def replace_input_folder(
 
     result = FolderReplacementResult()
     reserved_paths: set[Path] = set()
-    for source_path in sorted(path for path in input_root.rglob("*") if path.is_file()):
+    for source_path in sorted(
+        path for path in input_root.rglob("*") if path.is_file() and not is_cache_sidecar(path)
+    ):
         temporary_destination: Path | None = None
         destination: Path | None = None
         progress = None
@@ -145,6 +148,8 @@ def replace_input_folder(
             continue
         document_diagnostics: list[dict[str, object]] = []
         counts_before = _document_totals(result)
+        cache_scope = source_cache_scope(source_path)
+        cache_scope.__enter__()
         try:
             print(f"Processing: {relative_source_path}")
             if show_progress:
@@ -294,6 +299,7 @@ def replace_input_folder(
                     result,
                 )
         finally:
+            cache_scope.__exit__(None, None, None)
             if progress is not None:
                 progress.close()
     return result

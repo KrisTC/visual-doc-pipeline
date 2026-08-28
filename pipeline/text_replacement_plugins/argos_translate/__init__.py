@@ -16,6 +16,11 @@ from pipeline.text_replacement.provider import TextReplacementProvider
 _OFFICIAL_PACKAGE_INDEX_URL = "https://raw.githubusercontent.com/argosopentech/argospm-index/main/index.json"
 
 
+def cache_identity() -> str:
+    """Return the output-compatible Argos Translate implementation version for caching."""
+    return "argos_translate:1.11:v1"
+
+
 class _ArgosTranslationPackage(Protocol):
     """The subset of an Argos package used to discover a translation route."""
 

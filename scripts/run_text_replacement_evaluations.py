@@ -50,6 +50,7 @@ from pipeline.bounded_text_layout import (
     source_occupied_text_box,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
+from pipeline.provider_cache import source_cache_scope
 from pipeline.text_replacement import (
     TextReplacementProviderFactory,
     TextReplacementRequest,
@@ -247,6 +248,8 @@ def evaluate_text_replacement_examples(
             for source_path in source_paths:
                 progress.set_postfix_str(source_path.name)
                 result.processed_presentations += 1
+                cache_scope = source_cache_scope(source_path)
+                cache_scope.__enter__()
                 try:
                     text_box_evaluations = tuple(_presentation_text_boxes(source_path))
                     output_path = (output_root / source_path.relative_to(input_root)).with_suffix(
@@ -301,6 +304,7 @@ def evaluate_text_replacement_examples(
                     result.written_pages += 2
                     result.rendered_text_boxes += len(text_box_evaluations)
                 finally:
+                    cache_scope.__exit__(None, None, None)
                     progress.update(1)
     return result
 

@@ -38,6 +38,7 @@ from pipeline.ocr import (
     PixelPoint,
 )
 from pipeline.ocr.languages import discover_language_directories
+from pipeline.provider_cache import source_cache_scope
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
@@ -332,7 +333,8 @@ def _evaluate_provider(
             try:
                 with Image.open(image.path) as opened_image:
                     source_image = opened_image.copy()
-                ocr_result = provider.recognize(OcrRequest(source_image, image.language))
+                with source_cache_scope(image.path):
+                    ocr_result = provider.recognize(OcrRequest(source_image, image.language))
                 payload = _successful_payload(
                     ocr_result, source_image, provider_root, image
                 )
@@ -440,43 +442,44 @@ def _write_text_replacement_artifacts(
     )
     artifact_directory = _replacement_artifact_directory(provider_root, evaluation_image)
     artifact_directory.mkdir(parents=True, exist_ok=True)
-    for provider_index, provider_name in enumerate(
-        text_replacement_factory.local_evaluation_provider_names, start=1
-    ):
-        provider = text_replacement_factory.create(provider_name)
-        updated_image = source_image.copy()
-        replacements: list[TextRegionReplacement] = []
-        for (_, text_item), estimate in zip(eligible_text_items, estimates, strict=True):
-            replacement = provider.replace(
-                TextReplacementRequest(
-                    text=text_item.text,
-                    is_filename=False,
-                    source_language=evaluation_image.language,
-                    target_language="en",
+    with source_cache_scope(evaluation_image.path):
+        for provider_index, provider_name in enumerate(
+            text_replacement_factory.local_evaluation_provider_names, start=1
+        ):
+            provider = text_replacement_factory.create(provider_name)
+            updated_image = source_image.copy()
+            replacements: list[TextRegionReplacement] = []
+            for (_, text_item), estimate in zip(eligible_text_items, estimates, strict=True):
+                replacement = provider.replace(
+                    TextReplacementRequest(
+                        text=text_item.text,
+                        is_filename=False,
+                        source_language=evaluation_image.language,
+                        target_language="en",
+                    )
                 )
-            )
-            replacements.append(
-                TextRegionReplacement(
-                    text_region=text_item,
-                    colour_estimate=estimate,
-                    replacement_text=replacement.text,
+                replacements.append(
+                    TextRegionReplacement(
+                        text_region=text_item,
+                        colour_estimate=estimate,
+                        replacement_text=replacement.text,
+                    )
                 )
+            replace_text_regions(
+                updated_image, replacements, replacement_typeface, target_language="en"
             )
-        replace_text_regions(
-            updated_image, replacements, replacement_typeface, target_language="en"
-        )
-        updated_image.save(
-            _replacement_complete_image_path(provider_root, evaluation_image, provider_index),
-            format="PNG",
-        )
-        for region_index, text_item in eligible_text_items:
-            bounds = _padded_clipped_bounds(source_image, text_item.bounding_polygon.vertices)
-            updated_image.crop(bounds).save(
-                _replacement_text_clip_path(
-                    provider_root, evaluation_image, region_index, provider_index
-                ),
+            updated_image.save(
+                _replacement_complete_image_path(provider_root, evaluation_image, provider_index),
                 format="PNG",
             )
+            for region_index, text_item in eligible_text_items:
+                bounds = _padded_clipped_bounds(source_image, text_item.bounding_polygon.vertices)
+                updated_image.crop(bounds).save(
+                    _replacement_text_clip_path(
+                        provider_root, evaluation_image, region_index, provider_index
+                    ),
+                    format="PNG",
+                )
 
 
 def _regenerate_text_replacement_artifacts(

@@ -80,3 +80,13 @@ def register_providers(factory: OcrProviderFactory) -> None:
 ```
 
 Provider names must be unique. The factory rejects duplicate names and raises `OcrProviderNotFoundError` when a requested provider is unavailable.
+
+## Optional result-cache identity
+
+When `PIPELINE_PLUGIN_CACHE=1` is set and a source-processing operation supplies
+a source-cache scope, the provider factory can wrap a plugin in a transparent
+result-cache proxy. A cacheable plugin exposes a no-argument module-level
+`cache_identity()` function that returns a non-empty compatibility identifier.
+Change it whenever an output-affecting implementation, model, or configuration
+change makes old OCR results unsafe to reuse. A plugin without this function is
+used normally without result caching.

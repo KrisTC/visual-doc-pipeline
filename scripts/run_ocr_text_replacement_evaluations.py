@@ -25,6 +25,7 @@ import skia  # type: ignore[import-not-found]
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import replace_text_region
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
+from pipeline.provider_cache import source_cache_scope
 from scripts.run_colour_evaluations import EvaluationTextItem, _read_successful_text_items
 
 
@@ -81,15 +82,16 @@ def evaluate_text_replacement_examples(
             with Image.open(source_image_path) as source:
                 source_image = source.copy()
             output_path = (output_root / result_path.relative_to(input_root)).with_suffix(".html")
-            rows = _render_rows(
-                source_image,
-                text_items,
-                factory,
-                provider_names,
-                typeface,
-                output_path,
-                source_language,
-            )
+            with source_cache_scope(source_image_path):
+                rows = _render_rows(
+                    source_image,
+                    text_items,
+                    factory,
+                    provider_names,
+                    typeface,
+                    output_path,
+                    source_language,
+                )
         except (OSError, RuntimeError, ValueError) as error:
             _skip(result, result_path, str(error))
             continue

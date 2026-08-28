@@ -3590,3 +3590,225 @@ shall verify that one unsupported container does not fail the document, eligible
 neighbouring containers are still replaced, the unchanged container remains
 valid in the output, and debug diagnostics identify it without a repeated
 replacement-provider call.
+
+---
+
+## FR-2026-08-27-10
+
+| Property | Value |
+|----------|-------|
+| Title | Transparently cache OCR and text-replacement provider results beside source files |
+| Owner | |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06, FR-2026-08-24-04, SR-2026-08-24-01, SR-2026-08-27-01 |
+
+### Description
+
+The project shall provide an opt-in, source-adjacent cache for successful OCR
+and text-replacement provider calls. Caching shall be enabled only when the
+process environment contains `PIPELINE_PLUGIN_CACHE=1`; an absent value or any
+other value shall leave caching disabled. The existing project run wrappers
+already load the manually managed, Git-ignored repository-root `.env.local`
+file, so no command-line cache option or script-specific cache switch shall be
+added.
+
+When caching is enabled, the OCR and text-replacement provider factories shall
+return transparent caching proxies around created providers. The proxies shall
+preserve the respective provider APIs and provider metadata, and shall work for
+every discovered provider without each provider implementing storage logic.
+They shall cache only successful, schema-valid normalized results; a provider
+failure, a malformed cached value, or an uncacheable provider-specific `extra`
+value shall result in an ordinary provider call and shall not be cached as a
+failure.
+
+Every source-processing operation with an identified source file shall establish
+a cache scope before invoking either provider. Within that scope, the proxies
+shall use one SQLite database named `<source filename>.plugin-cache.sqlite3` in
+the source file's parent directory. For example, the cache associated with
+`report.pptx` shall be `report.pptx.plugin-cache.sqlite3`. The proxies shall
+silently bypass caching when no source cache scope exists; the public provider
+request models do not contain a source path and a factory cannot safely infer
+one. This preserves transparent use by all source-aware pipeline operations
+without coupling the cache to individual command-line scripts.
+
+The cache shall use only Python's standard-library SQLite support. It shall use
+transactional writes and a single-file journal mode, rather than WAL mode, so
+one logical cache does not normally create `-wal` and `-shm` sidecars. Cache
+sidecars and temporary journal files shall be excluded from source-file
+discovery and from Git. A cache sidecar is local derived data and is not an
+input document, output document, or diagnostic artifact.
+
+An OCR cache key shall include the cache schema version, provider cache identity,
+request language, OCR preparation settings, and a SHA-256 digest of the exact
+prepared image pixels and dimensions supplied to the provider. It shall not
+depend on a document-internal image identifier. This shall allow separately
+encountered identical embedded images to reuse a result while avoiding a hit
+when their actual OCR input differs.
+
+A text-replacement cache key shall include the cache schema version, provider
+cache identity, the exact input text, filename flag, source language, and target
+language. Request content and configuration values used only as key material
+shall be represented by a digest, not stored as separate cache-key columns.
+Every cacheable provider shall supply a documented cache identity that changes
+when an output-affecting provider, model, or configuration change makes prior
+results unsafe to reuse. A provider without such an identity shall be invoked
+normally and bypass the cache.
+
+Cached OCR results shall preserve every normalized text item, including text,
+confidence, bounding polygon, and JSON-compatible `extra` data. Cached
+text-replacement results shall preserve text, confidence, and JSON-compatible
+`extra` data. Cache deserialization shall validate the normalized models before
+returning a hit and shall not use pickle or execute cache contents.
+
+For the explicit opt-in cache scope defined here, this requirement supersedes
+FR-2026-08-24-04's prohibition on persisting Google translation text beyond the
+in-memory result. It permits persistence only of the normalized successful
+translation result in the source-adjacent cache; it does not permit persistence
+of Google credential material or raw Google API responses.
+
+### Rationale
+
+OCR and managed translation are expensive repeat operations. Factory-created
+proxies keep caching provider-generic and available to every source-aware
+pipeline path, while a per-source sidecar keeps derived text close to the input
+whose processing produced it. Hashing prepared image content removes the need
+for stable identifiers on images embedded in Office documents, PDFs, and vector
+containers.
+
+### Notes
+
+The initial cache scope shall include standalone source bitmaps, native text,
+filenames, and raster images embedded in supported documents and vector
+graphics. A source-aware evaluator or future processing entrypoint shall obtain
+the same behaviour by establishing the shared cache scope, rather than by
+implementing its own provider cache. Calls made directly through a factory with
+no source file context are deliberately not cacheable.
+
+The cache must not contain credentials, credential paths, authorization headers,
+raw remote API responses, source paths as stored data, or diagnostic logs. Its
+privacy, corruption handling, and logging requirements are defined by
+SR-2026-08-27-01. Automated tests shall use synthetic inputs and mocked
+providers; they shall verify enabled and disabled factory behaviour, cache hits,
+key separation, embedded-image reuse without an internal ID, invalidation by
+provider identity, malformed-cache recovery, and the absence of cached
+failures.
+
+---
+
+## FR-2026-08-27-11
+
+| Property | Value |
+|----------|-------|
+| Title | Reuse one provider-cache SQLite connection for each source file |
+| Owner | |
+| Status | Implemented |
+| Source | User request and performance diagnosis |
+| Date Added | 2026-08-27 |
+| Related Requirements | FR-2026-08-27-10, SR-2026-08-27-01 |
+
+### Description
+
+When `PIPELINE_PLUGIN_CACHE=1` is enabled, a source-cache scope shall open at
+most one SQLite connection for its source file and reuse that connection for all
+OCR and text-replacement cache reads and writes made while the scope is active.
+The connection shall be opened lazily on the first cache operation, so an
+enabled run that never invokes a cacheable provider does not create a cache
+file. The scope shall commit and close the connection when processing of that
+source file ends.
+
+The cache must retain the exact key and result semantics defined by
+FR-2026-08-27-10. Reusing a connection shall not widen cache matches across
+source files, providers, result kinds, languages, filename status, image
+content, or cache identities. An SQLite open, initialization, locking, or write
+failure shall disable caching only for that source scope and let ordinary
+provider processing continue without exposing cache data in diagnostics.
+
+For PDF files, the folder-replacement progress total shall represent each page's
+native-text pass, one document-level native-form pass, and each unique embedded
+raster image. The PDF handler shall advance the progress bar after completing
+each page's native-text and annotation processing, with a page-number label,
+and after completing its form-field pass. It shall retain one progress unit per
+unique embedded raster image. This progress behaviour shall apply whether or
+not provider caching is enabled.
+
+### Rationale
+
+PDF native-text processing can make hundreds or thousands of provider calls
+before it completes its first progress work item. Opening, configuring, and
+committing a SQLite connection for every cache lookup and write turns a local
+SSD workload into a large filesystem-transaction workload and causes prolonged
+apparent `0%` progress. A source-scoped connection retains the per-source
+privacy boundary while removing this avoidable overhead.
+
+Page-level progress makes a long native-text pass observable without pretending
+that the count of PDF text operands can be cheaply known in advance.
+
+### Notes
+
+The provider-result table uses the parameterized lookup
+`WHERE result_kind = ? AND cache_key = ?` against its composite primary key.
+`cache_key` is a SHA-256 digest of canonical request material, including the
+provider name and cache identity, cache schema version, and all
+output-affecting request fields. Thus the database does not store request text
+or configuration as query columns, while an exact text replacement for one
+provider cannot be returned for another provider or request kind.
+
+Automated tests shall use synthetic providers and verify that many calls in one
+source scope open one connection, that different source scopes do not share a
+connection or cache file, and that a cache database failure falls back to the
+underlying provider. Synthetic multi-page PDF tests shall verify the native-page,
+form-pass, and embedded-image progress units and labels.
+
+---
+
+## FR-2026-08-28-01
+
+| Property | Value |
+|----------|-------|
+| Title | Reuse Google Cloud Translation client within a provider instance |
+| Owner | |
+| Status | Implemented |
+| Source | User request following PDF native-text performance diagnosis |
+| Date Added | 2026-08-28 |
+| Related Requirements | FR-2026-08-24-04, SR-2026-08-24-01, FR-2026-08-27-10 |
+
+### Description
+
+`GoogleCloudTranslateProvider` shall lazily load and validate its local Google
+configuration, then create one `TranslationServiceClient` for its selected
+endpoint. It shall reuse that configuration and client for every subsequent
+non-empty, cross-language replacement request made through the same provider
+instance. Empty and case-insensitively same-language requests shall continue to
+return without loading configuration or creating a client.
+
+The provider factory's existing fresh-provider-per-`create()` contract remains
+unchanged. Therefore a new factory-created provider shall reread the local
+environment and credential-file configuration, while a provider already in use
+shall retain the configuration selected at its first remote request. A failed
+configuration validation or client construction shall not be retained: a later
+request may retry initialization. A `translateText` operation failure shall
+retain the initialized client and continue to raise the existing normalized
+provider error; it shall not silently select another endpoint or provider.
+
+This requirement shall not batch requests, alter individual `translateText`
+request construction, persist configuration or client state, widen the remote
+data boundary, or expose configuration values in errors or logs.
+
+### Rationale
+
+PDF native text can produce many small replacement calls. Re-reading the local
+credential JSON and constructing a Google client for every one adds unnecessary
+local work and connection setup around every remote operation. Reuse preserves
+the existing request semantics and trust boundary while removing that repeated
+per-call setup cost.
+
+### Notes
+
+Automated tests shall use synthetic configuration and mocked clients. They shall
+verify one configuration validation and one client construction for multiple
+ordinary replacement calls, no initialization for empty or same-language calls,
+fresh configuration for a new provider instance, initialization retry after a
+construction failure, and unchanged endpoint, error-sanitization, and request
+contents behaviour.
