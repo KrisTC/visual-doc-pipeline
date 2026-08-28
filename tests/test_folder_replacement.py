@@ -40,14 +40,23 @@ from pipeline.folder_replacement import (
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
 from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
-from pipeline.folder_replacement.pdf import _pdf_decode_composite_bytes, _pdf_text_advance
+from pipeline.folder_replacement.pdf import (
+    _PdfReplacementSerializationError,
+    _pdf_decode_composite_bytes,
+    _pdf_text_advance,
+)
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
 from pipeline.bounded_text_layout import PortableTextUnsupportedError, noto_typefaces
 from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
-from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement import (
+    TextReplacementProvider,
+    TextReplacementRequest,
+    TextReplacementResult,
+)
+from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
 
 FONT_PATH = Path(__file__).parent / "assets" / "fonts" / "NotoSansJP[wght].ttf"
@@ -1391,6 +1400,88 @@ class FolderReplacementTests(unittest.TestCase):
             descendant = cast(DictionaryObject, cast(ArrayObject, type_zero["/DescendantFonts"])[0].get_object())
             self.assertTrue(descendant.get("/W"))
 
+    # Verifies FR-2026-08-02-06 and FR-2026-08-24-02.
+    def test_basic_layout_pdf_character_mask_preserves_distinct_whitespace_semantics(self) -> None:
+        """Assign separate CIDs when the embedded font reuses a whitespace glyph."""
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 10 Td <FEFF0041002000A00042> Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                CharacterMaskProvider(),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual([], result.diagnostic_sidecars)
+            output = PdfReader(output_root / "document.pdf")
+            self.assertIn("# \u00A0#", output.pages[0].extract_text())
+            fonts = cast(DictionaryObject, cast(DictionaryObject, output.pages[0]["/Resources"])["/Font"])
+            type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
+            to_unicode = cast(DecodedStreamObject, type_zero["/ToUnicode"].get_object())
+            mapping = to_unicode.get_data()
+            self.assertIn(b"<0002> <0020>", mapping)
+            self.assertIn(b"<0003> <00A0>", mapping)
+
+    # Verifies FR-2026-08-27-06.
+    def test_basic_layout_pdf_reports_font_serialization_not_region_reconstruction(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (source) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_static_glyph_bytes",
+                side_effect=_PdfReplacementSerializationError(
+                    "pdf_replacement_font_encoding_invalid",
+                    "Synthetic portable-font serialization failure.",
+                    "######",
+                ),
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(),
+                    document_text_layout="preserve-basic-layout",
+                    diagnostics_enabled=True,
+                )
+
+            self.assertEqual(0, result.replaced_native_text_items)
+            self.assertEqual(1, len(result.diagnostic_sidecars))
+            report = json.loads(result.diagnostic_sidecars[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                [{
+                    "kind": "unsupported",
+                    "reason_code": "pdf_replacement_font_encoding_invalid",
+                    "container_kind": "pdf_visual_text",
+                    "page": 1,
+                    "replacement_text": "######",
+                }],
+                [{key: entry[key] for key in (
+                    "kind", "reason_code", "container_kind", "page", "replacement_text"
+                )} for entry in report["entries"]],
+            )
+
     # Verifies FR-2026-08-27-06.
     def test_basic_layout_pdf_records_unsupported_portable_text_and_keeps_the_region(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -2347,7 +2438,14 @@ class FolderReplacementTests(unittest.TestCase):
                 operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in fallback_stream.operations
             ))
-            self.assertIn(b"<0004>", (fallback_output / "document.pdf").read_bytes())
+            fallback_fonts = cast(
+                DictionaryObject, cast(DictionaryObject, fallback_reader.pages[0]["/Resources"])["/Font"]
+            )
+            fallback_font = cast(DictionaryObject, fallback_fonts["/PipelineNoto"].get_object())
+            fallback_mapping = cast(
+                DecodedStreamObject, fallback_font["/ToUnicode"].get_object()
+            ).get_data()
+            self.assertIn(b"<0001> <0023>", fallback_mapping)
 
     # Verifies FR-2026-08-23-04.
     def test_type0_pdf_widths_use_w_overrides_and_dw_fallback(self) -> None:
@@ -2540,7 +2638,10 @@ class FolderReplacementTests(unittest.TestCase):
                 operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in stream.operations
             ))
-            self.assertGreaterEqual((output_root / "document.pdf").read_bytes().count(b"<0004>"), 1)
+            fonts = cast(DictionaryObject, cast(DictionaryObject, output_reader.pages[0]["/Resources"])["/Font"])
+            type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
+            mapping = cast(DecodedStreamObject, type_zero["/ToUnicode"].get_object()).get_data()
+            self.assertIn(b"<0001> <0023>", mapping)
 
     # Verifies FR-2026-08-03-03.
     def test_source_font_pdf_falls_back_when_tounicode_lacks_replacement_glyph(self) -> None:
@@ -2580,7 +2681,10 @@ class FolderReplacementTests(unittest.TestCase):
                 operator == b"Tf" and operands[0] == "/PipelineNoto"
                 for operands, operator in stream.operations
             ))
-            self.assertIn(b"<0004>", (output_root / "document.pdf").read_bytes())
+            fonts = cast(DictionaryObject, cast(DictionaryObject, output_reader.pages[0]["/Resources"])["/Font"])
+            type_zero = cast(DictionaryObject, fonts["/PipelineNoto"].get_object())
+            mapping = cast(DecodedStreamObject, type_zero["/ToUnicode"].get_object()).get_data()
+            self.assertIn(b"<0001> <0023>", mapping)
 
     # Verifies FR-2026-08-04-13.
     def test_replaces_pptx_speaker_notes_in_every_document_text_layout_mode(self) -> None:
@@ -2899,7 +3003,7 @@ class FolderReplacementTests(unittest.TestCase):
         input_root: Path,
         output_root: Path,
         ocr_provider: _EmptyOcrProvider,
-        replacement_provider: _RecordingReplacementProvider,
+        replacement_provider: TextReplacementProvider,
         *,
         show_progress: bool = False,
         progress_factory: ProgressFactory | None = None,

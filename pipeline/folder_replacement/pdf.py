@@ -393,7 +393,7 @@ def _pdf_default_appearance(value: object) -> tuple[float, str]:
 def _pdf_embedded_noto_font(
     writer: PdfWriter, classification: str, bold: bool
 ) -> tuple[str, object]:
-    """Create an Identity-H Type0 font whose CIDs are static-font glyph IDs."""
+    """Create an Identity-H Type0 font with an explicit CID-to-glyph map."""
     family, _path = static_noto_font(classification, bold)
     resource_name = (
         "PipelineNotoMath"
@@ -423,11 +423,16 @@ def _pdf_embedded_noto_font(
         NameObject("/Descent"): NumberObject(-300), NameObject("/CapHeight"): NumberObject(700),
         NameObject("/StemV"): NumberObject(80), NameObject("/FontFile2"): writer._add_object(font_stream),
     }))
+    cid_to_gid = DecodedStreamObject()
+    # CID zero is the required .notdef glyph.  Subsequent CIDs are allocated
+    # as replacement Unicode characters are encountered.
+    cid_to_gid.set_data(b"\x00\x00")
     descendant = writer._add_object(DictionaryObject({
         NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/CIDFontType2"),
         NameObject("/BaseFont"): NameObject(f"/{postscript_name}"),
         NameObject("/CIDSystemInfo"): DictionaryObject({NameObject("/Registry"): TextStringObject("Adobe"), NameObject("/Ordering"): TextStringObject("Identity"), NameObject("/Supplement"): NumberObject(0)}),
-        NameObject("/FontDescriptor"): descriptor, NameObject("/CIDToGIDMap"): NameObject("/Identity"),
+        NameObject("/FontDescriptor"): descriptor,
+        NameObject("/CIDToGIDMap"): writer._add_object(cid_to_gid),
         NameObject("/DW"): NumberObject(1000),
     }))
     to_unicode = DecodedStreamObject()
@@ -440,7 +445,13 @@ def _pdf_embedded_noto_font(
     }))
     type_zero = reference.get_object()
     setattr(type_zero, "_pipeline_static_tounicode", to_unicode)
-    setattr(type_zero, "_pipeline_static_glyph_unicode", {})
+    setattr(type_zero, "_pipeline_static_cid_by_character_glyph", {})
+    setattr(type_zero, "_pipeline_static_unicode_by_cid", {})
+    descendant_object = descendant.get_object()
+    setattr(descendant_object, "_pipeline_static_cid_to_gid", cid_to_gid)
+    setattr(descendant_object, "_pipeline_static_glyph_widths", {})
+    setattr(descendant_object, "_pipeline_static_glyph_by_cid", {})
+    setattr(descendant_object, "_pipeline_static_next_cid", 1)
     cached[key] = reference
     return resource_name, reference
 
@@ -488,9 +499,9 @@ def _pdf_write_appearance_runs(
     for run in runs:
         classification = _pdf_portable_classification(run.font_classification)
         font_name, font_reference = fonts[classification]
-        if not _pdf_add_static_glyph_metadata(font_reference, run.text, classification):
-            raise ValueError("Portable PDF appearance font does not cover its replacement run.")
-        encoded = _pdf_static_glyph_bytes(run.text, classification).hex().upper()
+        encoded = _pdf_static_glyph_bytes(
+            font_reference, run.text, classification
+        ).hex().upper()
         content.append(
             f"/{font_name} {run.font_size_points or 12.0:.4f} Tf "
             f"<{encoded}> Tj"
@@ -1036,6 +1047,21 @@ def _replace_pdf_fitted_operations(
                         "candidate_faces": list(error.selected_faces),
                         "characters": error.characters,
                         "code_points": [f"U+{ord(character):04X}" for character in error.characters],
+                        "region_location": _pdf_diagnostic_region_location(region),
+                    }
+                )
+            continue
+        except _PdfReplacementSerializationError as error:
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "source_text": region.text,
+                        "replacement_text": error.replacement_text,
+                        "kind": "unsupported",
+                        "reason_code": error.reason_code,
+                        "container_kind": "pdf_visual_text",
+                        "page": page_index,
+                        "detail": error.detail,
                         "region_location": _pdf_diagnostic_region_location(region),
                     }
                 )
@@ -1960,19 +1986,16 @@ def _pdf_fitted_region_operations(
                 if static_font is None:
                     return None
                 font_name, font_reference = static_font
-                if not _pdf_add_static_glyph_metadata(
+                encoded_text = _pdf_static_glyph_bytes(
                     font_reference, segment.text, classification
-                ):
-                    return None
+                )
                 selected_font = (font_name, segment.font_size_points)
                 if selected_font != active_static_font:
                     result.append(
                         ([NameObject(f"/{font_name}"), FloatObject(segment.font_size_points)], b"Tf")
                     )
                     active_static_font = selected_font
-                result.append(
-                    ([_pdf_text_operand(segment.text, font_name, classification)], b"Tj")
-                )
+                result.append(([ByteStringObject(encoded_text)], b"Tj"))
         cursor -= line.height_pixels * 0.75
     result.extend(restore_operations)
     return result
@@ -2028,64 +2051,122 @@ def _pdf_matrix_translation_delta(
     )
 
 
-def _pdf_add_static_glyph_metadata(
-    font_reference: object, text: str, classification: str
-) -> bool:
-    """Add CID widths and unambiguous Unicode mappings for emitted glyphs.
+class _PdfReplacementSerializationError(ValueError):
+    """A portable PDF replacement cannot be encoded without semantic loss."""
 
-    The emitted CID is the static face's glyph ID.  A CIDFont's `/DW` cannot
-    represent proportional glyphs, so a viewer needs an explicit `/W` entry
-    to advance each replacement glyph correctly.  The matching `/ToUnicode`
-    CMap makes the visible generated text the PDF's extractable text.
+    def __init__(self, reason_code: str, detail: str, replacement_text: str) -> None:
+        super().__init__(detail)
+        self.reason_code = reason_code
+        self.detail = detail
+        self.replacement_text = replacement_text
+
+
+def _pdf_static_glyph_bytes(
+    font_reference: object, text: str, classification: str = "sans-serif"
+) -> bytes:
+    """Encode text with unique CIDs even where font glyphs are shared.
+
+    A font may draw two Unicode whitespace characters with one glyph.  CIDs
+    must nevertheless remain distinct so the generated `/ToUnicode` map can
+    make copy, search, and extraction return the provider's exact text.
     """
     get_object = getattr(font_reference, "get_object", None)
     type_zero = get_object() if callable(get_object) else font_reference
     descendants = type_zero.get("/DescendantFonts") if isinstance(type_zero, DictionaryObject) else None
     if not isinstance(descendants, ArrayObject) or not descendants:
-        raise ValueError("The embedded PDF replacement font has no CID descendant.")
+        raise _PdfReplacementSerializationError(
+            "pdf_replacement_font_encoding_invalid",
+            "The embedded PDF replacement font has no CID descendant.",
+            text,
+        )
     descendant = descendants[0].get_object()
     if not isinstance(descendant, DictionaryObject):
-        raise ValueError("The embedded PDF replacement font has an invalid CID descendant.")
+        raise _PdfReplacementSerializationError(
+            "pdf_replacement_font_encoding_invalid",
+            "The embedded PDF replacement font has an invalid CID descendant.",
+            text,
+        )
+    cid_by_character_glyph = getattr(type_zero, "_pipeline_static_cid_by_character_glyph", None)
+    unicode_by_cid = getattr(type_zero, "_pipeline_static_unicode_by_cid", None)
     widths = getattr(descendant, "_pipeline_static_glyph_widths", None)
-    if widths is None:
-        widths = {}
-        setattr(descendant, "_pipeline_static_glyph_widths", widths)
+    glyph_by_cid = getattr(descendant, "_pipeline_static_glyph_by_cid", None)
+    cid_to_gid = getattr(descendant, "_pipeline_static_cid_to_gid", None)
+    next_cid = getattr(descendant, "_pipeline_static_next_cid", None)
+    if not all(isinstance(value, dict) for value in (
+        cid_by_character_glyph, unicode_by_cid, widths, glyph_by_cid
+    )) or not isinstance(cid_to_gid, DecodedStreamObject) or not isinstance(next_cid, int):
+        raise _PdfReplacementSerializationError(
+            "pdf_replacement_font_encoding_invalid",
+            "The embedded PDF replacement font has no writable CID mapping.",
+            text,
+        )
+    cid_by_character_glyph = cast(dict[tuple[str, int], int], cid_by_character_glyph)
+    unicode_by_cid = cast(dict[int, str], unicode_by_cid)
+    widths = cast(dict[int, int], widths)
+    glyph_by_cid = cast(dict[int, int], glyph_by_cid)
     # The shared layout face cache also prevents each PDF region from reopening
     # the optional Symbols 2 file while constructing CID metadata.
     font = skia.Font(noto_typefaces()[classification], 1000.0)
     glyphs = font.textToGlyphs(text)
     if len(glyphs) != len(text):
-        return False
-    unicode_by_glyph = getattr(type_zero, "_pipeline_static_glyph_unicode", None)
-    if unicode_by_glyph is None:
-        unicode_by_glyph = {}
-        setattr(type_zero, "_pipeline_static_glyph_unicode", unicode_by_glyph)
+        raise _PdfReplacementSerializationError(
+            "pdf_replacement_font_glyph_encoding_unavailable",
+            "The portable replacement font did not produce one glyph per replacement character.",
+            text,
+        )
+    encoded = bytearray()
     for character, glyph, width in zip(text, glyphs, font.getWidths(glyphs)):
         glyph_id = int(glyph)
         if glyph_id == 0:
-            return False
-        existing = unicode_by_glyph.get(glyph_id)
-        if existing is not None and existing != character:
-            return False
-        unicode_by_glyph[glyph_id] = character
-        widths[glyph_id] = round(float(width))
+            raise _PdfReplacementSerializationError(
+                "pdf_replacement_font_glyph_encoding_unavailable",
+                "The portable replacement font does not contain a replacement glyph.",
+                text,
+            )
+        key = (character, glyph_id)
+        cid = cid_by_character_glyph.get(key)
+        if cid is None:
+            if next_cid > 0xFFFF:
+                raise _PdfReplacementSerializationError(
+                    "pdf_replacement_font_cid_capacity_exceeded",
+                    "The portable replacement font exhausted its 16-bit CID space.",
+                    text,
+                )
+            cid = next_cid
+            next_cid += 1
+            cid_by_character_glyph[key] = cid
+            unicode_by_cid[cid] = character
+            glyph_by_cid[cid] = glyph_id
+            widths[cid] = round(float(width))
+        encoded.extend(cid.to_bytes(2, "big"))
+    setattr(descendant, "_pipeline_static_next_cid", next_cid)
     encoded_widths = ArrayObject()
-    for glyph, width in sorted(widths.items()):
-        encoded_widths.append(NumberObject(glyph))
+    for cid, width in sorted(widths.items()):
+        encoded_widths.append(NumberObject(cid))
         encoded_widths.append(ArrayObject([NumberObject(width)]))
     descendant[NameObject("/W")] = encoded_widths
+    cid_to_gid.set_data(
+        b"".join(
+            glyph_by_cid.get(cid, 0).to_bytes(2, "big")
+            for cid in range(max(glyph_by_cid, default=0) + 1)
+        )
+    )
     to_unicode = getattr(type_zero, "_pipeline_static_tounicode", None)
     if not isinstance(to_unicode, DecodedStreamObject):
-        raise ValueError("The embedded PDF replacement font has no ToUnicode stream.")
-    to_unicode.set_data(_pdf_static_tounicode_cmap(unicode_by_glyph))
-    return True
+        raise _PdfReplacementSerializationError(
+            "pdf_replacement_font_encoding_invalid",
+            "The embedded PDF replacement font has no ToUnicode stream.",
+            text,
+        )
+    to_unicode.set_data(_pdf_static_tounicode_cmap(unicode_by_cid))
+    return bytes(encoded)
 
 
-def _pdf_static_tounicode_cmap(unicode_by_glyph: dict[int, str]) -> bytes:
+def _pdf_static_tounicode_cmap(unicode_by_cid: dict[int, str]) -> bytes:
     """Encode an Adobe-Identity ToUnicode CMap for the generated static font."""
     entries = [
-        f"<{glyph:04X}> <{text.encode('utf-16-be').hex().upper()}>"
-        for glyph, text in sorted(unicode_by_glyph.items())
+        f"<{cid:04X}> <{text.encode('utf-16-be').hex().upper()}>"
+        for cid, text in sorted(unicode_by_cid.items())
     ]
     chunks = [entries[index:index + 100] for index in range(0, len(entries), 100)]
     body = [
@@ -2795,13 +2876,8 @@ def _pdf_text_operand(
         return TextStringObject(text)
     if static_font_name == "PipelineFallback":
         return ByteStringObject(text.encode("latin-1", "replace"))
-    return ByteStringObject(_pdf_static_glyph_bytes(text, classification))
-
-
-def _pdf_static_glyph_bytes(text: str, classification: str = "sans-serif") -> bytes:
-    return b"".join(
-        glyph.to_bytes(2, "big")
-        for glyph in skia.Font(noto_typefaces()[classification]).textToGlyphs(text)
+    raise ValueError(
+        "Portable Noto text requires its font reference to allocate CID mappings."
     )
 
 
