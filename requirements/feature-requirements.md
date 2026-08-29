@@ -738,7 +738,7 @@ The scope is limited to preparing raster pixels for OCR. It does not require gen
 
 The folder-replacement command shall use tqdm to render terminal progress while it processes supported input files. It shall render one progress bar at a time for each input folder that contains eligible files, labelled with that folder's path relative to the input root. The bar shall show the basename of the current source file in its postfix.
 
-The command shall print the relative path of each source file when it starts processing it. It shall render one tqdm progress bar for that source file. A bitmap file's bar shall contain one work item. A document file's bar shall contain one native-text work item and one work item for every embedded raster bitmap. The document's bar shall advance after each work item completes, allowing a user to see progress through its embedded-image work.
+The command shall print the relative path of each source file when it starts processing it. It shall render one tqdm progress bar for that source file. A bitmap file's bar shall contain one work item. A document file's bar shall contain one native-text work item and one work item for every embedded raster bitmap. A PDF's bar shall additionally contain one vector-content review work item for every page. The document's bar shall advance after each work item completes, allowing a user to see progress through its embedded-image and PDF-vector work.
 
 ### Rationale
 
@@ -746,7 +746,7 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
-The progress bar shall show its current native-text or embedded-image work item in its postfix. Existing one-line per-file failure reporting shall remain visible without stopping later work. A failure shall close that file's bar and later files shall still be processed.
+The progress bar shall show its current native-text, embedded-image, or PDF-vector work item in its postfix. Existing one-line per-file failure reporting shall remain visible without stopping later work. A failure shall close that file's bar and later files shall still be processed.
 
 ---
 
@@ -3975,7 +3975,7 @@ cannot be replaced.
 |----------|-------|
 | Title | OCR-replace outlined PDF vector text without rasterizing the page |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request following review of OCR-detectable outlined PDF text |
 | Date Added | 2026-08-29 |
 | Related Requirements | FR-2026-08-03-03, FR-2026-08-04-09, FR-2026-08-27-08 |
@@ -4006,6 +4006,22 @@ background for a local wipe. It shall retain a region unchanged when these
 conditions are not met or when the replacement cannot be rendered with the
 existing portable-font policy.
 
+A four-corner OCR region whose longest baseline differs from the horizontal
+axis by no more than five degrees shall remain eligible. The PDF overlay shall
+cover its enclosing page-space rectangle and render its replacement text
+horizontally, without reproducing the small detected skew. This follows the
+established raster-image OCR policy for small false rotations caused by glyph
+shape. A region whose baseline exceeds that tolerance, or whose geometry is
+not a finite non-degenerate quadrilateral, shall remain unchanged with the
+stable orientation-retained reason code.
+
+Before PDFium rendering or OCR, the pipeline shall inspect the filtered
+vector-only content for each page. It shall skip PDFium rendering and OCR for
+a page that contains no potentially visible vector-painting operation,
+including inside invoked Form XObjects. The PDF progress bar shall include one
+completed `vector OCR page N/total` work item for every page, whether that
+inspection skips the page or the page proceeds to rendering and OCR.
+
 The selected OCR provider, replacement provider, source and target languages,
 and existing text-region colour estimation and rendering behaviour shall apply
 to eligible vector-content OCR regions. The `preserve-basic-layout-source-font`
@@ -4013,8 +4029,8 @@ mode shall use the existing portable fallback for this path because vector
 outlines do not identify a reusable source font.
 
 In a debug-enabled run, the diagnostic sidecar shall record one safe summary
-per PDF page that receives the vector-content OCR pass. The summary shall give
-the page number and counts for OCR-detected, confidence-rejected,
+for each PDF page where the vector-content OCR pass detects a region or safely
+retains a region. The summary shall give the page number and counts for OCR-detected, confidence-rejected,
 replacement-written, and safely-retained regions, together with stable reason
 codes for any retained categories. It shall not contain OCR text, replacement
 text, image pixels, raw OCR polygons, or rendered-page artefacts.
@@ -4049,3 +4065,65 @@ replaced, the page retains vector content outside replacement wipes, the
 generated replacement is extractable, a low-confidence or unsafe-background
 case is retained, and debug diagnostics contain only the specified safe
 metadata.
+
+---
+
+## FR-2026-08-29-02
+
+| Property | Value |
+|----------|-------|
+| Title | OCR fallback for undecodable native PDF text |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request following outlined-PDF-text implementation review |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-27-08, FR-2026-08-29-01, SR-2026-08-29-01 |
+
+### Description
+
+When the existing native-PDF replacement path retains a visible text-showing
+operation because its font encoding cannot be decoded safely, the pipeline
+shall attempt a local OCR fallback for that operation. It shall apply only to
+the stable `pdf_text_undecodable` reason code, or to a future reason code
+explicitly classified as an undecodable visible-text encoding failure.
+
+The fallback shall produce an in-memory render that includes the failed
+operation and the visual context required to estimate a safe local wipe. It
+shall exclude native text that the adapter has already replaced and exclude
+embedded raster-image text already owned by the bitmap path. It shall replace
+an OCR result only when the implementation can associate its finite,
+non-degenerate page-space region with the retained undecodable operation;
+otherwise it shall retain the source unchanged.
+
+Successful replacement shall use the selected existing OCR and
+text-replacement providers, source and target languages, confidence threshold,
+safe-background policy, and portable PDF-font output path. It shall retain the
+original page as PDF content, write only a local wipe and selectable
+replacement-text overlay, and never replace the same visible source text
+twice.
+
+The fallback shall not apply to a missing position, an ineligible PDF text
+rendering mode, a non-decoding replacement failure, a malformed PDF that
+cannot be rendered safely, or any case where source-operation association is
+ambiguous. Those cases shall retain their current safe behaviour.
+
+In a debug-enabled run, diagnostics shall record only the page number, stable
+reason code, and aggregate attempted/detected/replaced/retained counts. They
+shall not record OCR text, replacement text, decoded source bytes, image
+pixels, or raw OCR polygons.
+
+### Rationale
+
+A visible PDF text operation can have valid glyph drawing but lack a safe
+Unicode mapping. Leaving it unchanged protects against inventing source text,
+but a local visual OCR fallback can recover some such cases while retaining
+the existing safety boundary and avoiding duplicate processing of nearby text.
+
+### Notes
+
+Implementation needs a separately approved technical design for constructing
+the selective render and proving source-operation association. It must use a
+local renderer already permitted by the dependency and security requirements,
+or introduce separately approved technical and security requirements. Tests
+must use synthetic PDFs with an intentionally undecodable visible text
+operation, nearby successfully decoded native text, and nearby raster text.

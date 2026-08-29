@@ -237,3 +237,48 @@ that cache diagnostics contain no request text or secrets, and that source-cache
 files are ignored by discovery and Git.
 
 ---
+
+## SR-2026-08-29-01
+
+| Property | Value |
+|----------|-------|
+| Title | Constrain local PDFium rendering of untrusted PDFs |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-approved security review for FR-2026-08-29-01 |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-29-01, TR-2026-08-29-01, SR-2026-08-01-01 |
+
+### Description
+
+The PDFium renderer introduced for FR-2026-08-29-01 shall render only bytes
+already present in the submitted PDF. It shall not execute JavaScript, launch
+links or actions, fetch network resources, open external files, write rendered
+pages to disk, or transmit rendered pixels to an external service except
+through the user-selected OCR provider's existing approved data boundary.
+
+The adapter shall render at most one page at a time at the approved 200-DPI
+resolution. Before allocating the render bitmap, it shall reject a page whose
+200-DPI pixel dimensions are non-finite, non-positive, or exceed 50 million
+pixels. The failed page shall retain its vector content, and a debug diagnostic
+may record only the page number and a stable size-limit reason code.
+
+### Rationale
+
+PDF rendering introduces a native-code parser and potentially large bitmap
+allocations for untrusted input. Keeping rendering local, action-free, bounded,
+and in memory limits disclosure and resource-exhaustion risk while permitting
+OCR of vector-outlined text.
+
+### Notes
+
+`pypdfium2==5.13.0` remains subject to the project's PyPI-only, seven-day
+cooldown, wheel-only, and lockfile controls. No registry exception or remote
+renderer is authorized by this requirement.
+
+Automated tests shall use synthetic PDFs and mocked renderer boundaries. They
+shall verify that an oversized page is retained before renderer invocation and
+that diagnostics omit source text, pixels, renderer input, and exception
+details.
+
+---

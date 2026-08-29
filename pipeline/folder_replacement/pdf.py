@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import BytesIO
 import math
 from pathlib import Path
 import re
@@ -12,6 +13,7 @@ from typing import cast
 import warnings
 
 from PIL import Image
+import pypdfium2 as pdfium  # type: ignore[import-untyped]
 from pypdf import PdfReader, PdfWriter
 from pypdf._cmap import get_encoding
 from pypdf.generic import (
@@ -38,11 +40,33 @@ from pipeline.bounded_text_layout import (
     replace_and_fit_text_box,
 )
 from pipeline.folder_replacement.bitmap import replace_image as _process_bitmap_image
-from pipeline.folder_replacement.common import replace_native_text
-from pipeline.ocr import OcrProvider
+from pipeline.folder_replacement.common import (
+    TEXT_REPLACEMENT_MINIMUM_CONFIDENCE,
+    replace_native_text,
+)
+from pipeline.ocr import BoundingPolygon, OcrProvider, OcrRequest, OcrText, PixelPoint
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.runtime_assets import math_font_is_available, symbols_font_is_available
-from pipeline.text_replacement import TextReplacementProvider
+from pipeline.text_region_colours import estimate_text_region_colours
+from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+
+
+_PDF_VECTOR_OCR_DPI = 200
+_PDF_VECTOR_OCR_MAXIMUM_PIXELS = 50_000_000
+_PDF_VECTOR_OCR_MINIMUM_BACKGROUND_CONFIDENCE = 0.0
+_PDF_VECTOR_OCR_UPRIGHT_TOLERANCE_DEGREES = 5.0
+_PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS = frozenset({b"Tj", b"TJ", b"'", b'"'})
+_PDF_VECTOR_OCR_PAINT_OPERATORS = frozenset({
+    b"S", b"s", b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*", b"sh",
+})
+
+
+@dataclass(frozen=True)
+class _PdfVectorRenderDocument:
+    """Filtered PDF bytes plus the pages that need a vector OCR render."""
+
+    data: bytes
+    pages_with_vector_paint: frozenset[int]
 
 
 def _replace_native_text(
@@ -68,7 +92,7 @@ def _replace_image_text(
 
 
 def pdf_work_total(source: Path) -> int:
-    """Return the native-text plus embedded-raster work units in one PDF."""
+    """Return the native, embedded-raster, and per-page vector-review work units."""
     reader = PdfReader(source)
     image_references: set[int] = set()
     inline_image_count = 0
@@ -79,7 +103,7 @@ def pdf_work_total(source: Path) -> int:
                 inline_image_count += 1
             else:
                 image_references.add(reference.idnum)
-    return len(reader.pages) + 1 + len(image_references) + inline_image_count
+    return 2 * len(reader.pages) + 1 + len(image_references) + inline_image_count
 
 
 def replace_pdf_file(
@@ -96,6 +120,7 @@ def replace_pdf_file(
     diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int]:
     reader = PdfReader(source)
+    vector_render_document = _pdf_vector_render_document(reader)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
     native_items = 0
@@ -167,9 +192,361 @@ def replace_pdf_file(
             image_file.replace(replacement_image)
             embedded_image_index += 1
             work_completed(f"embedded image {embedded_image_index}")
+    for page_index, page in enumerate(writer.pages, start=1):
+        if page_index in vector_render_document.pages_with_vector_paint:
+            image_regions += _replace_pdf_vector_outline_text(
+                page,
+                writer,
+                vector_render_document.data,
+                page_index,
+                ocr_provider,
+                replacement_provider,
+                source_language,
+                target_language,
+                diagnostics,
+            )
+        work_completed(f"vector OCR page {page_index}/{len(writer.pages)}")
     with destination.open("wb") as output_file:
         writer.write(output_file)
     return native_items, image_regions
+
+
+def _pdf_vector_render_document(reader: PdfReader) -> _PdfVectorRenderDocument:
+    """Return an in-memory PDF that paints paths but omits text and raster images."""
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    seen_forms: set[int] = set()
+    for page in writer.pages:
+        _pdf_strip_text_and_images_for_vector_render(page, writer, seen_forms)
+    pages_with_vector_paint = frozenset(
+        page_index
+        for page_index, page in enumerate(writer.pages, start=1)
+        if _pdf_content_has_vector_paint(page, writer, set())
+    )
+    output = BytesIO()
+    writer.write(output)
+    return _PdfVectorRenderDocument(output.getvalue(), pages_with_vector_paint)
+
+
+def _pdf_strip_text_and_images_for_vector_render(
+    content_owner: object, writer: PdfWriter, seen_forms: set[int]
+) -> None:
+    """Remove OCR-owned painting operations while retaining vector page artwork."""
+    get_contents = getattr(content_owner, "get_contents", None)
+    contents = get_contents() if callable(get_contents) else content_owner
+    if contents is None:
+        return
+    resources = getattr(content_owner, "get", lambda _key, _default=None: None)("/Resources")
+    xobjects = (
+        resources.get_object().get("/XObject")
+        if resources is not None and resources.get_object().get("/XObject") is not None
+        else None
+    )
+    content_stream = ContentStream(contents, writer)
+    retained: list[tuple[list[object], bytes]] = []
+    changed = False
+    for operands, operator in content_stream.operations:
+        if operator in _PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS or operator == b"INLINE IMAGE":
+            changed = True
+            continue
+        if operator == b"Do" and operands and xobjects is not None:
+            xobject = xobjects.get_object().get(operands[0])
+            if xobject is not None and xobject.get_object().get("/Subtype") == "/Image":
+                changed = True
+                continue
+        retained.append((operands, operator))
+    if changed:
+        content_stream.operations = retained
+        replace_contents = getattr(content_owner, "replace_contents", None)
+        if callable(replace_contents):
+            replace_contents(content_stream)
+        else:
+            set_data = getattr(content_owner, "set_data", None)
+            if not callable(set_data):
+                raise ValueError("A PDF Form XObject has no writable content stream.")
+            set_data(content_stream.get_data())
+    if xobjects is None:
+        return
+    for xobject in xobjects.get_object().values():
+        form = xobject.get_object()
+        if form.get("/Subtype") != "/Form":
+            continue
+        identifier = form.indirect_reference.idnum if form.indirect_reference is not None else id(form)
+        if identifier in seen_forms:
+            continue
+        seen_forms.add(identifier)
+        _pdf_strip_text_and_images_for_vector_render(form, writer, seen_forms)
+
+
+def _pdf_content_has_vector_paint(
+    content_owner: object, writer: PdfWriter, seen_forms: set[int]
+) -> bool:
+    """Return whether filtered content can paint vector pixels on its page."""
+    get_contents = getattr(content_owner, "get_contents", None)
+    contents = get_contents() if callable(get_contents) else content_owner
+    if contents is None:
+        return False
+    resources = getattr(content_owner, "get", lambda _key, _default=None: None)("/Resources")
+    xobjects = (
+        resources.get_object().get("/XObject")
+        if resources is not None and resources.get_object().get("/XObject") is not None
+        else None
+    )
+    for operands, operator in ContentStream(contents, writer).operations:
+        if operator in _PDF_VECTOR_OCR_PAINT_OPERATORS:
+            return True
+        if operator != b"Do" or not operands or xobjects is None:
+            continue
+        xobject = xobjects.get_object().get(operands[0])
+        if xobject is None:
+            continue
+        form = xobject.get_object()
+        if form.get("/Subtype") != "/Form":
+            continue
+        identifier = form.indirect_reference.idnum if form.indirect_reference is not None else id(form)
+        if identifier in seen_forms:
+            continue
+        seen_forms.add(identifier)
+        if _pdf_content_has_vector_paint(form, writer, seen_forms):
+            return True
+    return False
+
+
+def _replace_pdf_vector_outline_text(
+    page: object,
+    writer: PdfWriter,
+    vector_render_document: bytes,
+    page_index: int,
+    ocr_provider: OcrProvider,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    diagnostics: list[dict[str, object]] | None,
+) -> int:
+    """OCR vector-only page pixels and append safe page-space PDF replacements."""
+    reason_counts: dict[str, int] = {}
+    page_width, page_height = _pdf_vector_page_size(page)
+    scale = _PDF_VECTOR_OCR_DPI / 72.0
+    width_pixels = math.ceil(page_width * scale)
+    height_pixels = math.ceil(page_height * scale)
+    if (
+        not all(math.isfinite(value) and value > 0.0 for value in (page_width, page_height))
+        or width_pixels * height_pixels > _PDF_VECTOR_OCR_MAXIMUM_PIXELS
+    ):
+        _pdf_vector_reason(reason_counts, "vector_ocr_page_size_limit")
+        _record_pdf_vector_summary(diagnostics, page_index, 0, 0, 0, reason_counts)
+        return 0
+    rotation = _pdf_float(getattr(page, "get", lambda _key, _default=None: None)("/Rotate") or 0)
+    if rotation % 360.0 != 0.0:
+        _pdf_vector_reason(reason_counts, "vector_ocr_page_rotation_unsupported")
+        _record_pdf_vector_summary(diagnostics, page_index, 0, 0, 0, reason_counts)
+        return 0
+    document = pdfium.PdfDocument(vector_render_document)
+    try:
+        rendered = document[page_index - 1].render(scale=scale, may_draw_forms=False).to_pil().convert("RGB")
+    finally:
+        document.close()
+    detected = ocr_provider.recognize(OcrRequest(rendered, source_language)).text_items
+    accepted = 0
+    replacements: list[tuple[OcrText, str]] = []
+    for item in detected:
+        if item.confidence < TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:
+            _pdf_vector_reason(reason_counts, "vector_ocr_confidence_below_threshold")
+            continue
+        accepted += 1
+        if not _pdf_vector_can_render_upright(item.bounding_polygon):
+            _pdf_vector_reason(reason_counts, "vector_ocr_polygon_orientation_unsupported")
+            continue
+        colours = estimate_text_region_colours(rendered, item)
+        if colours.background_colour_confidence < _PDF_VECTOR_OCR_MINIMUM_BACKGROUND_CONFIDENCE:
+            _pdf_vector_reason(reason_counts, "vector_ocr_background_unsafe")
+            continue
+        replacement = replacement_provider.replace(
+            TextReplacementRequest(item.text, False, source_language, target_language)
+        ).text
+        if "\n" in replacement or not _pdf_static_font_supports_text(replacement):
+            _pdf_vector_reason(reason_counts, "vector_ocr_replacement_unsupported")
+            continue
+        replacements.append((item, replacement))
+    if not replacements:
+        _record_pdf_vector_summary(diagnostics, page_index, len(detected), accepted, 0, reason_counts)
+        return 0
+    font_name, font_reference = _pdf_embedded_noto_font(writer, "sans-serif", False)
+    _pdf_add_font_resource(page, font_name, font_reference)
+    overlay: list[tuple[list[object], bytes]] = []
+    written = 0
+    for item, replacement in replacements:
+        colours = estimate_text_region_colours(rendered, item)
+        operations = _pdf_vector_overlay_operations(
+            item.bounding_polygon,
+            replacement,
+            page_height,
+            scale,
+            font_name,
+            font_reference,
+            colours.background_colour.red,
+            colours.background_colour.green,
+            colours.background_colour.blue,
+            colours.text_colour.red,
+            colours.text_colour.green,
+            colours.text_colour.blue,
+        )
+        if operations is None:
+            _pdf_vector_reason(reason_counts, "vector_ocr_replacement_unsupported")
+            continue
+        overlay.extend(operations)
+        written += 1
+    if overlay:
+        content_stream = ContentStream(getattr(page, "get_contents")(), writer)
+        inverse_ctm = _pdf_inverse_matrix(_pdf_content_final_ctm(content_stream))
+        if inverse_ctm is None:
+            _pdf_vector_reason(reason_counts, "vector_ocr_page_transform_unsupported")
+            written = 0
+        else:
+            content_stream.operations.extend((
+                ([], b"q"),
+                ([FloatObject(value) for value in inverse_ctm], b"cm"),
+            ))
+            content_stream.operations.extend(overlay)
+            content_stream.operations.append(([], b"Q"))
+            getattr(page, "replace_contents")(content_stream)
+    _record_pdf_vector_summary(diagnostics, page_index, len(detected), accepted, written, reason_counts)
+    return written
+
+
+def _pdf_vector_page_size(page: object) -> tuple[float, float]:
+    media_box = getattr(page, "mediabox")
+    return (float(media_box.width), float(media_box.height))
+
+
+def _pdf_content_final_ctm(content_stream: ContentStream) -> tuple[float, float, float, float, float, float]:
+    """Return the graphics CTM left by a page stream before an appended overlay."""
+    ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    stack: list[tuple[float, float, float, float, float, float]] = []
+    for operands, operator in content_stream.operations:
+        if operator == b"q":
+            stack.append(ctm)
+        elif operator == b"Q":
+            if stack:
+                ctm = stack.pop()
+        elif operator == b"cm" and len(operands) == 6:
+            ctm = _pdf_concat_matrices(_pdf_matrix(operands), ctm)
+    return ctm
+
+
+def _pdf_inverse_matrix(
+    matrix: tuple[float, float, float, float, float, float],
+) -> tuple[float, float, float, float, float, float] | None:
+    a, b, c, d, e, f = matrix
+    determinant = a * d - b * c
+    if not math.isfinite(determinant) or abs(determinant) <= 1e-9:
+        return None
+    return (
+        d / determinant,
+        -b / determinant,
+        -c / determinant,
+        a / determinant,
+        (c * f - d * e) / determinant,
+        (b * e - a * f) / determinant,
+    )
+
+
+def _pdf_vector_can_render_upright(polygon: BoundingPolygon) -> bool:
+    """Allow only the small horizontal OCR skew accepted for bitmap replacements."""
+    if len(polygon.vertices) != 4:
+        return False
+    edge_start, edge_end = max(
+        zip(polygon.vertices, polygon.vertices[1:] + polygon.vertices[:1], strict=True),
+        key=lambda edge: math.hypot(edge[1].x - edge[0].x, edge[1].y - edge[0].y),
+    )
+    delta_x = edge_end.x - edge_start.x
+    delta_y = edge_end.y - edge_start.y
+    if not all(math.isfinite(value) for value in (delta_x, delta_y)):
+        return False
+    edge_length = math.hypot(delta_x, delta_y)
+    if edge_length <= 0.0:
+        return False
+    baseline_angle = (math.degrees(math.atan2(delta_y, delta_x)) + 90.0) % 180.0 - 90.0
+    return abs(baseline_angle) <= _PDF_VECTOR_OCR_UPRIGHT_TOLERANCE_DEGREES
+
+
+def _pdf_vector_overlay_operations(
+    polygon: BoundingPolygon,
+    replacement: str,
+    page_height: float,
+    scale: float,
+    font_name: str,
+    font_reference: object,
+    background_red: int,
+    background_green: int,
+    background_blue: int,
+    text_red: int,
+    text_green: int,
+    text_blue: int,
+) -> list[tuple[list[object], bytes]] | None:
+    if not replacement:
+        return []
+    left = min(point.x for point in polygon.vertices) / scale
+    right = max(point.x for point in polygon.vertices) / scale
+    top = page_height - min(point.y for point in polygon.vertices) / scale
+    bottom = page_height - max(point.y for point in polygon.vertices) / scale
+    width, height = right - left, top - bottom
+    if not all(math.isfinite(value) and value > 0.0 for value in (left, right, top, bottom, width, height)):
+        return None
+    typeface = noto_typefaces()["sans-serif"]
+    measurement = skia.Font(typeface, 1.0)
+    text_width = measurement.measureText(replacement)
+    if text_width <= 0.0:
+        return None
+    font_size = min(height * 0.76, width * 0.92 / text_width)
+    if font_size < 1.0:
+        return None
+    encoded = _pdf_static_glyph_bytes(font_reference, replacement)
+    inset = 2.0 / scale
+    baseline = bottom + (height - font_size) / 2.0 + font_size * 0.78
+    text_x = left + max(0.0, (width - text_width * font_size) / 2.0)
+    return [
+        ([], b"q"),
+        ([FloatObject(background_red / 255.0), FloatObject(background_green / 255.0), FloatObject(background_blue / 255.0)], b"rg"),
+        ([FloatObject(left - inset), FloatObject(bottom - inset)], b"m"),
+        ([FloatObject(right + inset), FloatObject(bottom - inset)], b"l"),
+        ([FloatObject(right + inset), FloatObject(top + inset)], b"l"),
+        ([FloatObject(left - inset), FloatObject(top + inset)], b"l"),
+        ([], b"h"),
+        ([], b"f"),
+        ([], b"BT"),
+        ([NameObject(f"/{font_name}"), FloatObject(font_size)], b"Tf"),
+        ([FloatObject(text_red / 255.0), FloatObject(text_green / 255.0), FloatObject(text_blue / 255.0)], b"rg"),
+        ([NumberObject(1), NumberObject(0), NumberObject(0), NumberObject(1), FloatObject(text_x), FloatObject(baseline)], b"Tm"),
+        ([ByteStringObject(encoded)], b"Tj"),
+        ([], b"ET"),
+        ([], b"Q"),
+    ]
+
+
+def _pdf_vector_reason(reasons: dict[str, int], reason_code: str) -> None:
+    reasons[reason_code] = reasons.get(reason_code, 0) + 1
+
+
+def _record_pdf_vector_summary(
+    diagnostics: list[dict[str, object]] | None,
+    page_index: int,
+    detected: int,
+    accepted: int,
+    written: int,
+    reasons: dict[str, int],
+) -> None:
+    if diagnostics is None or (detected == 0 and not reasons):
+        return
+    diagnostics.append({
+        "kind": "vector_ocr_summary",
+        "page": page_index,
+        "ocr_detected_regions": detected,
+        "confidence_accepted_regions": accepted,
+        "replacement_written_regions": written,
+        "safely_retained_regions": sum(reasons.values()),
+        "retained_reason_counts": dict(sorted(reasons.items())),
+    })
 
 
 def _replace_pdf_annotations(

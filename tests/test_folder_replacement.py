@@ -108,6 +108,36 @@ class _LowConfidenceOcrProvider(_EmptyOcrProvider):
         )
 
 
+class _VectorOutlineOcrProvider(_EmptyOcrProvider):
+    """Return one known 200-DPI polygon for a synthetic vector-only page."""
+
+    def __init__(
+        self, confidence: float = 0.99, polygon: BoundingPolygon | None = None
+    ) -> None:
+        self.confidence = confidence
+        self.polygon = polygon or BoundingPolygon(
+            (
+                PixelPoint(50, 130),
+                PixelPoint(230, 130),
+                PixelPoint(230, 200),
+                PixelPoint(50, 200),
+            )
+        )
+        self.calls = 0
+
+    def recognize(self, request: OcrRequest) -> OcrResult:
+        self.calls += 1
+        return OcrResult(
+            (
+                OcrText(
+                    "outlined",
+                    self.confidence,
+                    self.polygon,
+                ),
+            )
+        )
+
+
 class _RecordingReplacementProvider:
     def __init__(self, filename: str | None = None, replacement_text: str | None = None) -> None:
         self.filename = filename
@@ -1114,8 +1144,8 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(2, progress_bars[0].updates)
             self.assertTrue(progress_bars[0].closed)
 
-    # Verifies FR-2026-08-27-11.
-    def test_reports_pdf_native_text_progress_for_each_page_and_form_pass(self) -> None:
+    # Verifies FR-2026-08-03-04, FR-2026-08-27-11, and FR-2026-08-29-01.
+    def test_reports_pdf_native_and_vector_review_progress_for_each_page(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"
@@ -1145,12 +1175,18 @@ class FolderReplacementTests(unittest.TestCase):
 
             self.assertEqual(1, result.processed_files)
             self.assertEqual(1, len(progress_bars))
-            self.assertEqual(3, progress_bars[0].total)
+            self.assertEqual(5, progress_bars[0].total)
             self.assertEqual(
-                ["native text page 1/2", "native text page 2/2", "native form fields"],
+                [
+                    "native text page 1/2",
+                    "native text page 2/2",
+                    "native form fields",
+                    "vector OCR page 1/2",
+                    "vector OCR page 2/2",
+                ],
                 progress_bars[0].postfixes,
             )
-            self.assertEqual(3, progress_bars[0].updates)
+            self.assertEqual(5, progress_bars[0].updates)
 
     # Verifies FR-2026-08-03-05.
     def test_replaces_editable_svg_vector_text_without_ocr(self) -> None:
@@ -1366,6 +1402,261 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(1, result.processed_files)
             self.assertEqual(1, result.replaced_native_text_items)
             self.assertIn(b"\\043\\043\\043\\043\\043", (output_root / "document.pdf").read_bytes())
+
+    # Verifies FR-2026-08-29-01 and SR-2026-08-29-01.
+    def test_replaces_outlined_pdf_vector_text_through_a_200_dpi_ocr_overlay(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "outlined.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"q 0.8 0.9 1 rg 18 28 65 27 re f "
+                b"0 0 0 rg 26 36 4 12 re f 35 36 4 12 re f Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _VectorOutlineOcrProvider()
+            result = self._run(
+                input_root,
+                output_root,
+                ocr_provider,
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(1, ocr_provider.calls)
+            self.assertEqual(1, result.replaced_image_regions)
+            output = PdfReader(output_root / "outlined.pdf")
+            self.assertIn("#######", output.pages[0].extract_text())
+            report = json.loads(
+                (output_root / "outlined.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            summary = report["entries"][0]
+            self.assertEqual("vector_ocr_summary", summary["kind"])
+            self.assertEqual(1, summary["replacement_written_regions"])
+            self.assertNotIn("outlined", json.dumps(summary))
+
+    # Verifies FR-2026-08-29-01.
+    def test_replaces_slightly_skewed_vector_ocr_region_with_upright_pdf_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "skewed.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"0.8 0.9 1 rg 0 0 100 100 re f")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _VectorOutlineOcrProvider(polygon=BoundingPolygon((
+                PixelPoint(50, 130),
+                PixelPoint(230, 136),
+                PixelPoint(229, 200),
+                PixelPoint(49, 194),
+            )))
+            result = self._run(
+                input_root,
+                output_root,
+                ocr_provider,
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.replaced_image_regions)
+            output = PdfReader(output_root / "skewed.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            text_matrix = next(
+                operands for operands, operator in stream.operations
+                if operator == b"Tm" and len(operands) == 6
+            )
+            self.assertEqual([1.0, 0.0, 0.0, 1.0], [float(value) for value in text_matrix[:4]])
+            report = json.loads(
+                (output_root / "skewed.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(1, report["entries"][0]["replacement_written_regions"])
+
+    # Verifies FR-2026-08-29-01.
+    def test_retains_materially_rotated_vector_ocr_region(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "rotated.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"0.8 0.9 1 rg 0 0 100 100 re f")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _VectorOutlineOcrProvider(polygon=BoundingPolygon((
+                PixelPoint(50, 130),
+                PixelPoint(230, 150),
+                PixelPoint(223, 214),
+                PixelPoint(43, 194),
+            )))
+            result = self._run(
+                input_root,
+                output_root,
+                ocr_provider,
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, result.replaced_image_regions)
+            report = json.loads(
+                (output_root / "rotated.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                {"vector_ocr_polygon_orientation_unsupported": 1},
+                report["entries"][0]["retained_reason_counts"],
+            )
+
+    # Verifies FR-2026-08-29-01 and TR-2026-08-29-01.
+    def test_skips_pdfium_and_ocr_for_native_text_only_pdf_page(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "native.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (Hello) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _CountingOcrProvider()
+            with patch("pipeline.folder_replacement.pdf.pdfium.PdfDocument") as renderer:
+                result = self._run(
+                    input_root, output_root, ocr_provider, _RecordingReplacementProvider()
+                )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(0, ocr_provider.calls)
+            renderer.assert_not_called()
+
+    # Verifies FR-2026-08-29-01 and TR-2026-08-29-01.
+    def test_runs_vector_ocr_when_only_an_invoked_form_paints_vectors(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "form.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            form = DecodedStreamObject()
+            form.set_data(b"0 0 0 rg 10 10 30 20 re f")
+            form.update({
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Form"),
+                NameObject("/BBox"): ArrayObject([
+                    NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(100)
+                ]),
+            })
+            form_reference = writer._add_object(form)
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/XObject"): DictionaryObject({NameObject("/Form1"): form_reference})
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"q /Form1 Do Q")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _CountingOcrProvider()
+            result = self._run(
+                input_root, output_root, ocr_provider, _RecordingReplacementProvider()
+            )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(1, ocr_provider.calls)
+
+    # Verifies FR-2026-08-29-01.
+    def test_retains_low_confidence_outlined_pdf_vector_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "outlined.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"0.8 0.9 1 rg 18 28 65 27 re f")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            result = self._run(
+                input_root,
+                output_root,
+                _VectorOutlineOcrProvider(0.64),
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, result.replaced_image_regions)
+            report = json.loads(
+                (output_root / "outlined.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            summary = report["entries"][0]
+            self.assertEqual(
+                {"vector_ocr_confidence_below_threshold": 1},
+                summary["retained_reason_counts"],
+            )
+
+    # Verifies SR-2026-08-29-01.
+    def test_retains_oversized_pdf_page_before_vector_renderer_invocation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "oversized.pdf"
+            writer = PdfWriter()
+            page = writer.add_blank_page(3_000, 3_000)
+            contents = DecodedStreamObject()
+            contents.set_data(b"0 0 0 rg 1 1 1 1 re f")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            ocr_provider = _CountingOcrProvider()
+            result = self._run(
+                input_root,
+                output_root,
+                ocr_provider,
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, result.replaced_image_regions)
+            self.assertEqual(0, ocr_provider.calls)
+            report = json.loads(
+                (output_root / "oversized.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                {"vector_ocr_page_size_limit": 1},
+                report["entries"][0]["retained_reason_counts"],
+            )
 
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_content_uses_the_safe_replacement_font(self) -> None:

@@ -192,3 +192,53 @@ Format-specific replacement behaviour will need iterative development. Separate 
 The initial module boundary needs confirmation: whether a “format type” means each individual extension (for example, PNG and JPEG separately) or a format family with a shared codec-oriented handler (for example, one raster-bitmap handler). The refactor shall preserve the current command-line behaviour, output formats, per-file isolation, progress reporting, and public folder-replacement API.
 
 ---
+
+## TR-2026-08-29-01
+
+| Property | Value |
+|----------|-------|
+| Title | Local PDFium renderer for outlined-PDF-text OCR |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-approved renderer decision for FR-2026-08-29-01 |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-29-01, SR-2026-08-29-01, TR-2026-08-01-01 |
+
+### Description
+
+The project shall use `pypdfium2==5.13.0` from PyPI as its local PDF renderer
+for FR-2026-08-29-01. The adapter shall render one PDF page at a time at 200
+DPI into an in-memory RGB bitmap. It shall support macOS, Windows, and Linux
+only where this exact package version supplies a compatible pre-built wheel
+for the project's pinned Python version and platform.
+
+The PDF adapter shall provide a render input containing vector-painted page
+content while excluding native PDF text and embedded raster images that its
+existing replacement paths own. It shall map OCR polygons between the 200-DPI
+render and PDF user-space coordinates without writing an intermediate document
+or image file.
+
+Before rendering a page, the adapter shall inspect that filtered content for
+potentially visible vector path-painting or shading operations, recursively
+following Form XObjects. A page with none shall not invoke PDFium or the OCR
+provider. This inspection is conservative: a positive result authorizes the
+bounded render and OCR pass but does not assert that the page contains text.
+
+### Rationale
+
+PDFium provides a local, deterministic renderer for vector outlines that pypdf
+does not rasterize. An isolated render input prevents the new pass from
+detecting and replacing the same visible text that native-PDF or embedded-image
+processing already handles.
+
+### Notes
+
+The package version is older than the repository's mandatory seven-day PyPI
+cooldown at the time of approval. Installation remains subject to the normal
+PyPI-only, no-source-build, lockfile, and dependency-policy checks.
+
+Automated tests shall mock the rendering boundary where rendering output is not
+under test. Integration tests that exercise PDFium shall use synthetic PDFs and
+verify the 200-DPI page-to-user-space coordinate conversion.
+
+---
