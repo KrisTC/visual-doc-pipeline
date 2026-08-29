@@ -2567,6 +2567,192 @@ class FolderReplacementTests(unittest.TestCase):
                 for operands, operator in stream.operations
             ))
 
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_reflows_a_multi_run_prose_block_in_one_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td (first ) Tj /F2 12 Tf (line) Tj "
+                b"T* /F1 12 Tf (second ) Tj /F2 12 Tf (line) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(
+                replacement_text="One translated sentence that may reflow."
+            )
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["first line\nsecond line"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_reflows_prose_across_equivalent_graphics_wrappers(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"q 0 g 0 0 200 100 re W* n /Span << >> BDC BT /F1 12 Tf 10 70 Td "
+                b"(first line) Tj ET EMC Q "
+                b"q 0 g 0 0 200 100 re W* n /Span << >> BDC BT /F1 12 Tf 10 56 Td "
+                b"(second line) Tj ET EMC Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["first line\nsecond line"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_does_not_merge_across_intervening_styled_heading(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT 0 g /F1 18 Tf 10 84 Td (title) Tj ET "
+                b"BT 1 0 0 rg /F1 12 Tf 10 70 Td (heading) Tj ET "
+                b"BT 0 g /F1 12 Tf 10 56 Td (body) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(3, result.replaced_native_text_items)
+            self.assertEqual(["title", "heading", "body"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-04.
+    def test_basic_layout_pdf_does_not_merge_same_style_title_and_smaller_body(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT 0 g /F1 18 Tf 10 84 Td (title) Tj ET "
+                b"BT 0 g /F1 12 Tf 10 56 Td (body) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(["title", "body"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_keeps_borderless_repeated_column_gutters_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td (left) Tj 40 0 Td (right) Tj "
+                b"1 0 0 1 10 56 Tm (lower) Tj 40 0 Td (value) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(4, result.replaced_native_text_items)
+            self.assertEqual(["left", "right", "lower", "value"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_keeps_chunks_separated_by_a_vector_rule(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"0 0 0 RG 17 60 m 17 80 l S BT /F1 12 Tf 10 70 Td (a) Tj 8 0 Td (b) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(["a", "b"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_ignores_a_decorative_rule_outside_prose_bounds(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"0 0 0 RG 150 60 m 190 60 l S BT /F1 12 Tf 14 TL 10 70 Td "
+                b"(first line) Tj T* (second line) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["first line\nsecond line"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_keeps_distant_same_line_labels_as_independent_regions(self) -> None:
         with TemporaryDirectory() as temporary_directory:

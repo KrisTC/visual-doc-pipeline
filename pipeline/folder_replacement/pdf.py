@@ -1063,6 +1063,7 @@ class _PdfShownText:
     horizontal_stretch: float
     font_size: float
     graphics_context: int
+    paint_context: tuple[object, ...]
     ctm: tuple[float, float, float, float, float, float]
     line_matrix: tuple[float, float, float, float, float, float]
     text_matrix_after: tuple[float, float, float, float, float, float]
@@ -1105,6 +1106,14 @@ class _PdfVisualRegion:
     anchor: _PdfShownText
 
 
+@dataclass(frozen=True, slots=True)
+class _PdfVisualSeparator:
+    """One potentially visible vector edge in page user space."""
+
+    start: tuple[float, float]
+    end: tuple[float, float]
+
+
 _PDF_ACTUAL_TEXT_TEXT_ONLY_OPERATORS = frozenset({
     b"BT", b"ET", b"Tf", b"Tm", b"Td", b"TD", b"T*", b"TL", b"Tc", b"Tw",
     b"Tz", b"Ts", b"Tr", b"Tj", b"TJ", b"'", b'"', b"q", b"Q", b"cm", b"gs",
@@ -1136,6 +1145,7 @@ def _replace_pdf_fitted_operations(
     opacity, clipping, and surrounding painting operations.
     """
     operations = content_stream.operations
+    visual_separators = _pdf_visual_separators(operations)
     text_object_ends: set[int] = set()
     inside_text = False
     text_object_index = -1
@@ -1151,8 +1161,24 @@ def _replace_pdf_fitted_operations(
     position_known = True
     shown: list[_PdfShownText] = []
     ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-    graphics_stack: list[tuple[float, float, float, float, float, float]] = []
+    graphics_stack: list[
+        tuple[
+            tuple[float, float, float, float, float, float],
+            tuple[object, ...], tuple[object, ...], tuple[object, ...], tuple[object, ...],
+        ]
+    ] = []
+    # A structural barrier is different from a graphics-state instruction.
+    # PDF producers commonly repeat q/Q, BDC/EMC, colours, ExtGStates, and a
+    # page-sized clip around every text run.  Group only by the resolved state
+    # below; otherwise those wrappers turn one visual sentence into one region
+    # per PDF operation.
     graphics_context = 0
+    fill_paint: tuple[object, ...] = ()
+    stroke_paint: tuple[object, ...] = ()
+    external_graphics_state: tuple[object, ...] = ()
+    clipping_path: tuple[object, ...] = ()
+    current_path: list[tuple[object, ...]] = []
+    pending_clip: tuple[object, ...] | None = None
     barrier = 0
     marked_content_actual_text: list[int | None] = []
     actual_text_scopes: dict[int, _PdfActualTextScope] = {}
@@ -1183,35 +1209,59 @@ def _replace_pdf_fitted_operations(
                     index, set(), {}, {}
                 )
             marked_content_actual_text.append(marked_scope_index)
-            graphics_context += 1
+            if marked_scope_index is not None:
+                graphics_context += 1
             continue
         if operator == b"EMC":
             if not marked_content_actual_text:
                 barrier += 1
             else:
-                marked_content_actual_text.pop()
-            graphics_context += 1
+                marked_scope_index = marked_content_actual_text.pop()
+                if marked_scope_index is not None:
+                    graphics_context += 1
             continue
         if operator == b"q":
-            graphics_stack.append(ctm)
-            graphics_context += 1
+            graphics_stack.append((
+                ctm, fill_paint, stroke_paint, external_graphics_state, clipping_path,
+            ))
             continue
         if operator == b"Q":
             if not graphics_stack:
                 barrier += 1
                 continue
-            ctm = graphics_stack.pop()
-            graphics_context += 1
+            ctm, fill_paint, stroke_paint, external_graphics_state, clipping_path = graphics_stack.pop()
             continue
         if operator == b"cm":
             if len(operands) < 6:
                 barrier += 1
             else:
                 ctm = _pdf_concat_matrices(ctm, _pdf_matrix(operands))
-                graphics_context += 1
+            continue
+        if operator in _PDF_PATH_CONSTRUCTION_OPERATORS:
+            current_path.append(_pdf_path_state_token(operator, operands, ctm))
+            continue
+        if operator in {b"W", b"W*"}:
+            pending_clip = (operator, tuple(current_path))
+            continue
+        if operator == b"n":
+            if pending_clip is not None:
+                # The clipping path is part of the effective paint state.
+                # Repeated equivalent clips compare equal even when wrapped in
+                # separate q/Q scopes.
+                clipping_path = (*clipping_path, pending_clip)
+            current_path = []
+            pending_clip = None
+            continue
+        if operator in _PDF_FILL_PAINT_OPERATORS:
+            fill_paint = _pdf_paint_state_token(operator, operands)
+            continue
+        if operator in _PDF_STROKE_PAINT_OPERATORS:
+            stroke_paint = _pdf_paint_state_token(operator, operands)
+            continue
+        if operator == b"gs":
+            external_graphics_state = _pdf_paint_state_token(operator, operands)
             continue
         if operator in _PDF_GRAPHICS_STATE_BOUNDARY_OPERATORS:
-            graphics_context += 1
             continue
         if operator == b"BT":
             inside_text = True
@@ -1230,6 +1280,8 @@ def _replace_pdf_fitted_operations(
             # conservative visual-region boundary.  Plain BT/ET separation is
             # deliberately handled above and remains eligible for grouping.
             graphics_context += 1
+            current_path = []
+            pending_clip = None
             continue
         if operator == b"Tf" and len(operands) >= 2:
             current_font = (operands[0], operands[1])
@@ -1424,7 +1476,9 @@ def _replace_pdf_fitted_operations(
             )
             shown.append(_PdfShownText(
                 index, text_object_index, text, start, end, direction, normal,
-                horizontal_stretch, effective_size, graphics_context + barrier, ctm, line_matrix,
+                horizontal_stretch, effective_size, graphics_context + barrier,
+                (fill_paint, stroke_paint, external_graphics_state, clipping_path, text_rendering_mode),
+                ctm, line_matrix,
                 text_matrix_after, current_font, character_spacing, word_spacing,
                 horizontal_scale, text_rise, text_rendering_mode,
             ))
@@ -1432,7 +1486,7 @@ def _replace_pdf_fitted_operations(
         # placement transform exactly once when deriving the next position.
         text_matrix = text_matrix_after
 
-    candidate_regions = _pdf_visual_regions(shown, text_object_ends)
+    candidate_regions = _pdf_visual_regions(shown, text_object_ends, visual_separators)
 
     def record_retained_actual_text_scope(scope: _PdfActualTextScope) -> None:
         first_operation_index = min(scope.text_operation_indexes)
@@ -1728,6 +1782,31 @@ def _pdf_float(value: object) -> float:
     return float(value)
 
 
+def _pdf_paint_state_token(operator: bytes, operands: list[object]) -> tuple[object, ...]:
+    """Return a stable conservative equality token for a PDF paint setting."""
+    return (operator, *(repr(operand) for operand in operands))
+
+
+def _pdf_path_state_token(
+    operator: bytes,
+    operands: list[object],
+    ctm: tuple[float, float, float, float, float, float],
+) -> tuple[object, ...]:
+    """Return a page-space token for a clipping-path construction command."""
+    values: list[object] = [operator]
+    for index in range(0, len(operands), 2):
+        if index + 1 >= len(operands):
+            values.extend(repr(operand) for operand in operands[index:])
+            break
+        try:
+            values.append(_pdf_transform_point(
+                ctm, (_pdf_float(operands[index]), _pdf_float(operands[index + 1]))
+            ))
+        except ValueError:
+            values.extend(repr(operand) for operand in operands[index:index + 2])
+    return tuple(values)
+
+
 def _pdf_translate_matrix(
     matrix: tuple[float, float, float, float, float, float], tx: float, ty: float
 ) -> tuple[float, float, float, float, float, float]:
@@ -1740,11 +1819,111 @@ _PDF_GRAPHICS_STATE_BOUNDARY_OPERATORS = frozenset({
     b"scn", b"SCN", b"gs", b"w", b"J", b"j", b"M", b"d", b"W", b"W*", b"n",
 })
 
+_PDF_FILL_PAINT_OPERATORS = frozenset({b"g", b"rg", b"k", b"cs", b"sc", b"scn"})
+_PDF_STROKE_PAINT_OPERATORS = frozenset({b"G", b"RG", b"K", b"CS", b"SC", b"SCN"})
+_PDF_PATH_CONSTRUCTION_OPERATORS = frozenset({b"m", b"l", b"c", b"v", b"y", b"re", b"h"})
+
 # A PDF ``TJ`` array may place neighbouring table cells only a fraction of a
 # font-size apart.  A half-size gap keeps ordinary kerning and word fragments
 # together while preserving the separate fitted regions required for adjacent
 # cells.
 _PDF_VISUAL_CHUNK_GAP_FACTOR = 0.5
+
+
+def _pdf_visual_separators(
+    operations: list[tuple[list[object], bytes]],
+) -> tuple[_PdfVisualSeparator, ...]:
+    """Collect painted line and rectangle edges in page user space.
+
+    These edges are deliberately a conservative no-merge signal.  The parser
+    recognises the simple path forms PDF producers commonly use for table
+    borders and rules; unrecognised geometry cannot authorize a merge.
+    """
+    ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    graphics_stack: list[tuple[float, float, float, float, float, float]] = []
+    path_start: tuple[float, float] | None = None
+    path_current: tuple[float, float] | None = None
+    path_edges: list[_PdfVisualSeparator] = []
+    separators: list[_PdfVisualSeparator] = []
+
+    def point(operands: list[object], offset: int = 0) -> tuple[float, float] | None:
+        if len(operands) < offset + 2:
+            return None
+        try:
+            return _pdf_transform_point(
+                ctm, (_pdf_float(operands[offset]), _pdf_float(operands[offset + 1]))
+            )
+        except ValueError:
+            return None
+
+    def clear_path() -> None:
+        nonlocal path_start, path_current, path_edges
+        path_start = None
+        path_current = None
+        path_edges = []
+
+    for operands, operator in operations:
+        if operator == b"q":
+            graphics_stack.append(ctm)
+            continue
+        if operator == b"Q":
+            if graphics_stack:
+                ctm = graphics_stack.pop()
+            clear_path()
+            continue
+        if operator == b"cm":
+            if len(operands) >= 6:
+                try:
+                    ctm = _pdf_concat_matrices(ctm, _pdf_matrix(operands))
+                except ValueError:
+                    pass
+            continue
+        if operator == b"m":
+            next_point = point(operands)
+            if next_point is not None:
+                path_start = next_point
+                path_current = next_point
+            continue
+        if operator == b"l":
+            next_point = point(operands)
+            if next_point is not None and path_current is not None:
+                path_edges.append(_PdfVisualSeparator(path_current, next_point))
+                path_current = next_point
+            continue
+        if operator == b"re" and len(operands) >= 4:
+            try:
+                x = _pdf_float(operands[0])
+                y = _pdf_float(operands[1])
+                width = _pdf_float(operands[2])
+                height = _pdf_float(operands[3])
+            except ValueError:
+                continue
+            corners = tuple(
+                _pdf_transform_point(ctm, source)
+                for source in ((x, y), (x + width, y), (x + width, y + height), (x, y + height))
+            )
+            path_edges.extend(
+                _PdfVisualSeparator(corners[index], corners[(index + 1) % len(corners)])
+                for index in range(len(corners))
+            )
+            path_start = corners[0]
+            path_current = corners[-1]
+            continue
+        if operator == b"h":
+            if path_start is not None and path_current is not None and path_current != path_start:
+                path_edges.append(_PdfVisualSeparator(path_current, path_start))
+            path_current = path_start
+            continue
+        if operator in _PDF_VECTOR_OCR_PAINT_OPERATORS:
+            if operator in {b"s", b"b", b"b*"} and path_start is not None and path_current is not None:
+                if path_current != path_start:
+                    path_edges.append(_PdfVisualSeparator(path_current, path_start))
+            separators.extend(path_edges)
+            clear_path()
+            continue
+        if operator == b"n":
+            clear_path()
+    return tuple(separators)
 
 
 def _pdf_concat_matrices(
@@ -2176,7 +2355,9 @@ def _pdf_cid_width(descendant: DictionaryObject, cid: int, default_width: float)
 
 
 def _pdf_visual_regions(
-    shown: list[_PdfShownText], text_object_ends: set[int]
+    shown: list[_PdfShownText],
+    text_object_ends: set[int],
+    separators: tuple[_PdfVisualSeparator, ...],
 ) -> tuple[_PdfVisualRegion, ...]:
     """Infer only geometry-compatible visual lines and paragraph blocks.
 
@@ -2184,18 +2365,24 @@ def _pdf_visual_regions(
     changes and undecodable operations remain visual-region boundaries.
     """
     eligible = [item for item in shown if item.text_object_index in text_object_ends]
-    by_context: dict[tuple[int, tuple[float, float, float, float, float, float]], list[_PdfShownText]] = {}
+    by_context: dict[
+        tuple[int, tuple[object, ...], tuple[float, float, float, float, float, float]],
+        list[_PdfShownText],
+    ] = {}
     for item in eligible:
-        by_context.setdefault((item.graphics_context, item.ctm), []).append(item)
+        by_context.setdefault((item.graphics_context, item.paint_context, item.ctm), []).append(item)
 
     regions: list[_PdfVisualRegion] = []
     for items in by_context.values():
-        regions.extend(_pdf_regions_in_context(items, text_object_ends))
-    return tuple(regions)
+        regions.extend(_pdf_regions_in_context(items, text_object_ends, separators, eligible))
+    return tuple(sorted(regions, key=lambda region: region.insertion_index))
 
 
 def _pdf_regions_in_context(
-    shown: list[_PdfShownText], text_object_ends: set[int]
+    shown: list[_PdfShownText],
+    text_object_ends: set[int],
+    separators: tuple[_PdfVisualSeparator, ...],
+    all_shown: list[_PdfShownText],
 ) -> tuple[_PdfVisualRegion, ...]:
     if not shown:
         return ()
@@ -2212,7 +2399,9 @@ def _pdf_regions_in_context(
         for item in shown:
             by_direction.setdefault((round(item.direction[0] * 100), round(item.direction[1] * 100)), []).append(item)
         for items in by_direction.values():
-            direction_regions.extend(_pdf_regions_in_context(items, text_object_ends))
+            direction_regions.extend(
+                _pdf_regions_in_context(items, text_object_ends, separators, all_shown)
+            )
         return tuple(direction_regions)
     horizontal_stretch = shown[0].horizontal_stretch
     if any(
@@ -2234,7 +2423,9 @@ def _pdf_regions_in_context(
                 stretch_group.append(item)
         stretch_regions: list[_PdfVisualRegion] = []
         for items in by_stretch:
-            stretch_regions.extend(_pdf_regions_in_context(items, text_object_ends))
+            stretch_regions.extend(
+                _pdf_regions_in_context(items, text_object_ends, separators, all_shown)
+            )
         return tuple(stretch_regions)
     lines: list[list[_PdfShownText]] = []
     for item in sorted(shown, key=lambda value: (-_pdf_dot(value.start, normal), _pdf_dot(value.start, direction))):
@@ -2251,32 +2442,186 @@ def _pdf_regions_in_context(
             lines.append([item])
         else:
             line.append(item)
-    line_groups: list[list[_PdfShownText]] = []
+    line_groups_by_baseline: list[list[list[_PdfShownText]]] = []
     for line in lines:
         ordered = sorted(line, key=lambda value: _pdf_dot(value.start, direction))
         group: list[_PdfShownText] = []
+        line_groups: list[list[_PdfShownText]] = []
         for item in ordered:
             if group:
                 gap = _pdf_dot(item.start, direction) - _pdf_dot(group[-1].end, direction)
-                if gap > max(group[-1].font_size, item.font_size) * _PDF_VISUAL_CHUNK_GAP_FACTOR:
+                if (
+                    _pdf_separator_between_chunks(group[-1], item, direction, normal, separators)
+                    or gap > max(group[-1].font_size, item.font_size) * _PDF_VISUAL_CHUNK_GAP_FACTOR
+                ):
                     line_groups.append(group)
                     group = []
             group.append(item)
         if group:
             line_groups.append(group)
-    ordered_groups = sorted(line_groups, key=lambda group: (-_pdf_dot(group[0].start, normal), _pdf_dot(group[0].start, direction)))
-    if _pdf_is_paragraph_like(ordered_groups, direction, normal):
-        return (_pdf_make_visual_region(ordered_groups, direction, normal, True, text_object_ends),)
-    return tuple(
-        _pdf_make_visual_region((group,), direction, normal, False, text_object_ends)
-        for group in ordered_groups
+        line_groups_by_baseline.append(line_groups)
+
+    ordered_lines = sorted(
+        line_groups_by_baseline,
+        key=lambda groups: (-_pdf_dot(groups[0][0].start, normal), _pdf_dot(groups[0][0].start, direction)),
     )
+    # A table or diagram elsewhere in the same PDF paint context must not
+    # suppress a nearby paragraph.  Partition into vertically adjacent local
+    # flows before looking for repeated gutters or a reflowable block.
+    regions: list[_PdfVisualRegion] = []
+    for flow_lines in _pdf_local_flow_line_segments(
+        ordered_lines, direction, normal, separators, all_shown
+    ):
+        recurring_gutters = _pdf_recurring_gutters(list(flow_lines), direction)
+        candidate_lines: list[list[_PdfShownText] | None] = []
+        for groups in flow_lines:
+            if len(groups) == 1:
+                candidate_lines.append(groups[0])
+                continue
+            if any(
+                _pdf_group_gap_matches_gutter(groups[index], groups[index + 1], direction, recurring_gutters)
+                or _pdf_separator_between_chunks(
+                    groups[index][-1], groups[index + 1][0], direction, normal, separators
+                )
+                for index in range(len(groups) - 1)
+            ):
+                candidate_lines.append(None)
+                continue
+            candidate_lines.append([item for group in groups for item in group])
+
+        # A local flow may contain several independent paragraphs.  Greedily
+        # select the longest aligned prose block from each position rather
+        # than requiring every line in the surrounding flow to be prose.
+        line_index = 0
+        while line_index < len(flow_lines):
+            selected_end: int | None = None
+            for end in range(len(flow_lines), line_index + 1, -1):
+                prose_lines = candidate_lines[line_index:end]
+                if any(line is None for line in prose_lines):
+                    continue
+                if _pdf_is_paragraph_like(
+                    [line for line in prose_lines if line is not None], direction, normal, separators
+                ):
+                    selected_end = end
+                    break
+            if selected_end is not None:
+                selected_lines = candidate_lines[line_index:selected_end]
+                regions.append(_pdf_make_visual_region(
+                    [line for line in selected_lines if line is not None],
+                    direction, normal, True, text_object_ends,
+                ))
+                line_index = selected_end
+                continue
+            regions.extend(
+                _pdf_make_visual_region((group,), direction, normal, False, text_object_ends)
+                for group in flow_lines[line_index]
+            )
+            line_index += 1
+    return tuple(regions)
+
+
+def _pdf_local_flow_line_segments(
+    lines: list[list[list[_PdfShownText]]],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+    all_shown: list[_PdfShownText],
+) -> tuple[tuple[list[list[_PdfShownText]], ...], ...]:
+    """Split distant visual lines before classifying local prose or tables."""
+    if not lines:
+        return ()
+    segments: list[list[list[list[_PdfShownText]]]] = [[lines[0]]]
+    for line in lines[1:]:
+        upper = segments[-1][-1]
+        upper_items = [item for group in upper for item in group]
+        lower_items = [item for group in line for item in group]
+        upper_baseline = _pdf_dot(upper_items[0].start, normal)
+        lower_baseline = _pdf_dot(lower_items[0].start, normal)
+        spacing = upper_baseline - lower_baseline
+        upper_size = _pdf_dominant_font_size(upper_items)
+        lower_size = _pdf_dominant_font_size(lower_items)
+        font_size = max(
+            *(item.font_size for item in upper_items), *(item.font_size for item in lower_items)
+        )
+        upper_start = min(_pdf_dot(item.start, direction) for item in upper_items)
+        upper_end = max(_pdf_dot(item.end, direction) for item in upper_items)
+        lower_start = min(_pdf_dot(item.start, direction) for item in lower_items)
+        lower_end = max(_pdf_dot(item.end, direction) for item in lower_items)
+        horizontally_related = min(upper_end, lower_end) >= max(upper_start, lower_start) - font_size
+        if (
+            0.4 * font_size <= spacing <= 2.2 * font_size
+            and horizontally_related
+            and max(upper_size, lower_size) < min(upper_size, lower_size) * 1.5
+            and not _pdf_separator_between_lines(
+                upper_items, lower_items, direction, normal, separators
+            )
+            and not _pdf_intervening_text_between_lines(
+                upper_items, lower_items, all_shown, direction, normal
+            )
+        ):
+            segments[-1].append(line)
+        else:
+            segments.append([line])
+    return tuple(tuple(segment) for segment in segments)
+
+
+def _pdf_dominant_font_size(items: list[_PdfShownText]) -> float:
+    """Return the effective source size contributing most text to one visual line."""
+    weights: dict[float, int] = {}
+    for item in items:
+        size = round(item.font_size, 6)
+        weights[size] = weights.get(size, 0) + max(1, len(item.text))
+    return max(weights, key=lambda size: (weights[size], size))
+
+
+def _pdf_intervening_text_between_lines(
+    upper: list[_PdfShownText],
+    lower: list[_PdfShownText],
+    all_shown: list[_PdfShownText],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+) -> bool:
+    """Return whether another text stream visibly separates two candidate lines."""
+    upper_baseline = _pdf_dot(upper[0].start, normal)
+    lower_baseline = _pdf_dot(lower[0].start, normal)
+    lower_bound, upper_bound = sorted((lower_baseline, upper_baseline))
+    current_operation_indexes = {
+        item.operation_index for item in [*upper, *lower]
+    }
+    corridor_start = min(
+        *(_pdf_dot(item.start, direction) for item in upper),
+        *(_pdf_dot(item.start, direction) for item in lower),
+    )
+    corridor_end = max(
+        *(_pdf_dot(item.end, direction) for item in upper),
+        *(_pdf_dot(item.end, direction) for item in lower),
+    )
+    tolerance = max(item.font_size for item in [*upper, *lower]) * 0.45
+    for item in all_shown:
+        if item.operation_index in current_operation_indexes:
+            continue
+        if (
+            abs(item.direction[0] - direction[0]) > 0.01
+            or abs(item.direction[1] - direction[1]) > 0.01
+        ):
+            continue
+        baseline = _pdf_dot(item.start, normal)
+        if not lower_bound + tolerance < baseline < upper_bound - tolerance:
+            continue
+        start = _pdf_dot(item.start, direction)
+        end = _pdf_dot(item.end, direction)
+        if end >= corridor_start - tolerance and start <= corridor_end + tolerance:
+            return True
+    return False
 
 
 def _pdf_is_paragraph_like(
-    groups: list[list[_PdfShownText]], direction: tuple[float, float], normal: tuple[float, float]
+    groups: list[list[_PdfShownText]],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
 ) -> bool:
-    if len(groups) < 2 or any(len(group) != 1 for group in groups):
+    if len(groups) < 2:
         return False
     starts = [_pdf_dot(group[0].start, direction) for group in groups]
     sizes = [group[0].font_size for group in groups]
@@ -2287,8 +2632,124 @@ def _pdf_is_paragraph_like(
         0.4 * max(sizes[index - 1], sizes[index])
         <= baselines[index - 1] - baselines[index]
         <= 2.2 * max(sizes[index - 1], sizes[index])
+        and not _pdf_separator_between_lines(
+            groups[index - 1], groups[index], direction, normal, separators
+        )
         for index in range(1, len(baselines))
     )
+
+
+def _pdf_recurring_gutters(
+    lines: list[list[list[_PdfShownText]]], direction: tuple[float, float]
+) -> tuple[float, ...]:
+    """Return local repeated inter-component gutters, which indicate columns."""
+    clusters: list[tuple[float, float, list[float]]] = []
+    for line in lines:
+        for left, right in zip(line, line[1:]):
+            gap_start = _pdf_dot(left[-1].end, direction)
+            gap_end = _pdf_dot(right[0].start, direction)
+            font_size = max(left[-1].font_size, right[0].font_size)
+            if gap_end - gap_start <= font_size * _PDF_VISUAL_CHUNK_GAP_FACTOR:
+                continue
+            centre = (gap_start + gap_end) / 2.0
+            baseline = _pdf_dot(left[0].start, left[0].normal)
+            cluster_index = next(
+                (
+                    index
+                    for index, (candidate, tolerance, _baselines) in enumerate(clusters)
+                    if abs(candidate - centre) <= max(tolerance, font_size)
+                ),
+                None,
+            )
+            if cluster_index is None:
+                clusters.append((centre, font_size, [baseline]))
+            else:
+                candidate, tolerance, baselines = clusters[cluster_index]
+                clusters[cluster_index] = (
+                    (candidate * len(baselines) + centre) / (len(baselines) + 1),
+                    max(tolerance, font_size),
+                    [*baselines, baseline],
+                )
+    return tuple(
+        centre
+        for centre, tolerance, baselines in clusters
+        if any(abs(later - earlier) > tolerance * 0.45 for earlier in baselines for later in baselines)
+    )
+
+
+def _pdf_group_gap_matches_gutter(
+    left: list[_PdfShownText],
+    right: list[_PdfShownText],
+    direction: tuple[float, float],
+    gutters: tuple[float, ...],
+) -> bool:
+    if not gutters:
+        return False
+    centre = (_pdf_dot(left[-1].end, direction) + _pdf_dot(right[0].start, direction)) / 2.0
+    tolerance = max(left[-1].font_size, right[0].font_size)
+    return any(abs(centre - gutter) <= tolerance for gutter in gutters)
+
+
+def _pdf_separator_between_chunks(
+    left: _PdfShownText,
+    right: _PdfShownText,
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> bool:
+    """Return whether a painted edge crosses the gap between same-line chunks."""
+    left_end = _pdf_dot(left.end, direction)
+    right_start = _pdf_dot(right.start, direction)
+    if right_start < left_end:
+        return False
+    baseline = _pdf_dot(left.start, normal)
+    font_size = max(left.font_size, right.font_size)
+    for separator in separators:
+        start_direction = _pdf_dot(separator.start, direction)
+        end_direction = _pdf_dot(separator.end, direction)
+        start_normal = _pdf_dot(separator.start, normal)
+        end_normal = _pdf_dot(separator.end, normal)
+        if abs(end_direction - start_direction) > max(1.0, font_size * 0.1):
+            continue
+        coordinate = (start_direction + end_direction) / 2.0
+        if not left_end <= coordinate <= right_start:
+            continue
+        if min(start_normal, end_normal) <= baseline + font_size * 0.35 and max(
+            start_normal, end_normal
+        ) >= baseline - font_size * 0.35:
+            return True
+    return False
+
+
+def _pdf_separator_between_lines(
+    upper: list[_PdfShownText],
+    lower: list[_PdfShownText],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> bool:
+    """Return whether a painted horizontal rule separates adjacent text lines."""
+    upper_baseline = _pdf_dot(upper[0].start, normal)
+    lower_baseline = _pdf_dot(lower[0].start, normal)
+    lower_bound, upper_bound = sorted((lower_baseline, upper_baseline))
+    line_start = max(_pdf_dot(upper[0].start, direction), _pdf_dot(lower[0].start, direction))
+    line_end = min(_pdf_dot(upper[-1].end, direction), _pdf_dot(lower[-1].end, direction))
+    if line_end < line_start:
+        return False
+    font_size = max(item.font_size for item in [*upper, *lower])
+    for separator in separators:
+        start_direction = _pdf_dot(separator.start, direction)
+        end_direction = _pdf_dot(separator.end, direction)
+        start_normal = _pdf_dot(separator.start, normal)
+        end_normal = _pdf_dot(separator.end, normal)
+        if abs(end_normal - start_normal) > max(1.0, font_size * 0.1):
+            continue
+        coordinate = (start_normal + end_normal) / 2.0
+        if not lower_bound <= coordinate <= upper_bound:
+            continue
+        if min(start_direction, end_direction) <= line_end and max(start_direction, end_direction) >= line_start:
+            return True
+    return False
 
 
 def _pdf_make_visual_region(
@@ -2438,6 +2899,7 @@ def _pdf_fitted_region_operations(
     font_size = output_run.font_size_points or region.font_size
     cursor = region.top - font_size * 0.8
     result: list[tuple[list[object], bytes]] = []
+    output_typefaces = fitted.layout_typefaces or noto_typefaces()
     result.extend((
         ([NumberObject(0)], b"Tc"),
         ([NumberObject(0)], b"Tw"),
@@ -2463,7 +2925,7 @@ def _pdf_fitted_region_operations(
         active_static_font = (initial_font[0], font_size)
     else:
         active_static_font = None
-    for line in fitted_text_lines(fitted):
+    for line in fitted_text_lines(fitted, output_typefaces):
         if not line.text:
             cursor -= line.height_pixels * 0.75
             continue

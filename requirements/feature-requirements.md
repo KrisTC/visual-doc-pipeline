@@ -4127,3 +4127,146 @@ local renderer already permitted by the dependency and security requirements,
 or introduce separately approved technical and security requirements. Tests
 must use synthetic PDFs with an intentionally undecodable visible text
 operation, nearby successfully decoded native text, and nearby raster text.
+
+---
+
+## FR-2026-08-29-03
+
+| Property | Value |
+|----------|-------|
+| Title | Infer multi-run PDF visual text blocks for context-aware translation |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PDF translation-layout review |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-27-02, FR-2026-08-27-03, FR-2026-08-27-05, FR-2026-08-27-06 |
+
+### Description
+
+For fitted PDF page-content and Form-XObject text, the adapter shall infer a
+visual line from ordered, compatible text chunks even when the line contains
+multiple PDF text-showing operations, `TJ` fragments, source fonts, source
+sizes, weights, or ordinary positioned gaps.
+
+A source formatting change shall not alone make a visual-line or visual-block
+candidate ineligible. Chunks shall remain separate when they differ in
+orientation, transform, clipping, opacity, colour or paint state, or when
+their placement provides evidence of independent labels, columns, table cells,
+or rows.
+
+Before grouping chunks into visual lines, the adapter shall derive
+non-crossable visual separators from transformed, visible PDF geometry and
+text placement. It shall not merge chunks across:
+
+- an axis-aligned visible vector border, rule, or filled divider that separates
+  their occupied regions;
+- a recurring horizontal or vertical whitespace gutter that forms aligned rows
+  or columns in the local layout; or
+- evidence that the chunks belong to distinct label/value, table-cell, or
+  column streams.
+
+The adapter shall evaluate intervening text placement across all compatible and
+incompatible visual-state groups. A text line with a different effective paint
+state that lies between two proposed prose lines and occupies their horizontal
+flow corridor is a non-crossable label boundary. Matching outer text colour or
+style shall not cause the adapter to skip an intervening heading or label.
+
+A single gap on one baseline is not sufficient evidence of a table boundary.
+Conversely, the absence of a drawn border is not evidence that chunks are
+prose. When the adapter cannot distinguish a prose continuation from
+independently positioned cells or labels, it shall retain separate visual-line
+regions.
+
+The adapter may classify adjacent visual lines as one reflowable prose block
+even when each line contains multiple source chunks. Eligibility requires
+deterministic evidence of a shared text flow: compatible orientation and paint
+state, finite bounds, consistent line spacing, and compatible alignment or
+indentation. It shall not merge across columns, repeated cell boundaries,
+table-like rows, form fields, contents leaders, or independently positioned
+labels.
+
+For an eligible prose block:
+
+- The adapter shall make one text-replacement-provider request for the
+  complete visual block, in visual reading order.
+- Visual source line wraps shall provide translation context but shall not
+  force output line breaks. The fitted-layout stage shall reflow the translated
+  result within the whole inferred block.
+- The adapter shall replace all source text operations belonging to that block
+  with one fitted replacement region.
+- Source-font mode shall derive bounds from the placed source chunks, but shall
+  use the existing deterministic dominant-style policy for translated output.
+  It shall not attempt to map translated words back onto individual bold or
+  size-varied source fragments.
+- Output glyph coverage and serialization shall use the existing multi-face
+  fitted-run model from FR-2026-08-27-05. Multiple portable output fonts may
+  be selected and fitted together within the single region.
+
+The adapter shall not retain an otherwise eligible replacement merely because
+its fitted output could overlap another replacement region. Translation
+coverage takes precedence over overlap avoidance. The adapter shall instead
+reduce avoidable overlap by applying the visual-block grouping rules above.
+
+### Rationale
+
+PDF authoring tools often encode one visually coherent sentence or paragraph
+as separately positioned fragments with mixed typography. Translating those
+fragments independently loses linguistic context and fits each result to an
+artificially small box. Reconstructing a well-evidenced visual block improves
+translation quality and permits a single coherent reflow, while the explicit
+table, column, and label exclusions retain the prior safety fix.
+
+### Notes
+
+Automated tests shall use synthetic PDFs only and cover:
+
+- a multi-line prose block with mixed fonts, weights, sizes, and `TJ`
+  fragments, producing one provider request;
+- reflow of a translated prose block without preserving source soft wraps;
+- bordered and borderless adjacent table cells, form labels, contents leaders,
+  and multi-column text remaining separate;
+- same-style title and body text remaining separate when an intervening
+  differently styled heading overlaps their horizontal flow corridor;
+- prose with a nearby decorative rule still grouping where that rule does not
+  separate its occupied text regions;
+- correct multi-font portable output within one fitted block.
+
+---
+
+## FR-2026-08-29-04
+
+| Property | Value |
+|----------|-------|
+| Title | Keep materially different-size PDF title and body lines separate |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User review of PDF identity-replacement evaluation |
+| Date Added | 2026-08-29 |
+| Related Requirements | FR-2026-08-29-03, FR-2026-08-27-05 |
+
+### Description
+
+When considering adjacent visual lines for one reflowable PDF prose block, the
+adapter shall treat a material transition in dominant effective source font
+size as a non-crossable visual boundary. It shall not create one block when
+the larger line's dominant size is at least 1.5 times the smaller line's
+dominant size.
+
+This rule applies only between visual lines proposed for a common prose block.
+It shall not split source chunks on a single visual line merely because they
+use mixed font sizes, weights, or faces. It shall preserve translation coverage:
+each side of the size boundary remains independently eligible for replacement.
+
+### Rationale
+
+Titles and numbered section labels often align with and sit near body text, and
+may share a colour and paint state. Treating them as prose lets the fitted
+layout choose the title size for body text and reflow both into the title area.
+A material inter-line size transition is deterministic evidence of separate
+semantic roles.
+
+### Notes
+
+Automated tests shall use synthetic PDFs only and cover an aligned, same-colour
+large title followed by a smaller numbered/body line. The two lines shall make
+separate provider requests and remain independently replaced.
