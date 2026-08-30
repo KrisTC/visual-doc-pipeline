@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from io import BytesIO
 import math
 from pathlib import Path
@@ -34,9 +34,12 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    FittedTextBox,
     PortableTextUnsupportedError,
+    fit_explicit_noto_text_box,
     fitted_text_lines,
     noto_typefaces,
+    replace_paragraphs,
     replace_and_fit_text_box,
 )
 from pipeline.folder_replacement.bitmap import replace_image as _process_bitmap_image
@@ -984,7 +987,18 @@ def _replace_pdf_content_text(
         _pdf_add_font_resource(content_owner, fallback_font_name, fallback_font_reference)
     font_resources = _pdf_font_resources(content_owner)
     properties = _pdf_property_resources(content_owner)
+    resources = getattr(content_owner, "get", lambda _key, _default=None: None)("/Resources")
+    xobjects = (
+        resources.get_object().get("/XObject")
+        if resources is not None and resources.get_object().get("/XObject") is not None
+        else None
+    )
     if visual_layout and fitted_static_fonts:
+        content_bounds = _pdf_content_bounds(content_owner)
+        can_widen_single_lines = (
+            content_bounds is not None
+            and not _pdf_content_has_annotations(content_owner)
+        )
         replaced_items = _replace_pdf_fitted_operations(
             content_stream,
             replacement_provider,
@@ -993,10 +1007,13 @@ def _replace_pdf_content_text(
             font_resources,
             fitted_static_fonts,
             properties,
+            xobjects=xobjects,
             source_font=source_font,
             page_index=page_index,
             diagnostics=diagnostics,
             container_kind=container_kind,
+            content_bounds=content_bounds,
+            can_widen_single_lines=can_widen_single_lines,
         )
     else:
         replaced_items = _replace_pdf_operations(
@@ -1016,12 +1033,6 @@ def _replace_pdf_content_text(
             if not callable(set_data):
                 raise ValueError("A PDF Form XObject has no writable content stream.")
             set_data(content_stream.get_data())
-    resources = getattr(content_owner, "get", lambda _key, _default=None: None)("/Resources")
-    xobjects = (
-        resources.get_object().get("/XObject")
-        if resources is not None and resources.get_object().get("/XObject") is not None
-        else None
-    )
     if xobjects is None:
         return replaced_items
     for xobject in xobjects.get_object().values():
@@ -1114,6 +1125,103 @@ class _PdfVisualSeparator:
     end: tuple[float, float]
 
 
+@dataclass(frozen=True, slots=True)
+class _PdfVisualObstacle:
+    """One bounded non-text graphic which cannot be crossed by expansion."""
+
+    left: float
+    bottom: float
+    right: float
+    top: float
+    kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfHighlightContainer:
+    """One closed, filled, convex vector shape enclosing a text region."""
+
+    boundary: tuple[tuple[float, float], ...]
+    paint_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfClearCorridor:
+    """The available corridor or the first safely identified blocker."""
+
+    width: float | None
+    blocker_kind: str | None = None
+    blocker_location: tuple[float, float] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfExpansionExclusion:
+    """A wrapped or undersized normal fit that was outside expansion scope."""
+
+    reason_code: str
+    replacement_text: str
+    source_visual_line_count: int
+    fit_status: str
+    font_scale: float
+    effective_font_size: float
+    output_line_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfExpansionFallback:
+    """Safe measurements explaining one source-sized line-expansion fallback."""
+
+    reason_code: str
+    source_region_width: float
+    clear_corridor_width: float | None
+    source_effective_font_size: float
+    replacement_text: str
+    full_corridor_fit_status: str | None = None
+    full_corridor_font_scale: float | None = None
+    full_corridor_effective_font_size: float | None = None
+    full_corridor_line_count: int | None = None
+    clear_corridor_blocker_kind: str | None = None
+    clear_corridor_blocker_location: tuple[float, float] | None = None
+
+
+def _pdf_content_bounds(
+    content_owner: object,
+) -> tuple[float, float, float, float] | None:
+    """Return the finite local page or Form-XObject bounds for expansion."""
+    rectangle = getattr(content_owner, "cropbox", None) or getattr(content_owner, "mediabox", None)
+    if rectangle is None:
+        get = getattr(content_owner, "get", None)
+        rectangle = get("/BBox") if callable(get) else None
+    get_object = getattr(rectangle, "get_object", None)
+    if callable(get_object):
+        rectangle = get_object()
+    if not isinstance(rectangle, (list, tuple, ArrayObject)) or len(rectangle) < 4:
+        return None
+    try:
+        left, bottom, right, top = (_pdf_float(rectangle[index]) for index in range(4))
+    except ValueError:
+        return None
+    if not all(math.isfinite(value) for value in (left, bottom, right, top)):
+        return None
+    if right <= left or top <= bottom:
+        return None
+    return left, bottom, right, top
+
+
+def _pdf_content_has_annotations(content_owner: object) -> bool:
+    """Treat page annotations as unknown expansion obstacles.
+
+    Annotation appearances may be painted independently of the page stream.
+    Until their transformed bounds can be compared in the page's content
+    coordinate system, their presence must fail closed.
+    """
+    get = getattr(content_owner, "get", None)
+    annotations = get("/Annots") if callable(get) else None
+    get_object = getattr(annotations, "get_object", None)
+    if callable(get_object):
+        annotations = get_object()
+    return isinstance(annotations, (list, tuple, ArrayObject)) and bool(annotations)
+
+
 _PDF_ACTUAL_TEXT_TEXT_ONLY_OPERATORS = frozenset({
     b"BT", b"ET", b"Tf", b"Tm", b"Td", b"TD", b"T*", b"TL", b"Tc", b"Tw",
     b"Tz", b"Ts", b"Tr", b"Tj", b"TJ", b"'", b'"', b"q", b"Q", b"cm", b"gs",
@@ -1131,10 +1239,13 @@ def _replace_pdf_fitted_operations(
     static_fonts: dict[str, tuple[str, object]],
     properties: dict[str, object],
     *,
+    xobjects: object | None = None,
     source_font: bool,
     page_index: int | None = None,
     diagnostics: list[dict[str, object]] | None = None,
     container_kind: str = "pdf_page_content",
+    content_bounds: tuple[float, float, float, float] | None = None,
+    can_widen_single_lines: bool = False,
 ) -> int:
     """Replace eligible page text as visual lines or paragraph-like blocks.
 
@@ -1145,7 +1256,15 @@ def _replace_pdf_fitted_operations(
     opacity, clipping, and surrounding painting operations.
     """
     operations = content_stream.operations
-    visual_separators = _pdf_visual_separators(operations)
+    visual_separators = _pdf_visual_separators(operations, xobjects=xobjects)
+    highlight_containers, permitted_curve_operations = _pdf_highlight_containers(operations)
+    visual_obstacles, expansion_geometry_is_known = _pdf_expansion_obstacles(
+        operations,
+        xobjects,
+        permitted_curve_operations=permitted_curve_operations,
+        content_bounds=content_bounds,
+    )
+    can_widen_single_lines = can_widen_single_lines and expansion_geometry_is_known
     text_object_ends: set[int] = set()
     inside_text = False
     text_object_index = -1
@@ -1180,6 +1299,7 @@ def _replace_pdf_fitted_operations(
     current_path: list[tuple[object, ...]] = []
     pending_clip: tuple[object, ...] | None = None
     barrier = 0
+    has_unbounded_visible_text = False
     marked_content_actual_text: list[int | None] = []
     actual_text_scopes: dict[int, _PdfActualTextScope] = {}
 
@@ -1362,6 +1482,7 @@ def _replace_pdf_fitted_operations(
             actual_text_scopes[scope_index].text_operation_indexes.add(index)
 
         if text_rendering_mode not in {0, 2}:
+            has_unbounded_visible_text = True
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1383,6 +1504,7 @@ def _replace_pdf_fitted_operations(
             position_known = False
             continue
         if not position_known:
+            has_unbounded_visible_text = True
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1410,6 +1532,7 @@ def _replace_pdf_fitted_operations(
             horizontal_scale,
         )
         if not valid:
+            has_unbounded_visible_text = True
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1443,6 +1566,7 @@ def _replace_pdf_fitted_operations(
             continue
         placement = _pdf_text_placement(text_matrix, ctm, current_font, horizontal_scale)
         if placement is None:
+            has_unbounded_visible_text = True
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1487,6 +1611,69 @@ def _replace_pdf_fitted_operations(
         text_matrix = text_matrix_after
 
     candidate_regions = _pdf_visual_regions(shown, text_object_ends, visual_separators)
+    can_widen_single_lines = can_widen_single_lines and not has_unbounded_visible_text
+
+    def record_expansion_fallback(
+        region: _PdfVisualRegion, fallback: _PdfExpansionFallback
+    ) -> None:
+        if diagnostics is None:
+            return
+        entry: dict[str, object] = {
+            "kind": "layout_fallback",
+            "reason_code": fallback.reason_code,
+            "container_kind": "pdf_visual_text",
+            "page": page_index,
+            "source_text": region.text,
+            "replacement_text": fallback.replacement_text,
+            "region_location": _pdf_diagnostic_region_location(region),
+            "source_region_width": round(fallback.source_region_width, 3),
+            "source_effective_font_size": round(fallback.source_effective_font_size, 3),
+        }
+        if fallback.clear_corridor_width is not None:
+            entry["clear_corridor_width"] = round(fallback.clear_corridor_width, 3)
+        if fallback.clear_corridor_blocker_kind is not None:
+            entry["clear_corridor_blocker_kind"] = fallback.clear_corridor_blocker_kind
+        if fallback.clear_corridor_blocker_location is not None:
+            entry["clear_corridor_blocker_location"] = {
+                "coordinate_space": "pdf_page_user_space",
+                "top_left": {
+                    "x": round(fallback.clear_corridor_blocker_location[0], 3),
+                    "y": round(fallback.clear_corridor_blocker_location[1], 3),
+                },
+            }
+        if fallback.full_corridor_fit_status is not None:
+            entry["full_corridor_fit_status"] = fallback.full_corridor_fit_status
+            assert fallback.full_corridor_font_scale is not None
+            assert fallback.full_corridor_effective_font_size is not None
+            assert fallback.full_corridor_line_count is not None
+            entry["full_corridor_font_scale"] = round(
+                fallback.full_corridor_font_scale, 6
+            )
+            entry["full_corridor_effective_font_size"] = round(
+                fallback.full_corridor_effective_font_size, 3
+            )
+            entry["full_corridor_line_count"] = fallback.full_corridor_line_count
+        diagnostics.append(entry)
+
+    def record_expansion_exclusion(
+        region: _PdfVisualRegion, exclusion: _PdfExpansionExclusion
+    ) -> None:
+        if diagnostics is None:
+            return
+        diagnostics.append({
+            "kind": "layout_expansion_excluded",
+            "reason_code": exclusion.reason_code,
+            "container_kind": "pdf_visual_text",
+            "page": page_index,
+            "source_text": region.text,
+            "replacement_text": exclusion.replacement_text,
+            "region_location": _pdf_diagnostic_region_location(region),
+            "source_visual_line_count": exclusion.source_visual_line_count,
+            "normal_fit_status": exclusion.fit_status,
+            "normal_font_scale": round(exclusion.font_scale, 6),
+            "normal_effective_font_size": round(exclusion.effective_font_size, 3),
+            "normal_output_line_count": exclusion.output_line_count,
+        })
 
     def record_retained_actual_text_scope(scope: _PdfActualTextScope) -> None:
         first_operation_index = min(scope.text_operation_indexes)
@@ -1509,16 +1696,64 @@ def _replace_pdf_fitted_operations(
 
     prepared_replacements: list[tuple[_PdfVisualRegion, list[tuple[list[object], bytes]]]] = []
     for region in candidate_regions:
+        expansion_reason: str | None = None
+        expansion_blocker_kind: str | None = None
+        expansion_blocker_location: tuple[float, float] | None = None
+        expansion_exclusion_reason: str | None = None
+        if _pdf_is_single_line_expansion_candidate(region):
+            if can_widen_single_lines:
+                corridor = _pdf_clear_corridor_width(
+                    region,
+                    candidate_regions,
+                    visual_separators,
+                    visual_obstacles,
+                    highlight_containers,
+                    content_bounds,
+                )
+                expanded_width = corridor.width
+                if expanded_width is None:
+                    expansion_reason = "pdf_single_line_expansion_clear_corridor_unavailable"
+                    expansion_blocker_kind = corridor.blocker_kind
+                    expansion_blocker_location = corridor.blocker_location
+            else:
+                expanded_width = None
+                expansion_reason = "pdf_single_line_expansion_geometry_unavailable"
+        else:
+            expanded_width = None
+            expansion_exclusion_reason = _pdf_single_line_expansion_exclusion_reason(region)
         try:
-            replacement = _pdf_fitted_region_operations(
-                region,
-                replacement_provider,
-                source_language,
-                target_language,
-                static_fonts,
-                font_resources,
-                source_font,
-            )
+            if diagnostics is not None:
+                replacement = _pdf_fitted_region_operations(
+                    region,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    static_fonts,
+                    font_resources,
+                    source_font,
+                    expanded_width=expanded_width,
+                    expansion_fallback_reason=expansion_reason,
+                    expansion_clear_corridor_blocker_kind=expansion_blocker_kind,
+                    expansion_clear_corridor_blocker_location=expansion_blocker_location,
+                    record_expansion_fallback=lambda fallback: record_expansion_fallback(
+                        region, fallback
+                    ),
+                    expansion_exclusion_reason=expansion_exclusion_reason,
+                    record_expansion_exclusion=lambda exclusion: record_expansion_exclusion(
+                        region, exclusion
+                    ),
+                )
+            else:
+                replacement = _pdf_fitted_region_operations(
+                    region,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    static_fonts,
+                    font_resources,
+                    source_font,
+                    expanded_width=expanded_width,
+                )
         except PortableTextUnsupportedError as error:
             if diagnostics is not None:
                 diagnostics.append(
@@ -1793,6 +2028,21 @@ def _pdf_path_state_token(
     ctm: tuple[float, float, float, float, float, float],
 ) -> tuple[object, ...]:
     """Return a page-space token for a clipping-path construction command."""
+    if operator == b"re" and len(operands) >= 4:
+        try:
+            x, y, width, height = (_pdf_float(operands[index]) for index in range(4))
+        except ValueError:
+            return (operator, *(repr(operand) for operand in operands))
+        return (
+            operator,
+            *(
+                _pdf_transform_point(ctm, point)
+                for point in (
+                    (x, y), (x + width, y),
+                    (x + width, y + height), (x, y + height),
+                )
+            ),
+        )
     values: list[object] = [operator]
     for index in range(0, len(operands), 2):
         if index + 1 >= len(operands):
@@ -1805,6 +2055,68 @@ def _pdf_path_state_token(
         except ValueError:
             values.extend(repr(operand) for operand in operands[index:index + 2])
     return tuple(values)
+
+
+def _pdf_rectangular_clip_bounds(
+    clipping_path: object,
+) -> tuple[float, float, float, float] | None:
+    """Return the finite intersection of supported axis-aligned clip rectangles."""
+    if not isinstance(clipping_path, tuple):
+        return None
+    bounds: tuple[float, float, float, float] | None = None
+    for clip in clipping_path:
+        if not isinstance(clip, tuple) or len(clip) != 2:
+            return None
+        _operator, path = clip
+        if not isinstance(path, tuple) or len(path) != 1:
+            return None
+        rectangle = path[0]
+        if (
+            not isinstance(rectangle, tuple)
+            or len(rectangle) != 5
+            or rectangle[0] != b"re"
+            or not all(
+                isinstance(point, tuple)
+                and len(point) == 2
+                and all(isinstance(coordinate, (int, float)) and math.isfinite(coordinate) for coordinate in point)
+                for point in rectangle[1:]
+            )
+        ):
+            return None
+        lower_left, lower_right, upper_right, upper_left = cast(
+            tuple[
+                tuple[float, float], tuple[float, float],
+                tuple[float, float], tuple[float, float],
+            ],
+            rectangle[1:],
+        )
+        if (
+            abs(lower_left[1] - lower_right[1]) > 1e-6
+            or abs(upper_left[1] - upper_right[1]) > 1e-6
+            or abs(lower_left[0] - upper_left[0]) > 1e-6
+            or abs(lower_right[0] - upper_right[0]) > 1e-6
+        ):
+            return None
+        current = (
+            min(lower_left[0], upper_left[0]),
+            min(lower_left[1], lower_right[1]),
+            max(lower_right[0], upper_right[0]),
+            max(upper_left[1], upper_right[1]),
+        )
+        if current[2] <= current[0] or current[3] <= current[1]:
+            return None
+        if bounds is None:
+            bounds = current
+        else:
+            bounds = (
+                max(bounds[0], current[0]),
+                max(bounds[1], current[1]),
+                min(bounds[2], current[2]),
+                min(bounds[3], current[3]),
+            )
+            if bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+                return None
+    return bounds
 
 
 def _pdf_translate_matrix(
@@ -1838,10 +2150,16 @@ _PDF_ROMAN_ORDINAL_VALUES = {
 # together while preserving the separate fitted regions required for adjacent
 # cells.
 _PDF_VISUAL_CHUNK_GAP_FACTOR = 0.5
+_PDF_HIGHLIGHT_CONTAINER_INTERIOR_INSET = 0.5
+_PDF_SINGLE_LINE_MINIMUM_FONT_SCALE = 0.8
 
 
 def _pdf_visual_separators(
     operations: list[tuple[list[object], bytes]],
+    *,
+    xobjects: object | None = None,
+    initial_ctm: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+    seen_forms: set[int] | None = None,
 ) -> tuple[_PdfVisualSeparator, ...]:
     """Collect painted line and rectangle edges in page user space.
 
@@ -1849,7 +2167,8 @@ def _pdf_visual_separators(
     recognises the simple path forms PDF producers commonly use for table
     borders and rules; unrecognised geometry cannot authorize a merge.
     """
-    ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    ctm = initial_ctm
+    seen_forms = set() if seen_forms is None else seen_forms
     graphics_stack: list[tuple[float, float, float, float, float, float]] = []
     path_start: tuple[float, float] | None = None
     path_current: tuple[float, float] | None = None
@@ -1871,6 +2190,33 @@ def _pdf_visual_separators(
         path_start = None
         path_current = None
         path_edges = []
+
+    def append_curve(
+        first_control: tuple[float, float],
+        second_control: tuple[float, float],
+        end: tuple[float, float],
+    ) -> None:
+        nonlocal path_current
+        if path_current is None:
+            return
+        start = path_current
+        previous = start
+        for step in range(1, 9):
+            fraction = step / 8.0
+            remainder = 1.0 - fraction
+            next_point = (
+                remainder ** 3 * start[0]
+                + 3.0 * remainder ** 2 * fraction * first_control[0]
+                + 3.0 * remainder * fraction ** 2 * second_control[0]
+                + fraction ** 3 * end[0],
+                remainder ** 3 * start[1]
+                + 3.0 * remainder ** 2 * fraction * first_control[1]
+                + 3.0 * remainder * fraction ** 2 * second_control[1]
+                + fraction ** 3 * end[1],
+            )
+            path_edges.append(_PdfVisualSeparator(previous, next_point))
+            previous = next_point
+        path_current = end
 
     for operands, operator in operations:
         if operator == b"q":
@@ -1899,6 +2245,27 @@ def _pdf_visual_separators(
             if next_point is not None and path_current is not None:
                 path_edges.append(_PdfVisualSeparator(path_current, next_point))
                 path_current = next_point
+            continue
+        if operator in {b"c", b"v", b"y"}:
+            if path_current is None:
+                clear_path()
+                continue
+            if operator == b"c":
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = point(operands, 4)
+            elif operator == b"v":
+                first_control = path_current
+                second_control = point(operands, 0)
+                end = point(operands, 2)
+            else:
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = second_control
+            if first_control is None or second_control is None or end is None:
+                clear_path()
+            else:
+                append_curve(first_control, second_control, end)
             continue
         if operator == b"re" and len(operands) >= 4:
             try:
@@ -1931,9 +2298,835 @@ def _pdf_visual_separators(
             separators.extend(path_edges)
             clear_path()
             continue
+        if operator == b"Do":
+            form = _pdf_resolved_form_xobject(operands, xobjects)
+            if form is None:
+                continue
+            form_key = _pdf_xobject_identity(form)
+            if form_key in seen_forms:
+                continue
+            form_matrix = _pdf_xobject_matrix(form)
+            if form_matrix is None:
+                continue
+            form_xobjects = _pdf_xobject_resources(form)
+            try:
+                form_operations = ContentStream(form, None).operations
+            except (TypeError, ValueError):
+                continue
+            separators.extend(_pdf_visual_separators(
+                form_operations,
+                xobjects=form_xobjects,
+                initial_ctm=_pdf_concat_matrices(ctm, form_matrix),
+                seen_forms=seen_forms | {form_key},
+            ))
+            continue
         if operator == b"n":
             clear_path()
     return tuple(separators)
+
+
+def _pdf_highlight_containers(
+    operations: list[tuple[list[object], bytes]],
+) -> tuple[tuple[_PdfHighlightContainer, ...], frozenset[int]]:
+    """Recognise closed, filled, convex vector shapes as text containers.
+
+    A flattened curve boundary is deliberately an inner approximation, so a
+    later containment check remains inside the painted rounded shape rather
+    than merely inside its bounding box.  Multiple subpaths and non-convex
+    shapes are left to the ordinary fail-closed graphics handling.
+    """
+    ctm = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    graphics_stack: list[tuple[float, float, float, float, float, float]] = []
+    containers: list[_PdfHighlightContainer] = []
+    permitted_curve_operations: set[int] = set()
+    path: list[tuple[float, float]] = []
+    path_start: tuple[float, float] | None = None
+    path_current: tuple[float, float] | None = None
+    path_is_closed = False
+    path_is_single_subpath = True
+    path_curve_operations: set[int] = set()
+
+    def point(operands: list[object], offset: int = 0) -> tuple[float, float] | None:
+        if len(operands) < offset + 2:
+            return None
+        try:
+            return _pdf_transform_point(
+                ctm, (_pdf_float(operands[offset]), _pdf_float(operands[offset + 1]))
+            )
+        except ValueError:
+            return None
+
+    def clear_path() -> None:
+        nonlocal path, path_start, path_current, path_is_closed
+        nonlocal path_is_single_subpath, path_curve_operations
+        path = []
+        path_start = None
+        path_current = None
+        path_is_closed = False
+        path_is_single_subpath = True
+        path_curve_operations = set()
+
+    def begin_path(next_point: tuple[float, float]) -> None:
+        nonlocal path, path_start, path_current, path_is_closed, path_is_single_subpath
+        if path:
+            path_is_single_subpath = False
+        else:
+            path = [next_point]
+            path_start = next_point
+            path_current = next_point
+            path_is_closed = False
+
+    def append_curve(
+        first_control: tuple[float, float],
+        second_control: tuple[float, float],
+        end: tuple[float, float],
+    ) -> None:
+        nonlocal path_current
+        if path_current is None:
+            return
+        start = path_current
+        for step in range(1, 9):
+            fraction = step / 8.0
+            remainder = 1.0 - fraction
+            path.append((
+                remainder ** 3 * start[0]
+                + 3.0 * remainder ** 2 * fraction * first_control[0]
+                + 3.0 * remainder * fraction ** 2 * second_control[0]
+                + fraction ** 3 * end[0],
+                remainder ** 3 * start[1]
+                + 3.0 * remainder ** 2 * fraction * first_control[1]
+                + 3.0 * remainder * fraction ** 2 * second_control[1]
+                + fraction ** 3 * end[1],
+            ))
+        path_current = end
+
+    for index, (operands, operator) in enumerate(operations):
+        if operator == b"q":
+            graphics_stack.append(ctm)
+            continue
+        if operator == b"Q":
+            if graphics_stack:
+                ctm = graphics_stack.pop()
+            clear_path()
+            continue
+        if operator == b"cm":
+            if len(operands) < 6:
+                clear_path()
+                continue
+            try:
+                ctm = _pdf_concat_matrices(ctm, _pdf_matrix(operands))
+            except ValueError:
+                clear_path()
+            continue
+        if operator == b"m":
+            next_point = point(operands)
+            if next_point is None:
+                clear_path()
+            else:
+                begin_path(next_point)
+            continue
+        if operator == b"l":
+            next_point = point(operands)
+            if next_point is None or path_current is None:
+                clear_path()
+            else:
+                path.append(next_point)
+                path_current = next_point
+            continue
+        if operator == b"re":
+            if len(operands) < 4 or path:
+                clear_path()
+                continue
+            try:
+                x, y, width, height = (_pdf_float(operands[offset]) for offset in range(4))
+            except ValueError:
+                clear_path()
+                continue
+            path = [
+                _pdf_transform_point(ctm, source)
+                for source in ((x, y), (x + width, y), (x + width, y + height), (x, y + height))
+            ]
+            path_start = path[0]
+            path_current = path[-1]
+            path_is_closed = True
+            continue
+        if operator in {b"c", b"v", b"y"}:
+            if path_current is None:
+                clear_path()
+                continue
+            if operator == b"c":
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = point(operands, 4)
+            elif operator == b"v":
+                first_control = path_current
+                second_control = point(operands, 0)
+                end = point(operands, 2)
+            else:
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = second_control
+            if first_control is None or second_control is None or end is None:
+                clear_path()
+            else:
+                append_curve(first_control, second_control, end)
+                path_curve_operations.add(index)
+            continue
+        if operator == b"h":
+            if path_start is None or path_current is None:
+                clear_path()
+            else:
+                if path_current != path_start:
+                    path.append(path_start)
+                path_current = path_start
+                path_is_closed = True
+            continue
+        if operator in _PDF_VECTOR_OCR_PAINT_OPERATORS:
+            if operator in {b"b", b"b*"} and path_start is not None and path_current is not None:
+                if path_current != path_start:
+                    path.append(path_start)
+                path_current = path_start
+                path_is_closed = True
+            elif path_start is not None and path_current == path_start:
+                path_is_closed = True
+            if (
+                operator in {b"f", b"F", b"f*", b"B", b"B*", b"b", b"b*"}
+                and path_is_closed
+                and path_is_single_subpath
+                and len(path) >= 3
+                and _pdf_is_convex_polygon(path)
+            ):
+                boundary = tuple(path[:-1]) if path[-1] == path[0] else tuple(path)
+                containers.append(_PdfHighlightContainer(boundary, index))
+                permitted_curve_operations.update(path_curve_operations)
+            clear_path()
+            continue
+        if operator == b"n":
+            clear_path()
+    return tuple(containers), frozenset(permitted_curve_operations)
+
+
+def _pdf_expansion_geometry_is_known(
+    operations: list[tuple[list[object], bytes]],
+    xobjects: object | None = None,
+) -> bool:
+    """Return whether unsupported painting prevents corridor inspection.
+
+    A clip or a bounded image is not, by itself, a page-wide expansion veto:
+    the candidate's active clip and each image's local rectangle are checked
+    later against the actual corridor.  This avoids rejecting a heading merely
+    because an unrelated page template or image exists elsewhere on the page.
+    """
+    _containers, permitted_curve_operations = _pdf_highlight_containers(operations)
+    _obstacles, geometry_is_known = _pdf_expansion_obstacles(
+        operations,
+        xobjects,
+        permitted_curve_operations=permitted_curve_operations,
+    )
+    return geometry_is_known
+
+
+def _pdf_expansion_obstacles(
+    operations: list[tuple[list[object], bytes]],
+    xobjects: object | None,
+    *,
+    permitted_curve_operations: frozenset[int] = frozenset(),
+    initial_ctm: tuple[float, float, float, float, float, float] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+    seen_forms: set[int] | None = None,
+    content_bounds: tuple[float, float, float, float] | None = None,
+) -> tuple[tuple[_PdfVisualObstacle, ...], bool]:
+    """Return bounded image obstacles and whether remaining graphics are safe.
+
+    Simple image XObjects have a finite transformed unit rectangle, so they
+    are compared against each candidate line rather than disabling widening
+    for the complete page.  A Form XObject is safe only when its own stream has
+    no unbounded painting.  Forms containing text are deliberately treated as
+    unknown here because their text is not part of this stream's visual-region
+    list.
+    """
+    ctm = initial_ctm
+    graphics_stack: list[tuple[float, float, float, float, float, float]] = []
+    obstacles: list[_PdfVisualObstacle] = []
+    seen_forms = set() if seen_forms is None else seen_forms
+    path_points: list[tuple[float, float]] = []
+    path_start: tuple[float, float] | None = None
+    path_current: tuple[float, float] | None = None
+    path_has_unrecognised_curve = False
+    marked_content: list[bool] = []
+
+    def point(operands: list[object], offset: int = 0) -> tuple[float, float] | None:
+        if len(operands) < offset + 2:
+            return None
+        try:
+            return _pdf_transform_point(
+                ctm, (_pdf_float(operands[offset]), _pdf_float(operands[offset + 1]))
+            )
+        except ValueError:
+            return None
+
+    def clear_path() -> None:
+        nonlocal path_points, path_start, path_current, path_has_unrecognised_curve
+        path_points = []
+        path_start = None
+        path_current = None
+        path_has_unrecognised_curve = False
+
+    def add_point(value: tuple[float, float]) -> None:
+        path_points.append(value)
+
+    for index, (operands, operator) in enumerate(operations):
+        if operator in {b"BMC", b"BDC"}:
+            marked_content.append(bool(operands and str(operands[0]) == "/Artifact"))
+            continue
+        if operator == b"EMC":
+            if marked_content:
+                marked_content.pop()
+            continue
+        if operator == b"q":
+            graphics_stack.append(ctm)
+            continue
+        if operator == b"Q":
+            if graphics_stack:
+                ctm = graphics_stack.pop()
+            continue
+        if operator == b"cm":
+            if len(operands) < 6:
+                return (), False
+            try:
+                ctm = _pdf_concat_matrices(ctm, _pdf_matrix(operands))
+            except ValueError:
+                return (), False
+            continue
+        if operator in {b"sh", b"INLINE IMAGE"}:
+            return (), False
+        if operator == b"m":
+            next_point = point(operands)
+            if next_point is None:
+                if path_has_unrecognised_curve:
+                    return (), False
+                clear_path()
+                continue
+            path_start = next_point
+            path_current = next_point
+            add_point(next_point)
+            continue
+        if operator == b"l":
+            next_point = point(operands)
+            if next_point is None or path_current is None:
+                if path_has_unrecognised_curve:
+                    return (), False
+                clear_path()
+                continue
+            path_current = next_point
+            add_point(next_point)
+            continue
+        if operator == b"re":
+            if len(operands) < 4:
+                if path_has_unrecognised_curve:
+                    return (), False
+                clear_path()
+                continue
+            try:
+                x, y, width, height = (_pdf_float(operands[offset]) for offset in range(4))
+            except ValueError:
+                if path_has_unrecognised_curve:
+                    return (), False
+                clear_path()
+                continue
+            corners = [
+                _pdf_transform_point(ctm, source)
+                for source in ((x, y), (x + width, y), (x + width, y + height), (x, y + height))
+            ]
+            path_start, path_current = corners[0], corners[-1]
+            path_points.extend(corners)
+            continue
+        if operator in {b"c", b"v", b"y"}:
+            if path_current is None:
+                return (), False
+            if operator == b"c":
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = point(operands, 4)
+            elif operator == b"v":
+                first_control = path_current
+                second_control = point(operands, 0)
+                end = point(operands, 2)
+            else:
+                first_control = point(operands, 0)
+                second_control = point(operands, 2)
+                end = second_control
+            if first_control is None or second_control is None or end is None:
+                return (), False
+            path_points.extend((first_control, second_control, end))
+            path_current = end
+            path_has_unrecognised_curve = (
+                path_has_unrecognised_curve or index not in permitted_curve_operations
+            )
+            continue
+        if operator == b"h":
+            if path_start is None or path_current is None:
+                if path_has_unrecognised_curve:
+                    return (), False
+                clear_path()
+                continue
+            path_current = path_start
+            add_point(path_start)
+            continue
+        if operator in _PDF_VECTOR_OCR_PAINT_OPERATORS:
+            if path_has_unrecognised_curve:
+                if not path_points or not all(
+                    math.isfinite(coordinate)
+                    for point_value in path_points
+                    for coordinate in point_value
+                ):
+                    return (), False
+                obstacles.append(_PdfVisualObstacle(
+                    min(point_value[0] for point_value in path_points),
+                    min(point_value[1] for point_value in path_points),
+                    max(point_value[0] for point_value in path_points),
+                    max(point_value[1] for point_value in path_points),
+                    "vector_graphic",
+                ))
+            clear_path()
+            continue
+        if operator == b"n":
+            clear_path()
+            continue
+        if operator != b"Do":
+            # W/W* describe a clip.  The active source clip is checked per
+            # candidate and a clip which has already been restored cannot
+            # constrain that candidate's corridor.
+            continue
+        if not operands or xobjects is None:
+            return (), False
+        xobject = _pdf_resolved_xobject(operands, xobjects)
+        subtype = xobject.get("/Subtype") if hasattr(xobject, "get") else None
+        if subtype == "/Image":
+            rectangle = _pdf_transformed_rectangle(ctm, (0.0, 0.0, 1.0, 1.0))
+            if rectangle is None:
+                return (), False
+            if (
+                any(marked_content)
+                and content_bounds is not None
+                and _pdf_rectangle_covers_bounds(rectangle, content_bounds)
+            ):
+                continue
+            obstacles.append(_PdfVisualObstacle(*rectangle, "raster_image"))
+            continue
+        if subtype != "/Form" or xobject is None:
+            return (), False
+        form_key = _pdf_xobject_identity(xobject)
+        if form_key in seen_forms:
+            return (), False
+        try:
+            form_operations = ContentStream(xobject, None).operations
+        except (TypeError, ValueError):
+            return (), False
+        if any(operator in _PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS for _operands, operator in form_operations):
+            return (), False
+        form_xobjects = _pdf_xobject_resources(xobject)
+        form_matrix = _pdf_xobject_matrix(xobject)
+        if form_matrix is None:
+            return (), False
+        _form_containers, form_permitted_curve_operations = _pdf_highlight_containers(
+            form_operations
+        )
+        _form_obstacles, form_geometry_is_known = _pdf_expansion_obstacles(
+            form_operations,
+            form_xobjects,
+            permitted_curve_operations=form_permitted_curve_operations,
+            initial_ctm=_pdf_concat_matrices(ctm, form_matrix),
+            seen_forms=seen_forms | {form_key},
+            content_bounds=(
+                _pdf_transformed_rectangle(
+                    _pdf_concat_matrices(ctm, form_matrix), form_bounds
+                )
+                if (form_bounds := _pdf_content_bounds(xobject)) is not None
+                else None
+            ),
+        )
+        if not form_geometry_is_known:
+            return (), False
+        obstacles.extend(_form_obstacles)
+    return tuple(obstacles), True
+
+
+def _pdf_resolved_xobject(operands: list[object], xobjects: object | None) -> object | None:
+    """Resolve the XObject named by a ``Do`` operation."""
+    if not operands or xobjects is None:
+        return None
+    get_object = getattr(xobjects, "get_object", None)
+    resources = get_object() if callable(get_object) else xobjects
+    get = getattr(resources, "get", None)
+    xobject = get(operands[0]) if callable(get) else None
+    get_object = getattr(xobject, "get_object", None)
+    return get_object() if callable(get_object) else xobject
+
+
+def _pdf_xobject_resources(xobject: object) -> object | None:
+    """Return an XObject's nested /XObject resource dictionary, if present."""
+    get = getattr(xobject, "get", None)
+    resources = get("/Resources") if callable(get) else None
+    get_object = getattr(resources, "get_object", None)
+    resources = get_object() if callable(get_object) else resources
+    get = getattr(resources, "get", None)
+    return get("/XObject") if callable(get) else None
+
+
+def _pdf_resolved_form_xobject(operands: list[object], xobjects: object | None) -> object | None:
+    """Resolve a Form XObject, returning ``None`` for images and unknowns."""
+    xobject = _pdf_resolved_xobject(operands, xobjects)
+    return xobject if hasattr(xobject, "get") and xobject.get("/Subtype") == "/Form" else None
+
+
+def _pdf_xobject_identity(xobject: object) -> int:
+    """Return a stable in-memory cycle key for recursive Form inspection."""
+    reference = getattr(xobject, "indirect_reference", None)
+    return getattr(reference, "idnum", id(xobject))
+
+
+def _pdf_xobject_matrix(
+    xobject: object,
+) -> tuple[float, float, float, float, float, float] | None:
+    """Return a Form's local matrix, defaulting to the identity matrix."""
+    matrix = xobject.get("/Matrix") if hasattr(xobject, "get") else None
+    if matrix is None:
+        return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    matrix = matrix.get_object() if hasattr(matrix, "get_object") else matrix
+    if not isinstance(matrix, (list, tuple, ArrayObject)) or len(matrix) < 6:
+        return None
+    try:
+        return _pdf_matrix(list(matrix))
+    except ValueError:
+        return None
+
+
+def _pdf_transformed_rectangle(
+    ctm: tuple[float, float, float, float, float, float],
+    rectangle: tuple[float, float, float, float],
+) -> tuple[float, float, float, float] | None:
+    """Return the axis-aligned user-space bounds of a finite local rectangle."""
+    left, bottom, right, top = rectangle
+    corners = tuple(
+        _pdf_transform_point(ctm, point)
+        for point in ((left, bottom), (left, top), (right, bottom), (right, top))
+    )
+    values = tuple(coordinate for point in corners for coordinate in point)
+    if not all(math.isfinite(value) for value in values):
+        return None
+    return (
+        min(point[0] for point in corners),
+        min(point[1] for point in corners),
+        max(point[0] for point in corners),
+        max(point[1] for point in corners),
+    )
+
+
+def _pdf_rectangle_covers_bounds(
+    rectangle: tuple[float, float, float, float],
+    bounds: tuple[float, float, float, float],
+) -> bool:
+    """Return whether one finite rectangle covers another with PDF tolerance."""
+    left, bottom, right, top = rectangle
+    bounds_left, bounds_bottom, bounds_right, bounds_top = bounds
+    tolerance = max(1e-4, (bounds_right - bounds_left) * 1e-6, (bounds_top - bounds_bottom) * 1e-6)
+    return (
+        left <= bounds_left + tolerance
+        and bottom <= bounds_bottom + tolerance
+        and right >= bounds_right - tolerance
+        and top >= bounds_top - tolerance
+    )
+
+
+def _pdf_is_convex_polygon(points: list[tuple[float, float]]) -> bool:
+    """Return whether a finite single-boundary path is a strictly convex polygon."""
+    boundary = points[:-1] if len(points) > 1 and points[0] == points[-1] else points
+    if len(boundary) < 3 or not all(
+        math.isfinite(coordinate) for point in boundary for coordinate in point
+    ):
+        return False
+    orientation = 0.0
+    for index, point in enumerate(boundary):
+        previous = boundary[index - 1]
+        following = boundary[(index + 1) % len(boundary)]
+        cross = (
+            (point[0] - previous[0]) * (following[1] - point[1])
+            - (point[1] - previous[1]) * (following[0] - point[0])
+        )
+        if abs(cross) <= 1e-8:
+            continue
+        if orientation and cross * orientation < 0.0:
+            return False
+        orientation = cross
+    return orientation != 0.0
+
+
+def _pdf_point_is_inside_container(
+    point: tuple[float, float],
+    container: _PdfHighlightContainer,
+) -> bool:
+    """Return whether a point lies inside a container, inset from its border."""
+    orientation = 0.0
+    for start, end in zip(
+        container.boundary,
+        container.boundary[1:] + container.boundary[:1],
+        strict=True,
+    ):
+        delta_x = end[0] - start[0]
+        delta_y = end[1] - start[1]
+        edge_length = math.hypot(delta_x, delta_y)
+        if edge_length <= 1e-8:
+            return False
+        cross = delta_x * (point[1] - start[1]) - delta_y * (point[0] - start[0])
+        if abs(cross) / edge_length < _PDF_HIGHLIGHT_CONTAINER_INTERIOR_INSET:
+            return False
+        if orientation and cross * orientation < 0.0:
+            return False
+        orientation = cross
+    return orientation != 0.0
+
+
+def _pdf_container_contains_rectangle(
+    container: _PdfHighlightContainer,
+    left: float,
+    bottom: float,
+    right: float,
+    top: float,
+) -> bool:
+    """Return whether all corners of a horizontal text rectangle are interior."""
+    return all(
+        _pdf_point_is_inside_container(point, container)
+        for point in ((left, bottom), (left, top), (right, bottom), (right, top))
+    )
+
+
+def _pdf_enclosing_highlight_container(
+    region: _PdfVisualRegion,
+    containers: tuple[_PdfHighlightContainer, ...],
+) -> _PdfHighlightContainer | None:
+    """Choose the smallest earlier filled shape that contains the source line."""
+    source_start = region.base_start
+    source_end = source_start + region.width
+    source_bottom = region.top - region.height
+    contained = [
+        container
+        for container in containers
+        if (
+            container.paint_index < region.insertion_index
+            and _pdf_container_contains_rectangle(
+                container, source_start, source_bottom, source_end, region.top
+            )
+        )
+    ]
+    if not contained:
+        return None
+    return min(
+        contained,
+        key=lambda container: (
+            (max(point[0] for point in container.boundary) - min(point[0] for point in container.boundary))
+            * (max(point[1] for point in container.boundary) - min(point[1] for point in container.boundary))
+        ),
+    )
+
+
+def _pdf_container_corridor_end(
+    region: _PdfVisualRegion,
+    container: _PdfHighlightContainer,
+) -> float | None:
+    """Return the furthest rightward rectangle edge still inside a container."""
+    source_start = region.base_start
+    source_end = source_start + region.width
+    region_bottom = region.top - region.height
+    if not _pdf_container_contains_rectangle(
+        container, source_start, region_bottom, source_end, region.top
+    ):
+        return None
+    lower = source_end
+    upper = max(point[0] for point in container.boundary)
+    if upper <= lower:
+        return None
+    for _ in range(20):
+        midpoint = (lower + upper) / 2.0
+        if _pdf_container_contains_rectangle(
+            container, source_start, region_bottom, midpoint, region.top
+        ):
+            lower = midpoint
+        else:
+            upper = midpoint
+    return lower if lower > source_end else None
+
+
+def _pdf_separator_is_container_boundary(
+    separator: _PdfVisualSeparator,
+    container: _PdfHighlightContainer,
+) -> bool:
+    """Return whether a recognised separator is an edge of the container."""
+    return any(
+        _pdf_point_to_segment_distance(separator.start, start, end) <= 1e-4
+        and _pdf_point_to_segment_distance(separator.end, start, end) <= 1e-4
+        for start, end in zip(
+            container.boundary,
+            container.boundary[1:] + container.boundary[:1],
+            strict=True,
+        )
+    )
+
+
+def _pdf_point_to_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    """Return the Euclidean distance from a point to a finite line segment."""
+    delta_x = end[0] - start[0]
+    delta_y = end[1] - start[1]
+    denominator = delta_x * delta_x + delta_y * delta_y
+    if denominator <= 1e-12:
+        return math.dist(point, start)
+    position = max(0.0, min(1.0, (
+        (point[0] - start[0]) * delta_x + (point[1] - start[1]) * delta_y
+    ) / denominator))
+    return math.hypot(
+        point[0] - (start[0] + position * delta_x),
+        point[1] - (start[1] + position * delta_y),
+    )
+
+
+def _pdf_clear_corridor_width(
+    region: _PdfVisualRegion,
+    regions: tuple[_PdfVisualRegion, ...],
+    separators: tuple[_PdfVisualSeparator, ...],
+    obstacles: tuple[_PdfVisualObstacle, ...],
+    highlight_containers: tuple[_PdfHighlightContainer, ...],
+    content_bounds: tuple[float, float, float, float] | None,
+) -> _PdfClearCorridor:
+    """Return a safe rightward corridor or its first identified blocker.
+
+    The returned width is capped before every known visible text or vector edge
+    that crosses the line's occupied vertical corridor.  On failure, retain
+    the first blocker class for the debug sidecar.
+    """
+    if content_bounds is None or not _pdf_is_single_line_expansion_candidate(region):
+        return _PdfClearCorridor(None, "unknown_geometry")
+    left, bottom, right, top = content_bounds
+    clipping_path = region.anchor.paint_context[3]
+    if clipping_path:
+        clip_bounds = _pdf_rectangular_clip_bounds(clipping_path)
+        if clip_bounds is None:
+            return _PdfClearCorridor(None, "unknown_geometry")
+        left = max(left, clip_bounds[0])
+        bottom = max(bottom, clip_bounds[1])
+        right = min(right, clip_bounds[2])
+        top = min(top, clip_bounds[3])
+        if right <= left or top <= bottom:
+            return _PdfClearCorridor(None, "unknown_geometry")
+    if not (bottom <= region.top - region.height and region.top <= top):
+        return _PdfClearCorridor(None, "page_or_form_boundary")
+    source_start = region.base_start
+    source_end = source_start + region.width
+    if source_start < left or source_end > right:
+        return _PdfClearCorridor(None, "page_or_form_boundary")
+    region_bottom = region.top - region.height
+    corridor_end = right
+    corridor_blocker_kind = "page_or_form_boundary"
+    corridor_blocker_location = (right, region.top)
+    enclosing_container = _pdf_enclosing_highlight_container(region, highlight_containers)
+    if enclosing_container is not None:
+        container_corridor_end = _pdf_container_corridor_end(region, enclosing_container)
+        if container_corridor_end is None:
+            return _PdfClearCorridor(None, "container_boundary")
+        if container_corridor_end < corridor_end:
+            corridor_end = container_corridor_end
+            corridor_blocker_kind = "container_boundary"
+            corridor_blocker_location = (container_corridor_end, region.top)
+
+    for other in regions:
+        if other is region:
+            continue
+        if (
+            other.direction[0] < 0.999
+            or abs(other.direction[1]) > 1e-6
+            or abs(other.normal[0]) > 1e-6
+        ):
+            # A visible non-horizontal region could cross this line's clear
+            # space, but its rectangle cannot be compared safely here.
+            return _PdfClearCorridor(None, "unknown_geometry")
+        other_bottom = other.top - other.height
+        if other.top < region_bottom or other_bottom > region.top:
+            continue
+        other_start = other.base_start
+        other_end = other_start + other.width
+        if other_end > source_end and other_start < source_end:
+            return _PdfClearCorridor(None, "text", (other_start, other.top))
+        if source_end <= other_start < corridor_end:
+            corridor_end = other_start
+            corridor_blocker_kind = "text"
+            corridor_blocker_location = (other_start, other.top)
+
+    for separator in separators:
+        if (
+            enclosing_container is not None
+            and _pdf_separator_is_container_boundary(separator, enclosing_container)
+        ):
+            continue
+        separator_left = min(separator.start[0], separator.end[0])
+        separator_right = max(separator.start[0], separator.end[0])
+        separator_bottom = min(separator.start[1], separator.end[1])
+        separator_top = max(separator.start[1], separator.end[1])
+        if separator_top < region_bottom or separator_bottom > region.top:
+            continue
+        if separator_right > source_end and separator_left < source_end:
+            return _PdfClearCorridor(None, "vector_graphic", separator.start)
+        if source_end <= separator_left < corridor_end:
+            corridor_end = separator_left
+            corridor_blocker_kind = "vector_graphic"
+            corridor_blocker_location = separator.start
+
+    for obstacle in obstacles:
+        if obstacle.top < region_bottom or obstacle.bottom > region.top:
+            continue
+        if obstacle.right > source_end and obstacle.left < source_end:
+            return _PdfClearCorridor(None, obstacle.kind, (obstacle.left, obstacle.top))
+        if source_end <= obstacle.left < corridor_end:
+            corridor_end = obstacle.left
+            corridor_blocker_kind = obstacle.kind
+            corridor_blocker_location = (obstacle.left, obstacle.top)
+
+    widened_width = corridor_end - source_start
+    if widened_width <= region.width:
+        return _PdfClearCorridor(
+            None, corridor_blocker_kind, corridor_blocker_location
+        )
+    return _PdfClearCorridor(widened_width)
+
+
+def _pdf_is_single_line_expansion_candidate(region: _PdfVisualRegion) -> bool:
+    """Return whether a region is within FR-2026-08-30-05's narrow scope."""
+    return (
+        "\n" not in region.text
+        and region.direction[0] >= 0.999
+        and abs(region.direction[1]) <= 1e-6
+        and abs(region.normal[0]) <= 1e-6
+        and (
+            not region.anchor.paint_context[3]
+            or _pdf_rectangular_clip_bounds(region.anchor.paint_context[3]) is not None
+        )
+    )
+
+
+def _pdf_single_line_expansion_exclusion_reason(region: _PdfVisualRegion) -> str:
+    """Classify why a region was deliberately left outside expansion scope."""
+    if "\n" in region.text:
+        return "pdf_single_line_expansion_excluded_inferred_multiline_region"
+    if region.anchor.paint_context[3]:
+        return "pdf_single_line_expansion_excluded_clipping"
+    if (
+        region.direction[0] < 0.999
+        or abs(region.direction[1]) > 1e-6
+        or abs(region.normal[0]) > 1e-6
+    ):
+        return "pdf_single_line_expansion_excluded_non_horizontal_orientation"
+    return "pdf_single_line_expansion_excluded_unsupported_source_geometry"
 
 
 def _pdf_concat_matrices(
@@ -3336,6 +4529,14 @@ def _pdf_fitted_region_operations(
     static_fonts: dict[str, tuple[str, object]],
     font_resources: dict[str, object],
     source_font: bool,
+    *,
+    expanded_width: float | None = None,
+    expansion_fallback_reason: str | None = None,
+    expansion_clear_corridor_blocker_kind: str | None = None,
+    expansion_clear_corridor_blocker_location: tuple[float, float] | None = None,
+    record_expansion_fallback: Callable[[_PdfExpansionFallback], None] | None = None,
+    expansion_exclusion_reason: str | None = None,
+    record_expansion_exclusion: Callable[[_PdfExpansionExclusion], None] | None = None,
 ) -> list[tuple[list[object], bytes]] | None:
     restore_operations = _pdf_restore_source_text_state(region.anchor)
     if restore_operations is None:
@@ -3356,18 +4557,98 @@ def _pdf_fitted_region_operations(
             ),),
         ),),
     )
-    fitted = replace_and_fit_text_box(
+    replacement_box = replace_paragraphs(
         box,
         replacement_provider,
         source_language,
         target_language,
-        noto_typefaces(),
+    )
+    typefaces = noto_typefaces()
+    fitted = fit_explicit_noto_text_box(
+        replacement_box,
+        typefaces,
         preserve_source_font_family=source_font,
         measure_source_fonts=source_font,
     )
     replacement_text = "".join(
         run.text for paragraph in fitted.text_box.paragraphs for run in paragraph.runs
     )
+    needs_source_size_expansion = not _pdf_is_source_size_single_line(fitted)
+    needs_minimum_size_expansion = not _pdf_is_minimum_size_single_line(fitted)
+    if (
+        expansion_exclusion_reason is not None
+        and needs_minimum_size_expansion
+        and record_expansion_exclusion is not None
+    ):
+        record_expansion_exclusion(_PdfExpansionExclusion(
+            expansion_exclusion_reason,
+            replacement_text,
+            region.text.count("\n") + 1,
+            fitted.fit_status,
+            fitted.font_scale,
+            region.font_size * fitted.font_scale,
+            len(fitted_text_lines(fitted)),
+        ))
+    if needs_minimum_size_expansion and expanded_width is None:
+        if expansion_fallback_reason is not None and record_expansion_fallback is not None:
+            record_expansion_fallback(_PdfExpansionFallback(
+                expansion_fallback_reason,
+                region.width,
+                None,
+                region.font_size,
+                replacement_text,
+                clear_corridor_blocker_kind=expansion_clear_corridor_blocker_kind,
+                clear_corridor_blocker_location=expansion_clear_corridor_blocker_location,
+            ))
+    elif needs_source_size_expansion and expanded_width is not None:
+        assert expanded_width is not None
+        def fit_widened(width: float) -> FittedTextBox:
+            expanded_box = replace(
+                replacement_box,
+                width_emu=round(width / region.horizontal_stretch * 12_700),
+            )
+            return fit_explicit_noto_text_box(
+                expanded_box,
+                typefaces,
+                preserve_source_font_family=source_font,
+                measure_source_fonts=source_font,
+            )
+
+        expanded_fitted = fit_widened(expanded_width)
+        if _pdf_is_source_size_single_line(expanded_fitted):
+            # A fitting rectangle is not visible, but choosing the smallest
+            # proven width limits its layout authority to the blank corridor
+            # actually needed by this line.
+            lower_width = region.width
+            upper_width = expanded_width
+            for _ in range(16):
+                midpoint = (lower_width + upper_width) / 2.0
+                candidate = fit_widened(midpoint)
+                if _pdf_is_source_size_single_line(candidate):
+                    upper_width = midpoint
+                    expanded_fitted = candidate
+                else:
+                    lower_width = midpoint
+            fitted = expanded_fitted
+            region = replace(region, width=upper_width)
+        elif _pdf_is_minimum_size_single_line(expanded_fitted):
+            # The full corridor produces the largest available acceptable
+            # one-line size.  Do not trade it for a narrower rectangle that
+            # would reduce the scale further.
+            fitted = expanded_fitted
+            region = replace(region, width=expanded_width)
+        elif record_expansion_fallback is not None:
+            record_expansion_fallback(_PdfExpansionFallback(
+                "pdf_single_line_expansion_corridor_too_narrow",
+                region.width,
+                expanded_width,
+                region.font_size,
+                replacement_text,
+                expanded_fitted.fit_status,
+                expanded_fitted.font_scale,
+                region.font_size * expanded_fitted.font_scale,
+                len(fitted_text_lines(expanded_fitted)),
+            ))
     output_runs = fitted.text_box.paragraphs[0].runs
     output_run = output_runs[0]
     source_output = (
@@ -3513,6 +4794,24 @@ def _pdf_fitted_region_operations(
         cursor -= line.height_pixels * 0.75
     result.extend(restore_operations)
     return result
+
+
+def _pdf_is_source_size_single_line(fitted: FittedTextBox) -> bool:
+    """Return whether normal bounded layout preserved one source-sized line."""
+    return (
+        fitted.fit_status == "fit"
+        and abs(fitted.font_scale - 1.0) <= 1e-6
+        and len(fitted_text_lines(fitted)) == 1
+    )
+
+
+def _pdf_is_minimum_size_single_line(fitted: FittedTextBox) -> bool:
+    """Return whether one line retained FR-2026-08-30-05's 80% minimum."""
+    return (
+        fitted.fit_status == "fit"
+        and fitted.font_scale + 1e-6 >= _PDF_SINGLE_LINE_MINIMUM_FONT_SCALE
+        and len(fitted_text_lines(fitted)) == 1
+    )
 
 
 def _pdf_restore_source_text_state(

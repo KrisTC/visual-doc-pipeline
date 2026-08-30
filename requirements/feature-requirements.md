@@ -35,7 +35,7 @@ Additional context, assumptions, constraints, unresolved questions, or implement
 |----------|-------|
 | Title | Prepare OCR-evaluation image inputs |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
 | Related Requirements | TR-2026-08-01-02 |
@@ -78,7 +78,7 @@ The output hierarchy shall continue to mirror the eligible source hierarchy. The
 |----------|-------|
 | Title | Pluggable OCR-provider API |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-01 |
 | Related Requirements | FR-2026-08-01-01 |
@@ -127,7 +127,7 @@ For every non-skipped rotated case, the contract test shall verify that the prov
 |----------|-------|
 | Title | PaddleOCR Windows and accelerator runtime support |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request following Windows PaddleOCR runtime failure |
 | Date Added | 2026-08-21 |
 | Related Requirements | FR-2026-08-01-02, TR-2026-08-01-01, SR-2026-08-01-01, SR-2026-08-21-01 |
@@ -158,7 +158,7 @@ Automated tests shall mock Paddle runtime availability and engine behavior to ve
 |----------|-------|
 | Title | Generate manual OCR-evaluation results and viewer |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-01 |
 | Related Requirements | FR-2026-08-01-01, FR-2026-08-01-02 |
@@ -4277,3 +4277,184 @@ coloured numbered-item marker row followed by aligned ordinary-colour
 continuation rows creates one provider request, uses the dominant paint state,
 and remains separate from adjacent list items and from a misaligned coloured
 row.
+
+---
+
+## FR-2026-08-30-05
+
+| Property | Value |
+|----------|-------|
+| Title | Conservatively widen eligible single-line PDF replacement regions, including enclosing highlight containers |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PDF translation-layout review |
+| Date Added | 2026-08-30 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-27-02, FR-2026-08-29-03 |
+
+### Description
+
+For eligible fitted PDF page-content and Form-XObject visual text processed in
+either `preserve-basic-layout` or `preserve-basic-layout-source-font` mode,
+the adapter may widen a replacement fitting region in the reading direction
+when the replacement would not fit as one output line at the source line's
+effective font size, provided it can retain at least 80% of that size.
+
+This rule shall apply only to an ordinary horizontal, single visual line. The
+line shall not be an inferred multi-line prose block, an ordered-list item with
+continuation rows, or a vertical or rotated text region. The rule is intended
+for standalone headings, labels, and simple one-line list items; it shall not
+change the bounded reflow rules for larger runs of text.
+
+The adapter shall preserve the source line's starting edge, baseline,
+orientation, alignment, and height. It may widen the fitting rectangle only
+from its ending edge toward the reading direction, and only as far as a finite
+clear corridor permits. It shall measure the selected output font at the
+source line's effective font size and determine the minimum widened width that
+keeps the complete replacement on one line at that size. When that width is
+available within the clear corridor, the adapter shall use it and retain the
+source effective font size. Otherwise, it may use the largest one-line fitted
+size that is at least 80% of the source effective font size and fits within the
+same clear corridor. It shall not move or resize other page content.
+
+A clear corridor shall be accepted only when the adapter can conservatively
+establish that it lies within the page or Form-XObject bounds, has the same
+safe local background as the source line, and is free of every other visible
+text region and non-background visible graphic. The collision check shall
+include native PDF text, raster images, vector-painted content, annotations or
+form appearances, clipping boundaries, and page or Form-XObject edges. If the
+adapter cannot determine this geometry or background reliably, it shall treat
+the corridor as unavailable.
+
+An active clipping path shall not by itself exclude an otherwise eligible
+single-line region from widening. When the adapter can establish that every
+active clip is a finite, axis-aligned rectangle in page or Form-XObject space,
+it shall intersect those rectangles with the applicable content bounds and
+treat the resulting rectangle as a hard expansion boundary. It may widen only
+when both the source rectangle and the complete expanded output rectangle
+remain within that boundary. A non-rectangular, unbounded, malformed, or
+otherwise unsupported clipping path shall retain the existing conservative
+fallback behaviour.
+
+As a limited exception to the raster-graphic collision rule, an image may be
+treated as a non-blocking page or Form-XObject background when it is marked as
+a PDF artifact, its finite page-space rectangle covers the complete applicable
+content bounds, and it is painted as that content's background. It shall not
+be treated as foreground content solely because it spans the candidate
+corridor. All other images, including an image with only partial or uncertain
+background evidence, remain collision blockers.
+
+Unsupported vector path syntax elsewhere in the same page or Form-XObject
+shall not by itself make a candidate corridor unavailable. When the adapter
+can derive a finite conservative page-space bounding rectangle for the
+complete painted vector path, it shall treat that rectangle as a visible
+vector-graphic collision region and compare it only with the candidate's
+potential expanded-output corridor. A rectangle disjoint from that corridor
+shall not prevent widening. If the adapter cannot derive such a finite bound,
+or the bound intersects the corridor, it shall retain the conservative
+unavailable or blocking outcome.
+
+As a limited exception to the vector-graphic collision rule, a reliably
+recognised closed, filled vector shape may be treated as an enclosing highlight
+container. The source line must be within that container's interior, and the
+full expanded output rectangle must remain within the same interior. The
+container's own fill and border shall not block expansion within that interior,
+but its boundary is a hard limit and shall never be crossed. Every other
+visible text region, connector or rule, shape, image, annotation, form
+appearance, clipping boundary, and page or Form-XObject edge remains a
+collision blocker, including content inside the same container. If the shape,
+its interior, its fill/background, or its containment relationship to the
+source line cannot be determined reliably, the adapter shall use the existing
+fallback behaviour.
+
+The widening decision shall not affect replacement eligibility or coverage. If
+no clear corridor is available, or if its full available width cannot contain
+the replacement on one line at no less than 80% of the source effective font
+size, the adapter shall retain the existing source-region fitting behaviour,
+including its normal wrapping, font-size fitting, and overflow handling. It
+shall not retain or omit an otherwise eligible replacement merely because
+widening is unavailable or because a widened result would overlap other
+replacement output.
+
+### Rationale
+
+Translations of short headings and list items can be materially longer than
+their source text even when the surrounding page has unused space. Allowing a
+verified one-sided expansion to retain the source font size and a one-line
+result improves readability, while the single-line scope and fail-closed
+collision check preserve the existing conservative handling of paragraphs,
+tables, and graphics.
+
+### Notes
+
+This requirement is intentionally limited to PDF visual-text regions. It does
+not change the explicit-container fitting rules for PPTX, DOCX, XLSX, SVG,
+annotations, or AcroForm fields.
+
+The implementation must define deterministic synthetic-test fixtures for a
+clear uniform-background corridor, a recognised enclosing filled container,
+nearby text, a connector or rule, nearby raster and vector graphics, a page
+edge, an uncertain background, and a multi-line prose block. They shall verify
+that a clear one-line case and a contained one-line case retain their source
+effective font size and have no replacement line break; they shall also verify
+a one-line result at exactly 80% of source effective font size is accepted and
+a smaller result falls back. All other cases shall use the pre-existing
+source-region fitting behaviour. No test or fixture may use confidential sample
+data.
+
+The vector fixtures shall additionally verify that a finite, unsupported
+painted curve outside a candidate corridor permits widening, while an otherwise
+equivalent curve intersecting that corridor blocks it.
+
+The fixtures shall also verify that a source line and expanded output contained
+by a page-sized rectangular clip can widen, while a non-rectangular clip cannot,
+and that an artifact-marked full-page background image does not block widening.
+
+In a debug-enabled fitted PDF replacement run, the adapter shall add one
+diagnostic entry when an otherwise eligible ordinary horizontal visual line
+needs a wider fitting region to retain at least 80% of its source effective
+font size on a single output line, but falls back to the existing source-region
+fitting behaviour. The entry shall identify the page, container kind, and
+existing safe region-location metadata, together with one stable reason code:
+unavailable expansion geometry, unavailable clear corridor, or clear corridor
+too narrow for an 80%-minimum-sized one-line output.
+
+Each expansion diagnostic entry shall include the source text and replacement
+text, so a human can identify the line that fell back without correlating the
+rounded geometry with the PDF. The entry shall not contain glyph data, raw PDF
+operations, rendered pixels, or raw OCR geometry. It may contain rounded
+source-region and clear-corridor widths and the source effective font size.
+
+For an eligible candidate whose clear corridor is unavailable, the entry shall
+add a stable `clear_corridor_blocker_kind` identifying the first blocking class:
+text, vector graphic, raster image, container boundary, page or Form-XObject
+boundary, or unknown geometry. Where finite comparable geometry exists, it may
+also add rounded blocker location metadata in PDF page user space.
+
+When the adapter has attempted fitting in the full available corridor and the
+entry records a too-narrow-corridor fallback, it shall additionally include the
+rounded full-corridor fit status, font scale, effective font size, and output
+line count. These fields shall identify whether the fallback resulted from
+line wrapping, a font-size reduction, or another bounded-layout fit result.
+
+The adapter shall not create an expansion diagnostic for a successful
+expansion, a line that already fits at source size, or a region outside this
+requirement's single-line eligibility scope. In particular, multi-line prose
+blocks and other non-candidate regions shall not add diagnostic noise.
+
+As a targeted exception to that no-noise rule, the adapter shall add one
+`layout_expansion_excluded` entry for a region outside the single-line
+eligibility scope only when its normal fitted replacement wraps or is smaller
+than 80% of its source effective font size. The entry shall include source and
+replacement text, source visual-line count, normal fit status, font scale,
+effective font size, output line count, and a stable exclusion reason: inferred
+multi-line region, clipping, non-horizontal orientation, or unsupported source
+geometry. It shall not add entries for non-candidate regions whose normal
+replacement already fits on one line at 80% or more of source size.
+
+Tests shall additionally verify one diagnostic for each fallback reason and no
+diagnostic for a successful expansion, an already-fitting line, or a multi-line
+prose block whose normal replacement already meets the one-line 80% threshold.
+They shall verify the source and replacement text in every fallback entry, the
+full-corridor diagnostic fields for a too-narrow corridor fallback, the
+clear-corridor blocker kind, and a targeted exclusion entry for a wrapped or
+undersized normal replacement.

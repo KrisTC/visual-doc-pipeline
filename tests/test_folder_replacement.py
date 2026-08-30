@@ -41,8 +41,11 @@ from pipeline.folder_replacement.processor import ProgressFactory, ProgressRepor
 from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
+    _PdfVisualRegion,
     _PdfReplacementSerializationError,
+    _pdf_content_has_annotations,
     _pdf_decode_composite_bytes,
+    _pdf_expansion_geometry_is_known,
     _pdf_fitted_region_operations,
     _pdf_text_advance,
 )
@@ -1871,6 +1874,462 @@ class FolderReplacementTests(unittest.TestCase):
                 right - left for left, right in zip(generated_x_positions, generated_x_positions[1:])
             ), 40.0)
 
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_widens_a_clear_single_line_corridor(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 20 Tf 10 60 Td (A) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            for layout_mode in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+                mode_output = output_root / layout_mode
+                result = self._run(
+                    input_root,
+                    mode_output,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(
+                        replacement_text="A deliberately much longer translated heading"
+                    ),
+                    document_text_layout=layout_mode,
+                )
+
+                self.assertEqual(1, result.replaced_native_text_items)
+                self.assertAlmostEqual(
+                    self._pdf_generated_replacement_font_size(mode_output / "document.pdf"),
+                    20.0,
+                    places=4,
+                )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_accepts_an_80_percent_source_sized_single_line(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(370, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 20 Tf 10 60 Td (A) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(
+                    replacement_text="A deliberately much longer translated heading"
+                ),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            font_size = self._pdf_generated_replacement_font_size(
+                output_root / "document.pdf"
+            )
+            self.assertGreaterEqual(font_size, 16.0)
+            self.assertLess(font_size, 20.0)
+            self.assertFalse((output_root / "document.pdf.diagnostics.json").exists())
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_widens_past_a_non_intersecting_form_background(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+            background = DecodedStreamObject()
+            background.set_data(b"1 g 0 0 600 100 re f")
+            background.update({
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Form"),
+                NameObject("/BBox"): ArrayObject([
+                    NumberObject(0), NumberObject(0), NumberObject(600), NumberObject(100),
+                ]),
+            })
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/XObject"): DictionaryObject({NameObject("/Background"): background}),
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(b"q /Background Do Q BT /F1 20 Tf 10 60 Td (A) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(
+                    replacement_text="A deliberately much longer translated heading"
+                ),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertAlmostEqual(
+                self._pdf_generated_replacement_font_size(output_root / "document.pdf"),
+                20.0,
+                places=4,
+            )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_widens_within_a_rectangular_clip_over_an_artifact_background(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+            background = DecodedStreamObject(); background.set_data(b"\xff\xff\xff")
+            background.update({
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Image"),
+                NameObject("/Width"): NumberObject(1),
+                NameObject("/Height"): NumberObject(1),
+                NameObject("/ColorSpace"): NameObject("/DeviceRGB"),
+                NameObject("/BitsPerComponent"): NumberObject(8),
+            })
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/XObject"): DictionaryObject({NameObject("/Background"): background}),
+            })
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"/Artifact BMC q 600 0 0 100 0 0 cm /Background Do Q EMC "
+                b"q 0 0 600 100 re W n BT /F1 20 Tf 10 60 Td (A) Tj ET Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(
+                    replacement_text="A deliberately much longer translated heading"
+                ),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertAlmostEqual(
+                self._pdf_generated_replacement_font_size(output_root / "document.pdf"),
+                20.0,
+                places=4,
+            )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_widens_inside_a_filled_rounded_container_but_not_through_a_connector(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            rounded_container = (
+                b"0.8 g "
+                b"20 25 m 190 25 l 198.284 25 205 31.716 205 40 c "
+                b"205 60 l 205 68.284 198.284 75 190 75 c "
+                b"20 75 l 11.716 75 5 68.284 5 60 c "
+                b"5 40 l 5 31.716 11.716 25 20 25 c h f "
+            )
+            inputs = {
+                "contained.pdf": rounded_container + b"BT /F1 20 Tf 10 45 Td (A) Tj ET",
+                "connector.pdf": (
+                    rounded_container
+                    + b"0 0 0 RG 45 25 m 45 75 l S "
+                    + b"BT /F1 20 Tf 10 45 Td (A) Tj ET"
+                ),
+            }
+            for filename, data in inputs.items():
+                writer = PdfWriter(); page = writer.add_blank_page(240, 100)
+                contents = DecodedStreamObject(); contents.set_data(data)
+                page.replace_contents(ContentStream(contents, writer))
+                with (input_root / filename).open("wb") as output_file:
+                    writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="A much longer label"),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            contained_size = self._pdf_generated_replacement_font_size(
+                output_root / "contained.pdf"
+            )
+            self.assertAlmostEqual(contained_size, 20.0, places=4)
+            self.assertLess(
+                self._pdf_generated_replacement_font_size(output_root / "connector.pdf"),
+                contained_size,
+            )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_does_not_widen_into_a_vector_rule_or_multiline_block(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            replacement = "A deliberately much longer translated heading"
+            inputs = {
+                "clear.pdf": b"BT /F1 20 Tf 10 60 Td (A) Tj ET",
+                "vector-rule.pdf": (
+                    b"0 0 0 RG 25 45 m 25 75 l S "
+                    b"BT /F1 20 Tf 10 60 Td (A) Tj ET"
+                ),
+                "multiline.pdf": b"BT /F1 20 Tf 24 TL 10 70 Td (A) Tj T* (B) Tj ET",
+            }
+            for filename, data in inputs.items():
+                writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+                contents = DecodedStreamObject(); contents.set_data(data)
+                page.replace_contents(ContentStream(contents, writer))
+                with (input_root / filename).open("wb") as output_file:
+                    writer.write(output_file)
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text=replacement),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(3, result.replaced_native_text_items)
+            clear_size = self._pdf_generated_replacement_font_size(output_root / "clear.pdf")
+            self.assertLess(
+                self._pdf_generated_replacement_font_size(output_root / "vector-rule.pdf"),
+                clear_size / 2.0,
+            )
+            self.assertLess(
+                self._pdf_generated_replacement_font_size(output_root / "multiline.pdf"),
+                clear_size / 2.0,
+            )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_bounds_unsupported_curves_locally_for_expansion(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            replacement = "A deliberately much longer translated heading"
+            inputs = {
+                "distant-curve.pdf": (
+                    b"0 g 300 10 m 320 10 330 30 340 30 c S "
+                    b"BT /F1 20 Tf 10 60 Td (A) Tj ET"
+                ),
+                "blocking-curve.pdf": (
+                    b"0 g 24 45 m 24 50 24 70 24 75 c S "
+                    b"BT /F1 20 Tf 10 60 Td (A) Tj ET"
+                ),
+            }
+            for filename, data in inputs.items():
+                writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+                contents = DecodedStreamObject(); contents.set_data(data)
+                page.replace_contents(ContentStream(contents, writer))
+                with (input_root / filename).open("wb") as output_file:
+                    writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text=replacement),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertAlmostEqual(
+                self._pdf_generated_replacement_font_size(
+                    output_root / "distant-curve.pdf"
+                ),
+                20.0,
+                places=4,
+            )
+            distant_report = output_root / "distant-curve.pdf.diagnostics.json"
+            self.assertFalse(distant_report.exists())
+
+            blocking_report = json.loads((
+                output_root / "blocking-curve.pdf.diagnostics.json"
+            ).read_text(encoding="utf-8"))
+            fallback = next(
+                entry for entry in blocking_report["entries"]
+                if entry["kind"] == "layout_fallback"
+            )
+            self.assertEqual(
+                "pdf_single_line_expansion_corridor_too_narrow",
+                fallback["reason_code"],
+            )
+            self.assertIn("full_corridor_fit_status", fallback)
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_treats_only_unbounded_graphics_or_annotations_as_unknown(self) -> None:
+        self.assertFalse(_pdf_expansion_geometry_is_known([([], b"Do")]))
+        self.assertFalse(_pdf_expansion_geometry_is_known([([], b"INLINE IMAGE")]))
+        self.assertTrue(_pdf_expansion_geometry_is_known([([], b"W")]))
+        self.assertFalse(_pdf_expansion_geometry_is_known([([], b"c")]))
+
+        writer = PdfWriter()
+        page = writer.add_blank_page(100, 100)
+        page[NameObject("/Annots")] = ArrayObject([DictionaryObject()])
+        self.assertTrue(_pdf_content_has_annotations(page))
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_records_only_failed_single_line_expansions(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            inputs = {
+                "unknown-geometry.pdf": (
+                    b"/MissingTemplate Do BT /F1 20 Tf 10 60 Td (A) Tj ET"
+                ),
+                "no-corridor.pdf": (
+                    b"0 g BT /F1 20 Tf 10 60 Td (A) Tj ET "
+                    b"1 0 0 rg BT /F1 20 Tf 21 60 Td (B) Tj ET"
+                ),
+                "narrow-corridor.pdf": (
+                    b"0 0 0 RG 25 45 m 25 75 l S "
+                    b"BT /F1 20 Tf 10 60 Td (A) Tj ET"
+                ),
+            }
+            for filename, data in inputs.items():
+                writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+                contents = DecodedStreamObject(); contents.set_data(data)
+                page.replace_contents(ContentStream(contents, writer))
+                with (input_root / filename).open("wb") as output_file:
+                    writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(
+                    replacement_text="A deliberately much longer translated heading"
+                ),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            expected_reasons = {
+                "unknown-geometry.pdf": "pdf_single_line_expansion_geometry_unavailable",
+                "no-corridor.pdf": "pdf_single_line_expansion_clear_corridor_unavailable",
+                "narrow-corridor.pdf": "pdf_single_line_expansion_corridor_too_narrow",
+            }
+            for filename, expected_reason in expected_reasons.items():
+                report = json.loads(
+                    (output_root / f"{filename}.diagnostics.json").read_text(encoding="utf-8")
+                )
+                entries = [
+                    entry for entry in report["entries"]
+                    if entry["kind"] == "layout_fallback"
+                ]
+                self.assertEqual(1, len(entries))
+                self.assertEqual(expected_reason, entries[0]["reason_code"])
+                self.assertIn("source_region_width", entries[0])
+                self.assertIn("source_effective_font_size", entries[0])
+                self.assertEqual("A", entries[0]["source_text"])
+                self.assertEqual(
+                    "A deliberately much longer translated heading",
+                    entries[0]["replacement_text"],
+                )
+                if filename == "narrow-corridor.pdf":
+                    self.assertIn("full_corridor_fit_status", entries[0])
+                    self.assertIn("full_corridor_font_scale", entries[0])
+                    self.assertIn("full_corridor_effective_font_size", entries[0])
+                    self.assertIn("full_corridor_line_count", entries[0])
+                elif filename == "no-corridor.pdf":
+                    self.assertEqual("text", entries[0]["clear_corridor_blocker_kind"])
+                    self.assertIn("clear_corridor_blocker_location", entries[0])
+                else:
+                    self.assertNotIn("full_corridor_fit_status", entries[0])
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_omits_diagnostics_for_successful_or_non_candidate_lines_that_fit(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            inputs = {
+                "successful.pdf": b"BT /F1 20 Tf 10 60 Td (A) Tj ET",
+                "already-fitting.pdf": (
+                    b"BT /F1 5 Tf 10 60 Td " + b"(" + b"W" * 50 + b") Tj ET"
+                ),
+                "multiline.pdf": b"BT /F1 20 Tf 24 TL 10 70 Td (A) Tj T* (B) Tj ET",
+            }
+            for filename, data in inputs.items():
+                writer = PdfWriter(); page = writer.add_blank_page(600, 100)
+                contents = DecodedStreamObject(); contents.set_data(data)
+                page.replace_contents(ContentStream(contents, writer))
+                with (input_root / filename).open("wb") as output_file:
+                    writer.write(output_file)
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(
+                    replacement_text="A deliberately much longer translated heading"
+                ),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            for filename in ("successful.pdf", "already-fitting.pdf"):
+                self.assertFalse((output_root / f"{filename}.diagnostics.json").exists())
+            multiline_report = json.loads(
+                (output_root / "multiline.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            multiline_entries = [
+                entry for entry in multiline_report["entries"]
+                if entry["kind"] == "layout_expansion_excluded"
+            ]
+            self.assertEqual(1, len(multiline_entries))
+            self.assertEqual(
+                "pdf_single_line_expansion_excluded_inferred_multiline_region",
+                multiline_entries[0]["reason_code"],
+            )
+
+    # Verifies FR-2026-08-30-05.
+    def test_basic_layout_pdf_records_wrapped_single_line_excluded_by_clipping(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            writer = PdfWriter(); page = writer.add_blank_page(220, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"q 0 0 m 220 0 l 110 100 l h W n BT /F1 20 Tf 10 60 Td (A) Tj ET Q"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with (input_root / "clipped.pdf").open("wb") as output_file:
+                writer.write(output_file)
+
+            replacement_text = "A deliberately much longer translated heading"
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text=replacement_text),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            report = json.loads(
+                (output_root / "clipped.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )
+            entries = [
+                entry for entry in report["entries"]
+                if entry["kind"] == "layout_expansion_excluded"
+            ]
+            self.assertEqual(1, len(entries))
+            self.assertEqual(
+                "pdf_single_line_expansion_excluded_clipping", entries[0]["reason_code"]
+            )
+            self.assertEqual("A", entries[0]["source_text"])
+            self.assertEqual(replacement_text, entries[0]["replacement_text"])
+            self.assertEqual(1, entries[0]["source_visual_line_count"])
+            self.assertTrue(
+                entries[0]["normal_output_line_count"] > 1
+                or entries[0]["normal_font_scale"] < 0.8
+            )
+
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_splits_close_tj_fragments_at_a_table_cell_gap(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -2611,11 +3070,29 @@ class FolderReplacementTests(unittest.TestCase):
             with source.open("wb") as output_file: writer.write(output_file)
 
             source_fonts: list[object | None] = []
-            def inspect_anchor(region: object, *arguments: object) -> object:
-                anchor = getattr(region, "anchor")
-                current_font = getattr(anchor, "current_font")
+            def inspect_anchor(
+                region: _PdfVisualRegion,
+                replacement_provider: TextReplacementProvider,
+                source_language: str,
+                target_language: str,
+                static_fonts: dict[str, tuple[str, object]],
+                font_resources: dict[str, object],
+                source_font: bool,
+                *,
+                expanded_width: float | None = None,
+            ) -> list[tuple[list[object], bytes]] | None:
+                current_font = region.anchor.current_font
                 source_fonts.append(current_font[0] if current_font is not None else None)
-                return _pdf_fitted_region_operations(region, *arguments)  # type: ignore[arg-type]
+                return _pdf_fitted_region_operations(
+                    region,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    static_fonts,
+                    font_resources,
+                    source_font,
+                    expanded_width=expanded_width,
+                )
 
             with patch(
                 "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
@@ -2865,10 +3342,30 @@ class FolderReplacementTests(unittest.TestCase):
             )
             anchors: dict[str, tuple[object, ...]] = {}
 
-            def inspect_anchor(region: object, *arguments: object) -> object:
-                anchor = getattr(region, "anchor")
-                anchors[getattr(region, "text")] = getattr(anchor, "paint_context")[0]
-                return _pdf_fitted_region_operations(region, *arguments)  # type: ignore[arg-type]
+            def inspect_anchor(
+                region: _PdfVisualRegion,
+                replacement_provider: TextReplacementProvider,
+                source_language: str,
+                target_language: str,
+                static_fonts: dict[str, tuple[str, object]],
+                font_resources: dict[str, object],
+                source_font: bool,
+                *,
+                expanded_width: float | None = None,
+            ) -> list[tuple[list[object], bytes]] | None:
+                anchors[region.text] = cast(
+                    tuple[object, ...], region.anchor.paint_context[0]
+                )
+                return _pdf_fitted_region_operations(
+                    region,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    static_fonts,
+                    font_resources,
+                    source_font,
+                    expanded_width=expanded_width,
+                )
 
             with patch(
                 "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
@@ -3376,7 +3873,9 @@ class FolderReplacementTests(unittest.TestCase):
                     NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
                 })
                 contents = DecodedStreamObject()
-                contents.set_data(b"BT /F1 10 Tf 10 20 Td <00010002> Tj ET")
+                contents.set_data(
+                    b"q 0 0 m 100 0 l 50 100 l h W n BT /F1 10 Tf 10 20 Td <00010002> Tj ET Q"
+                )
                 page.replace_contents(ContentStream(contents, writer))
                 with path.open("wb") as output_file: writer.write(output_file)
 
@@ -3803,6 +4302,20 @@ class FolderReplacementTests(unittest.TestCase):
                 continue
             self.assertGreaterEqual(int(properties.attrib["sz"]), 100)
             self.assertLessEqual(int(properties.attrib["sz"]), 400_000)
+
+    def _pdf_generated_replacement_font_size(self, source: Path) -> float:
+        """Return the largest fitted portable-output font size in one PDF."""
+        reader = PdfReader(source)
+        stream = ContentStream(reader.pages[0].get_contents(), reader)
+        active_font = ""
+        sizes: list[float] = []
+        for operands, operator in stream.operations:
+            if operator == b"Tf":
+                active_font = str(operands[0])
+                if active_font == "/PipelineNoto":
+                    sizes.append(float(operands[1]))
+        self.assertTrue(sizes)
+        return max(sizes)
 
     def _run(
         self,
