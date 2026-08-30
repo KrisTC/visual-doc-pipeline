@@ -4458,3 +4458,64 @@ They shall verify the source and replacement text in every fallback entry, the
 full-corridor diagnostic fields for a too-narrow corridor fallback, the
 clear-corridor blocker kind, and a targeted exclusion entry for a wrapped or
 undersized normal replacement.
+
+---
+
+## FR-2026-08-30-06
+
+| Property | Value |
+|----------|-------|
+| Title | Retain native PDF text whose Unicode decoding cannot be verified |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported cross-viewer PDF corruption diagnosis |
+| Date Added | 2026-08-30 |
+| Related Requirements | FR-2026-08-04-10, FR-2026-08-23-01, FR-2026-08-27-02, FR-2026-08-27-03, FR-2026-08-27-05, FR-2026-08-29-02 |
+
+### Description
+
+Before the fitted native-PDF replacement path sends text to a replacement
+provider or writes it with a portable output font, it shall establish that the
+source bytes' Unicode decoding is safe. A syntactically present `/ToUnicode`
+map is insufficient when it cannot be verified against the source font's
+encoding and embedded font program.
+
+In particular, an embedded simple TrueType font that has no PDF `/Encoding`
+and whose embedded `cmap` provides only a legacy non-Unicode mapping shall be
+treated as `pdf_text_undecodable`. The adapter shall retain the affected text
+unchanged and record the existing safe diagnostic; it shall not pass a guessed
+Unicode value to the identity, masking, or translation provider, and shall not
+render that guess through the portable Noto path. This applies to page content
+and Form XObjects in both fitted-layout modes.
+
+In a debug-enabled run, each retained operation shall use the existing
+`pdf_text_undecodable` reason code, set `source_text_status` to `undecodable`,
+and record `font_encoding_status` as
+`unverifiable_legacy_nonunicode_embedded_truetype`. Its detail shall explain
+that the source `/ToUnicode` map could not be verified against the embedded
+legacy non-Unicode `cmap`. The diagnostic shall not include guessed source
+text or raw font bytes.
+
+The rule must not depend on the processing host's installed fonts. A source
+font may still be used for measurement where the existing layout policy
+permits it, but its host installation shall not make an otherwise
+unverifiable byte-to-Unicode mapping eligible for replacement.
+
+### Rationale
+
+This defect is independent of Preview, Chrome, and Teams: they consistently
+render the glyphs requested by the pipeline. The corruption begins earlier,
+when an unverifiable source mapping is accepted as Unicode and is then
+faithfully written into an embedded portable font. Retaining such text is the
+only safe native-PDF outcome until the OCR fallback in FR-2026-08-29-02 can
+associate and replace it.
+
+### Notes
+
+Automated tests shall use a synthetic simple TrueType font whose embedded
+program exposes only a legacy non-Unicode `cmap`. They shall verify that every
+affected native text operation remains byte-for-byte unchanged, that no
+replacement-provider request is made for it, and that its diagnostic uses
+`pdf_text_undecodable`. They shall cover page content and a Form XObject,
+including `TJ` arrays. No test, reference image, log, or diagnostic artifact
+may use confidential sample data.

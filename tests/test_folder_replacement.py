@@ -2749,6 +2749,118 @@ class FolderReplacementTests(unittest.TestCase):
                 for operands, operator in stream.operations
             ))
 
+    # Verifies FR-2026-08-30-06 and FR-2026-08-27-06.
+    def test_basic_layout_pdf_retains_unverifiable_legacy_simple_truetype_text(self) -> None:
+        """Never send an unverified simple-font Unicode map to a provider."""
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; input_root.mkdir()
+            output_root = root / "output"
+            source = input_root / "document.pdf"
+            # A minimal sfnt directory with one Macintosh-only cmap table. It
+            # deliberately contains no Unicode cmap, while the PDF ToUnicode
+            # CMap itself looks complete and decodable.
+            legacy_font_data = (
+                b"\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+                b"cmap\x00\x00\x00\x00\x00\x00\x00\x1c\x00\x00\x00\x16"
+                b"\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00\x00\x0c"
+                b"\x00\x06\x00\x0a\x00\x00\x00\x00\x00\x00"
+            )
+            writer = PdfWriter(); page = writer.add_blank_page(120, 100)
+            to_unicode = DecodedStreamObject()
+            to_unicode.set_data(
+                b"1 begincodespacerange\n<00> <FF>\nendcodespacerange\n"
+                b"1 beginbfchar\n<01> <0041>\nendbfchar\n"
+            )
+            font_program = DecodedStreamObject(); font_program.set_data(legacy_font_data)
+            descriptor = writer._add_object(DictionaryObject({
+                NameObject("/FontFile2"): writer._add_object(font_program),
+            }))
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/TrueType"),
+                NameObject("/BaseFont"): NameObject("/SyntheticLegacy"),
+                NameObject("/FirstChar"): NumberObject(1),
+                NameObject("/LastChar"): NumberObject(1),
+                NameObject("/Widths"): ArrayObject([NumberObject(600)]),
+                NameObject("/FontDescriptor"): descriptor,
+                NameObject("/ToUnicode"): writer._add_object(to_unicode),
+            }))
+            resources = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            page[NameObject("/Resources")] = resources
+            form = DecodedStreamObject()
+            form.set_data(b"BT /F1 12 Tf 10 20 Td [<01> 0 <01>] TJ ET")
+            form.update({
+                NameObject("/Type"): NameObject("/XObject"),
+                NameObject("/Subtype"): NameObject("/Form"),
+                NameObject("/BBox"): ArrayObject([
+                    NumberObject(0), NumberObject(0), NumberObject(100), NumberObject(40),
+                ]),
+                NameObject("/Resources"): resources,
+            })
+            xobjects = DictionaryObject({
+                NameObject("/X1"): writer._add_object(form),
+            })
+            resources[NameObject("/XObject")] = xobjects
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 60 Td [<01> 0 <01>] TJ ET q /X1 Do Q")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file:
+                writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="replacement")
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                provider,
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, result.replaced_native_text_items)
+            self.assertFalse([request for request in provider.requests if not request.is_filename])
+            output = PdfReader(output_root / "document.pdf")
+            output_page = output.pages[0]
+            output_resources = cast(DictionaryObject, output_page["/Resources"])
+            output_xobjects = cast(DictionaryObject, output_resources["/XObject"])
+            output_form = cast(DecodedStreamObject, output_xobjects["/X1"].get_object())
+            for stream_source in (output_page.get_contents(), output_form):
+                stream = ContentStream(stream_source, output)
+                text_bytes = [
+                    (
+                        bytes(value) if isinstance(value, ByteStringObject)
+                        else str(value).encode("latin-1")
+                    )
+                    for operands, operator in stream.operations
+                    if operator == b"TJ" and operands and isinstance(operands[0], ArrayObject)
+                    for value in operands[0]
+                    if isinstance(value, (ByteStringObject, TextStringObject))
+                ]
+                self.assertEqual([b"\x01", b"\x01"], text_bytes)
+
+            entries = json.loads(
+                (output_root / "document.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )["entries"]
+            retained = [entry for entry in entries if entry["reason_code"] == "pdf_text_undecodable"]
+            self.assertEqual(2, len(retained))
+            self.assertEqual(
+                {"pdf_page_content", "pdf_form_xobject"},
+                {entry["container_kind"] for entry in retained},
+            )
+            for entry in retained:
+                self.assertEqual("retained", entry["kind"])
+                self.assertEqual("TJ", entry["operator"])
+                self.assertIsNone(entry["source_text"])
+                self.assertEqual("undecodable", entry["source_text_status"])
+                self.assertEqual(
+                    "unverifiable_legacy_nonunicode_embedded_truetype",
+                    entry["font_encoding_status"],
+                )
+                self.assertIn("cannot be verified", entry["detail"])
+
     # Verifies FR-2026-08-23-05.
     def test_basic_layout_pdf_advances_past_undecodable_identity_text(self) -> None:
         with TemporaryDirectory() as temporary_directory:

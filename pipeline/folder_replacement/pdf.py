@@ -1533,6 +1533,9 @@ def _replace_pdf_fitted_operations(
         )
         if not valid:
             has_unbounded_visible_text = True
+            unverifiable_legacy_simple_font = _pdf_simple_truetype_encoding_is_unverifiable(
+                current_font, font_resources
+            )
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1543,7 +1546,16 @@ def _replace_pdf_fitted_operations(
                 _pdf_diagnostic_text_location(
                     text_matrix, ctm, current_font, horizontal_scale, text_rise
                 ),
-                "The source font encoding could not be decoded safely.",
+                (
+                    "The source /ToUnicode mapping cannot be verified against its "
+                    "embedded legacy non-Unicode TrueType cmap."
+                    if unverifiable_legacy_simple_font
+                    else "The source font encoding could not be decoded safely."
+                ),
+                font_encoding_status=(
+                    "unverifiable_legacy_nonunicode_embedded_truetype"
+                    if unverifiable_legacy_simple_font else None
+                ),
             )
             undecodable_advance = _pdf_undecodable_text_advance(
                 values,
@@ -1985,6 +1997,8 @@ def _record_pdf_retained_diagnostic(
     source_text: str | None,
     location: dict[str, object] | None,
     detail: str,
+    *,
+    font_encoding_status: str | None = None,
 ) -> None:
     """Append one debug-only native-text safety decision without replacement."""
     if diagnostics is None:
@@ -1999,6 +2013,8 @@ def _record_pdf_retained_diagnostic(
     }
     if source_text is None:
         entry["source_text_status"] = "undecodable"
+    if font_encoding_status is not None:
+        entry["font_encoding_status"] = font_encoding_status
     if operator is not None:
         entry["operator"] = operator.decode("ascii")
     if location is not None:
@@ -5183,6 +5199,8 @@ def _pdf_text_operand_value(
     """Decode a text-show operand, including Type0 glyph bytes with ToUnicode."""
     if not isinstance(value, (TextStringObject, ByteStringObject)):
         return None
+    if _pdf_simple_truetype_encoding_is_unverifiable(current_font, font_resources):
+        return None
     font = _pdf_composite_font(current_font, font_resources)
     if font is None:
         return str(value) if isinstance(value, TextStringObject) else None
@@ -5193,6 +5211,88 @@ def _pdf_text_operand_value(
         return _pdf_decode_composite_bytes(raw, font, allow_whitespace=allow_whitespace)
     except (LookupError, UnicodeDecodeError, ValueError):
         return None
+
+
+def _pdf_simple_truetype_encoding_is_unverifiable(
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+) -> bool:
+    """Return whether a simple embedded font has no verifiable Unicode basis.
+
+    A PDF `/ToUnicode` CMap normally supplies the semantic mapping for a
+    simple font.  A font program with only a legacy non-Unicode `cmap` and no
+    PDF `/Encoding` provides no independent evidence that the CMap matches
+    the drawn glyphs, so it must not be passed to a replacement provider.
+    """
+    if current_font is None:
+        return False
+    font = font_resources.get(str(current_font[0]))
+    if not isinstance(font, DictionaryObject) or font.get("/Subtype") != "/TrueType":
+        return False
+    if font.get("/Encoding") is not None:
+        return False
+    cache_attribute = "_pipeline_simple_truetype_encoding_is_unverifiable"
+    cached = getattr(font, cache_attribute, None)
+    if isinstance(cached, bool):
+        return cached
+    descriptor_reference = font.get("/FontDescriptor")
+    descriptor = (
+        descriptor_reference.get_object()
+        if descriptor_reference is not None else None
+    )
+    font_program_reference = (
+        descriptor.get("/FontFile2") if isinstance(descriptor, DictionaryObject) else None
+    )
+    font_program = (
+        font_program_reference.get_object()
+        if font_program_reference is not None else None
+    )
+    get_data = getattr(font_program, "get_data", None)
+    if not callable(get_data):
+        return False
+    try:
+        result = _pdf_embedded_truetype_has_only_legacy_cmap(bytes(get_data()))
+    except (struct.error, TypeError, ValueError):
+        result = False
+    setattr(font, cache_attribute, result)
+    return result
+
+
+def _pdf_embedded_truetype_has_only_legacy_cmap(data: bytes) -> bool:
+    """Return whether an embedded TrueType program has no Unicode `cmap`.
+
+    Platform 0 and Microsoft Unicode encodings are independently verifiable.
+    Macintosh and Microsoft Symbol mappings alone establish glyph selection,
+    but not a reliable source-byte-to-Unicode mapping.
+    """
+    if len(data) < 12:
+        return False
+    table_count = struct.unpack_from(">H", data, 4)[0]
+    directory_end = 12 + table_count * 16
+    if directory_end > len(data):
+        return False
+    cmap_offset = next(
+        (
+            struct.unpack_from(">I", data, offset + 8)[0]
+            for offset in range(12, directory_end, 16)
+            if data[offset:offset + 4] == b"cmap"
+        ),
+        None,
+    )
+    if cmap_offset is None or cmap_offset + 4 > len(data):
+        return False
+    cmap_count = struct.unpack_from(">H", data, cmap_offset + 2)[0]
+    records_end = cmap_offset + 4 + cmap_count * 8
+    if cmap_count == 0 or records_end > len(data):
+        return False
+    records = tuple(
+        struct.unpack_from(">HH", data, offset)
+        for offset in range(cmap_offset + 4, records_end, 8)
+    )
+    return not any(
+        platform == 0 or (platform == 3 and encoding in {1, 10})
+        for platform, encoding in records
+    )
 
 
 def _pdf_decode_composite_bytes(
