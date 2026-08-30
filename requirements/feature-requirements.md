@@ -4233,40 +4233,47 @@ Automated tests shall use synthetic PDFs only and cover:
 
 ---
 
-## FR-2026-08-29-04
+## FR-2026-08-30-04
 
 | Property | Value |
 |----------|-------|
-| Title | Keep materially different-size PDF title and body lines separate |
+| Title | Reflow emphasised ordered-list item continuations as one PDF region |
 | Owner | KrisTC |
 | Status | Implemented |
-| Source | User review of PDF identity-replacement evaluation |
-| Date Added | 2026-08-29 |
-| Related Requirements | FR-2026-08-29-03, FR-2026-08-27-05 |
+| Source | User review of PDF translation-layout evaluation |
+| Date Added | 2026-08-30 |
+| Related Requirements | FR-2026-08-23-02, FR-2026-08-29-03 |
 
 ### Description
 
-When considering adjacent visual lines for one reflowable PDF prose block, the
-adapter shall treat a material transition in dominant effective source font
-size as a non-crossable visual boundary. It shall not create one block when
-the larger line's dominant size is at least 1.5 times the smaller line's
-dominant size.
+Within a verified ordered PDF list item, a fill- or stroke-paint colour change
+alone shall not prevent compatible marker and continuation rows from forming
+one fitted replacement region. Colour may represent inline emphasis rather
+than a semantic boundary. The item shall still remain separate from every
+other ordered-list item.
 
-This rule applies only between visual lines proposed for a common prose block.
-It shall not split source chunks on a single visual line merely because they
-use mixed font sizes, weights, or faces. It shall preserve translation coverage:
-each side of the size boundary remains independently eligible for replacement.
+The adapter shall retain the existing safety boundaries for material font-size
+changes, orientation, transform, clipping, opacity, vector separators,
+recurring gutters, columns, tables, labels, and incompatible placement. It
+shall retain separate visual regions when those signals make the continuation
+ambiguous.
+
+Because the existing fitted-output model emits one paint state for a visual
+region, a cross-colour item shall use the paint state that contributes the most
+source text. Ties shall use visual reading order. It shall not try to assign
+translated words to the source emphasis spans.
 
 ### Rationale
 
-Titles and numbered section labels often align with and sit near body text, and
-may share a colour and paint state. Treating them as prose lets the fitted
-layout choose the title size for body text and reflow both into the title area.
-A material inter-line size transition is deterministic evidence of separate
-semantic roles.
+Report authors often colour one sentence in a numbered item to emphasise a
+finding, then continue the same item in ordinary text. Replacing those rows
+independently loses context and allows a longer translation of the emphasised
+row to overlap its continuation.
 
 ### Notes
 
-Automated tests shall use synthetic PDFs only and cover an aligned, same-colour
-large title followed by a smaller numbered/body line. The two lines shall make
-separate provider requests and remain independently replaced.
+Automated tests shall use synthetic PDFs only. They shall verify that a
+coloured numbered-item marker row followed by aligned ordinary-colour
+continuation rows creates one provider request, uses the dominant paint state,
+and remains separate from adjacent list items and from a misaligned coloured
+row.

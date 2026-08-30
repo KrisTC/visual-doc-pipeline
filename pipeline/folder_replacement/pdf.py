@@ -1822,6 +1822,16 @@ _PDF_GRAPHICS_STATE_BOUNDARY_OPERATORS = frozenset({
 _PDF_FILL_PAINT_OPERATORS = frozenset({b"g", b"rg", b"k", b"cs", b"sc", b"scn"})
 _PDF_STROKE_PAINT_OPERATORS = frozenset({b"G", b"RG", b"K", b"CS", b"SC", b"SCN"})
 _PDF_PATH_CONSTRUCTION_OPERATORS = frozenset({b"m", b"l", b"c", b"v", b"y", b"re", b"h"})
+_PDF_ORDINAL_LIST_MARKER = re.compile(r"^\s*([0-9]+)[.．、)）](?![0-9])")
+_PDF_ALPHA_LIST_MARKER = re.compile(r"^\s*([A-Za-z])[.．、)）]")
+_PDF_ROMAN_LIST_MARKER = re.compile(r"^\s*([IVXLCDMivxlcdm]+)[.．、)）]")
+_PDF_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+_PDF_ROMAN_ORDINAL_VALUES = {
+    "I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7,
+    "VIII": 8, "IX": 9, "X": 10, "XI": 11, "XII": 12, "XIII": 13,
+    "XIV": 14, "XV": 15, "XVI": 16, "XVII": 17, "XVIII": 18,
+    "XIX": 19, "XX": 20,
+}
 
 # A PDF ``TJ`` array may place neighbouring table cells only a fraction of a
 # font-size apart.  A half-size gap keeps ordinary kerning and word fragments
@@ -2365,17 +2375,172 @@ def _pdf_visual_regions(
     changes and undecodable operations remain visual-region boundaries.
     """
     eligible = [item for item in shown if item.text_object_index in text_object_ends]
+    cross_paint_list_regions = _pdf_cross_paint_ordered_list_regions(
+        eligible, text_object_ends, separators
+    )
+    claimed_operation_indexes = {
+        operation_index
+        for region in cross_paint_list_regions
+        for operation_index in region.operation_indexes
+    }
     by_context: dict[
         tuple[int, tuple[object, ...], tuple[float, float, float, float, float, float]],
         list[_PdfShownText],
     ] = {}
     for item in eligible:
+        if item.operation_index in claimed_operation_indexes:
+            continue
         by_context.setdefault((item.graphics_context, item.paint_context, item.ctm), []).append(item)
 
-    regions: list[_PdfVisualRegion] = []
+    ordered_list_boundaries = _pdf_ordered_list_boundaries(eligible, separators)
+    regions = list(cross_paint_list_regions)
     for items in by_context.values():
-        regions.extend(_pdf_regions_in_context(items, text_object_ends, separators, eligible))
+        regions.extend(_pdf_regions_in_context(
+            items, text_object_ends, separators, eligible, ordered_list_boundaries
+        ))
     return tuple(sorted(regions, key=lambda region: region.insertion_index))
+
+
+def _pdf_cross_paint_ordered_list_regions(
+    shown: list[_PdfShownText],
+    text_object_ends: set[int],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> tuple[_PdfVisualRegion, ...]:
+    """Reflow well-evidenced list items whose only state transition is colour.
+
+    FR-2026-08-30-04 is deliberately narrower than ordinary visual-region
+    inference: a verified ordinal sequence supplies the semantic evidence that
+    colour is inline emphasis rather than an independent label.
+    """
+    by_non_colour_state: dict[
+        tuple[
+            int, int, int, int, tuple[float, float, float, float, float, float], tuple[object, ...],
+        ],
+        list[_PdfShownText],
+    ] = {}
+    for item in shown:
+        # The first two paint-context members are fill and stroke paint.  Both
+        # may carry inline emphasis; retain the boundary for opacity/blend
+        # state, clipping, and rendering mode.
+        by_non_colour_state.setdefault((
+            item.graphics_context,
+            round(item.direction[0] * 100),
+            round(item.direction[1] * 100),
+            round(item.horizontal_stretch * 100),
+            item.ctm,
+            item.paint_context[2:],
+        ), []).append(item)
+
+    regions: list[_PdfVisualRegion] = []
+    for items in by_non_colour_state.values():
+        direction, normal = items[0].direction, items[0].normal
+        lines = _pdf_cross_paint_visual_lines(items, direction, normal, separators)
+        for flow_lines in _pdf_ordered_list_flow_line_segments(
+            lines, direction, normal, separators
+        ):
+            marker_indexes = sorted(_pdf_ordered_list_line_indexes(
+                flow_lines, allow_continuation_rows=True
+            ))
+            for marker_position, line_index in enumerate(marker_indexes):
+                end_index = (
+                    marker_indexes[marker_position + 1]
+                    if marker_position + 1 < len(marker_indexes)
+                    else len(flow_lines)
+                )
+                item_lines = flow_lines[line_index:end_index]
+                flattened_lines = [
+                    [item for group in line for item in group]
+                    for line in item_lines
+                ]
+                if not _pdf_cross_paint_list_item_is_reflowable(
+                    flattened_lines, direction, normal, separators
+                ):
+                    continue
+                item_items = [item for line in flattened_lines for item in line]
+                if len({item.paint_context[:2] for item in item_items}) < 2:
+                    continue
+                recurring_gutters = _pdf_recurring_gutters(list(item_lines), direction)
+                if any(
+                    _pdf_group_gap_matches_gutter(
+                        line[index], line[index + 1], direction, recurring_gutters
+                    )
+                    for line in item_lines
+                    for index in range(len(line) - 1)
+                ):
+                    continue
+                regions.append(_pdf_make_visual_region(
+                    flattened_lines,
+                    direction,
+                    normal,
+                    True,
+                    text_object_ends,
+                    anchor=_pdf_dominant_paint_source_item(item_items),
+                ))
+    return tuple(regions)
+
+
+def _pdf_cross_paint_visual_lines(
+    items: list[_PdfShownText],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> list[list[list[_PdfShownText]]]:
+    """Build source lines while retaining non-crossable same-line gaps."""
+    lines: list[list[_PdfShownText]] = []
+    for item in sorted(
+        items, key=lambda value: (-_pdf_dot(value.start, normal), _pdf_dot(value.start, direction))
+    ):
+        baseline = _pdf_dot(item.start, normal)
+        line = next(
+            (
+                candidate for candidate in lines
+                if abs(_pdf_dot(candidate[0].start, normal) - baseline)
+                <= max(candidate[0].font_size, item.font_size) * 0.45
+            ),
+            None,
+        )
+        if line is None:
+            lines.append([item])
+        else:
+            line.append(item)
+
+    line_groups: list[list[list[_PdfShownText]]] = []
+    for line in lines:
+        groups: list[list[_PdfShownText]] = []
+        group: list[_PdfShownText] = []
+        for item in sorted(line, key=lambda value: _pdf_dot(value.start, direction)):
+            if group:
+                gap = _pdf_dot(item.start, direction) - _pdf_dot(group[-1].end, direction)
+                if (
+                    _pdf_separator_between_chunks(group[-1], item, direction, normal, separators)
+                    or gap > max(group[-1].font_size, item.font_size) * _PDF_VISUAL_CHUNK_GAP_FACTOR
+                ):
+                    groups.append(group)
+                    group = []
+            group.append(item)
+        if group:
+            groups.append(group)
+        line_groups.append(groups)
+    return sorted(
+        line_groups,
+        key=lambda groups: (-_pdf_dot(groups[0][0].start, normal), _pdf_dot(groups[0][0].start, direction)),
+    )
+
+
+def _pdf_cross_paint_list_item_is_reflowable(
+    lines: list[list[_PdfShownText]],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> bool:
+    """Keep only aligned multi-line item continuations eligible for reflow."""
+    if len(lines) < 2 or not _pdf_is_paragraph_like(lines, direction, normal, separators):
+        return False
+    sizes = [_pdf_dominant_font_size(line) for line in lines]
+    return all(
+        max(previous, current) < min(previous, current) * 1.5
+        for previous, current in zip(sizes, sizes[1:])
+    )
 
 
 def _pdf_regions_in_context(
@@ -2383,6 +2548,7 @@ def _pdf_regions_in_context(
     text_object_ends: set[int],
     separators: tuple[_PdfVisualSeparator, ...],
     all_shown: list[_PdfShownText],
+    ordered_list_boundaries: tuple[_PdfOrderedListBoundary, ...],
 ) -> tuple[_PdfVisualRegion, ...]:
     if not shown:
         return ()
@@ -2400,7 +2566,9 @@ def _pdf_regions_in_context(
             by_direction.setdefault((round(item.direction[0] * 100), round(item.direction[1] * 100)), []).append(item)
         for items in by_direction.values():
             direction_regions.extend(
-                _pdf_regions_in_context(items, text_object_ends, separators, all_shown)
+                _pdf_regions_in_context(
+                    items, text_object_ends, separators, all_shown, ordered_list_boundaries
+                )
             )
         return tuple(direction_regions)
     horizontal_stretch = shown[0].horizontal_stretch
@@ -2424,7 +2592,9 @@ def _pdf_regions_in_context(
         stretch_regions: list[_PdfVisualRegion] = []
         for items in by_stretch:
             stretch_regions.extend(
-                _pdf_regions_in_context(items, text_object_ends, separators, all_shown)
+                _pdf_regions_in_context(
+                    items, text_object_ends, separators, all_shown, ordered_list_boundaries
+                )
             )
         return tuple(stretch_regions)
     lines: list[list[_PdfShownText]] = []
@@ -2469,55 +2639,319 @@ def _pdf_regions_in_context(
     # suppress a nearby paragraph.  Partition into vertically adjacent local
     # flows before looking for repeated gutters or a reflowable block.
     regions: list[_PdfVisualRegion] = []
-    for flow_lines in _pdf_local_flow_line_segments(
-        ordered_lines, direction, normal, separators, all_shown
+    for local_flow_lines in _pdf_local_flow_line_segments(
+        ordered_lines,
+        direction,
+        normal,
+        separators,
+        all_shown,
+        shown[0].ctm,
+        ordered_list_boundaries,
     ):
-        recurring_gutters = _pdf_recurring_gutters(list(flow_lines), direction)
-        candidate_lines: list[list[_PdfShownText] | None] = []
-        for groups in flow_lines:
-            if len(groups) == 1:
-                candidate_lines.append(groups[0])
-                continue
-            if any(
-                _pdf_group_gap_matches_gutter(groups[index], groups[index + 1], direction, recurring_gutters)
-                or _pdf_separator_between_chunks(
-                    groups[index][-1], groups[index + 1][0], direction, normal, separators
-                )
-                for index in range(len(groups) - 1)
-            ):
-                candidate_lines.append(None)
-                continue
-            candidate_lines.append([item for group in groups for item in group])
-
-        # A local flow may contain several independent paragraphs.  Greedily
-        # select the longest aligned prose block from each position rather
-        # than requiring every line in the surrounding flow to be prose.
-        line_index = 0
-        while line_index < len(flow_lines):
-            selected_end: int | None = None
-            for end in range(len(flow_lines), line_index + 1, -1):
-                prose_lines = candidate_lines[line_index:end]
-                if any(line is None for line in prose_lines):
+        for flow_lines in _pdf_split_flow_at_ordered_list_boundaries(
+            local_flow_lines, direction, normal, shown[0].ctm, ordered_list_boundaries
+        ):
+            ordered_list_lines = _pdf_ordered_list_line_indexes(flow_lines)
+            recurring_gutters = _pdf_recurring_gutters(list(flow_lines), direction)
+            candidate_lines: list[list[_PdfShownText] | None] = []
+            for groups in flow_lines:
+                if len(groups) == 1:
+                    candidate_lines.append(groups[0])
                     continue
-                if _pdf_is_paragraph_like(
-                    [line for line in prose_lines if line is not None], direction, normal, separators
+                if any(
+                    _pdf_group_gap_matches_gutter(groups[index], groups[index + 1], direction, recurring_gutters)
+                    or _pdf_separator_between_chunks(
+                        groups[index][-1], groups[index + 1][0], direction, normal, separators
+                    )
+                    for index in range(len(groups) - 1)
                 ):
-                    selected_end = end
-                    break
-            if selected_end is not None:
-                selected_lines = candidate_lines[line_index:selected_end]
-                regions.append(_pdf_make_visual_region(
-                    [line for line in selected_lines if line is not None],
-                    direction, normal, True, text_object_ends,
-                ))
-                line_index = selected_end
-                continue
-            regions.extend(
-                _pdf_make_visual_region((group,), direction, normal, False, text_object_ends)
-                for group in flow_lines[line_index]
-            )
-            line_index += 1
+                    candidate_lines.append(None)
+                    continue
+                candidate_lines.append([item for group in groups for item in group])
+
+            # A local flow may contain several independent paragraphs.  Greedily
+            # select the longest aligned prose block from each position rather
+            # than requiring every line in the surrounding flow to be prose.
+            line_index = 0
+            while line_index < len(flow_lines):
+                if line_index in ordered_list_lines:
+                    list_row = [item for group in flow_lines[line_index] for item in group]
+                    regions.append(_pdf_make_visual_region(
+                        (list_row,), direction, normal, False, text_object_ends
+                    ))
+                    line_index += 1
+                    continue
+                selected_end: int | None = None
+                for end in range(len(flow_lines), line_index + 1, -1):
+                    prose_lines = candidate_lines[line_index:end]
+                    if any(line is None for line in prose_lines):
+                        continue
+                    if _pdf_is_paragraph_like(
+                        [line for line in prose_lines if line is not None], direction, normal, separators
+                    ):
+                        selected_end = end
+                        break
+                if selected_end is not None:
+                    selected_lines = candidate_lines[line_index:selected_end]
+                    regions.append(_pdf_make_visual_region(
+                        [line for line in selected_lines if line is not None],
+                        direction, normal, True, text_object_ends,
+                    ))
+                    line_index = selected_end
+                    continue
+                regions.extend(
+                    _pdf_make_visual_region((group,), direction, normal, False, text_object_ends)
+                    for group in flow_lines[line_index]
+                )
+                line_index += 1
     return tuple(regions)
+
+
+def _pdf_ordered_list_line_indexes(
+    lines: tuple[list[list[_PdfShownText]], ...],
+    *,
+    allow_continuation_rows: bool = False,
+) -> frozenset[int]:
+    """Return rows in consecutive decimal, alphabetic, or Roman list runs."""
+    markers = [_pdf_ordinal_list_markers(line) for line in lines]
+    indexes: set[int] = set()
+    line_index = 0
+    while line_index < len(markers):
+        longest_run_indexes: tuple[int, ...] | None = None
+        for marker in markers[line_index]:
+            run_indexes = [line_index]
+            candidate_index = line_index + 1
+            expected_value = marker.value + 1
+            while candidate_index < len(markers):
+                if any(
+                    candidate.kind == marker.kind and candidate.value == expected_value
+                    for candidate in markers[candidate_index]
+                ):
+                    run_indexes.append(candidate_index)
+                    expected_value += 1
+                    candidate_index += 1
+                    continue
+                if markers[candidate_index] or not allow_continuation_rows:
+                    break
+                candidate_index += 1
+            if (
+                len(run_indexes) >= marker.minimum_run_length
+                and (
+                    longest_run_indexes is None
+                    or len(run_indexes) > len(longest_run_indexes)
+                )
+            ):
+                longest_run_indexes = tuple(run_indexes)
+        if longest_run_indexes is None:
+            line_index += 1
+            continue
+        indexes.update(longest_run_indexes)
+        line_index = longest_run_indexes[-1] + 1
+    return frozenset(indexes)
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfOrdinalListMarker:
+    """One recognised ordinal form and the evidence threshold it requires."""
+
+    kind: str
+    value: int
+    minimum_run_length: int
+
+
+def _pdf_ordinal_list_markers(
+    groups: list[list[_PdfShownText]],
+) -> tuple[_PdfOrdinalListMarker, ...]:
+    """Return every supported ordinal interpretation at one visual-line start."""
+    text = "".join(item.text for group in groups for item in group)
+    decimal_match = _PDF_ORDINAL_LIST_MARKER.match(text.translate(_PDF_FULLWIDTH_DIGITS))
+    if decimal_match is not None:
+        return (_PdfOrdinalListMarker("decimal", int(decimal_match.group(1)), 2),)
+    stripped = text.lstrip()
+    if stripped and 0x2460 <= ord(stripped[0]) <= 0x2473:
+        return (_PdfOrdinalListMarker("circled_decimal", ord(stripped[0]) - 0x245F, 2),)
+    markers: list[_PdfOrdinalListMarker] = []
+    alpha_match = _PDF_ALPHA_LIST_MARKER.match(text)
+    if alpha_match is not None:
+        markers.append(_PdfOrdinalListMarker(
+            "alphabetic", ord(alpha_match.group(1).lower()) - ord("a") + 1, 3
+        ))
+    roman_match = _PDF_ROMAN_LIST_MARKER.match(text)
+    if roman_match is not None:
+        roman_value = _PDF_ROMAN_ORDINAL_VALUES.get(roman_match.group(1).upper())
+        if roman_value is not None:
+            markers.append(_PdfOrdinalListMarker("roman", roman_value, 3))
+    return tuple(markers)
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfOrderedListBoundary:
+    """The start baseline of one verified ordered-list item."""
+
+    direction: tuple[float, float]
+    normal: tuple[float, float]
+    ctm: tuple[float, float, float, float, float, float]
+    baseline: float
+    tolerance: float
+
+
+def _pdf_ordered_list_boundaries(
+    shown: list[_PdfShownText],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> tuple[_PdfOrderedListBoundary, ...]:
+    """Locate list starts across paint states before per-state grouping.
+
+    A coloured list heading can be the only text at its baseline in one paint
+    state, while its continuation is in another.  List sequence evidence must
+    therefore be collected before those paint states are processed separately.
+    """
+    by_layout: dict[
+        tuple[int, int, tuple[float, float, float, float, float, float]],
+        list[_PdfShownText],
+    ] = {}
+    for item in shown:
+        by_layout.setdefault((
+            round(item.direction[0] * 100), round(item.direction[1] * 100), item.ctm,
+        ), []).append(item)
+    boundaries: list[_PdfOrderedListBoundary] = []
+    for items in by_layout.values():
+        direction, normal = items[0].direction, items[0].normal
+        lines: list[list[_PdfShownText]] = []
+        for item in sorted(
+            items, key=lambda value: (-_pdf_dot(value.start, normal), _pdf_dot(value.start, direction))
+        ):
+            baseline = _pdf_dot(item.start, normal)
+            line = next(
+                (
+                    candidate for candidate in lines
+                    if abs(_pdf_dot(candidate[0].start, normal) - baseline)
+                    <= max(candidate[0].font_size, item.font_size) * 0.45
+                ),
+                None,
+            )
+            if line is None:
+                lines.append([item])
+            else:
+                line.append(item)
+        ordered_lines = sorted(
+            ([sorted(line, key=lambda value: _pdf_dot(value.start, direction))] for line in lines),
+            key=lambda groups: (-_pdf_dot(groups[0][0].start, normal), _pdf_dot(groups[0][0].start, direction)),
+        )
+        for flow_lines in _pdf_ordered_list_flow_line_segments(
+            ordered_lines, direction, normal, separators
+        ):
+            for line_index in _pdf_ordered_list_line_indexes(
+                flow_lines, allow_continuation_rows=True
+            ):
+                line_items = [item for group in flow_lines[line_index] for item in group]
+                boundaries.append(_PdfOrderedListBoundary(
+                    direction,
+                    normal,
+                    line_items[0].ctm,
+                    _pdf_dot(line_items[0].start, normal),
+                    max(item.font_size for item in line_items) * 0.45,
+                ))
+    return tuple(boundaries)
+
+
+def _pdf_ordered_list_flow_line_segments(
+    lines: list[list[list[_PdfShownText]]],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    separators: tuple[_PdfVisualSeparator, ...],
+) -> tuple[tuple[list[list[_PdfShownText]], ...], ...]:
+    """Find vertically continuous candidate list flows across paint states.
+
+    Continuation rows may be indented beyond the usual prose-alignment
+    tolerance, so this deliberately does not require horizontal overlap.  It
+    is used only to establish an already-verified ordinal sequence; ordinary
+    prose grouping remains governed by the stricter local-flow heuristic.
+    """
+    if not lines:
+        return ()
+    segments: list[list[list[list[_PdfShownText]]]] = [[lines[0]]]
+    for line in lines[1:]:
+        upper = segments[-1][-1]
+        upper_items = [item for group in upper for item in group]
+        lower_items = [item for group in line for item in group]
+        upper_baseline = _pdf_dot(upper_items[0].start, normal)
+        lower_baseline = _pdf_dot(lower_items[0].start, normal)
+        spacing = upper_baseline - lower_baseline
+        font_size = max(
+            *(item.font_size for item in upper_items), *(item.font_size for item in lower_items)
+        )
+        if (
+            0.4 * font_size <= spacing <= 2.2 * font_size
+            and not _pdf_separator_between_lines(
+                upper_items, lower_items, direction, normal, separators
+            )
+        ):
+            segments[-1].append(line)
+        else:
+            segments.append([line])
+    return tuple(tuple(segment) for segment in segments)
+
+
+def _pdf_split_flow_at_ordered_list_boundaries(
+    flow_lines: tuple[list[list[_PdfShownText]], ...],
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    ctm: tuple[float, float, float, float, float, float],
+    boundaries: tuple[_PdfOrderedListBoundary, ...],
+) -> tuple[tuple[list[list[_PdfShownText]], ...], ...]:
+    """Prevent one paint-state block from crossing a verified list-item start."""
+    compatible_boundaries = _pdf_compatible_ordered_list_boundaries(
+        direction, normal, ctm, boundaries
+    )
+    if not compatible_boundaries:
+        return (flow_lines,)
+    segments: list[list[list[list[_PdfShownText]]]] = []
+    previous_item_index: int | None = None
+    for line in flow_lines:
+        items = [item for group in line for item in group]
+        baseline = _pdf_dot(items[0].start, normal)
+        tolerance = max(item.font_size for item in items) * 0.45
+        item_index = _pdf_ordered_list_item_index(
+            baseline, tolerance, compatible_boundaries
+        )
+        if not segments or item_index != previous_item_index:
+            segments.append([line])
+        else:
+            segments[-1].append(line)
+        previous_item_index = item_index
+    return tuple(tuple(segment) for segment in segments)
+
+
+def _pdf_compatible_ordered_list_boundaries(
+    direction: tuple[float, float],
+    normal: tuple[float, float],
+    ctm: tuple[float, float, float, float, float, float],
+    boundaries: tuple[_PdfOrderedListBoundary, ...],
+) -> tuple[_PdfOrderedListBoundary, ...]:
+    """Return verified item starts that share one visual coordinate system."""
+    return tuple(sorted(
+        (
+            boundary for boundary in boundaries
+            if boundary.ctm == ctm
+            and abs(boundary.direction[0] - direction[0]) <= 0.01
+            and abs(boundary.direction[1] - direction[1]) <= 0.01
+            and abs(boundary.normal[0] - normal[0]) <= 0.01
+            and abs(boundary.normal[1] - normal[1]) <= 0.01
+        ),
+        key=lambda boundary: -boundary.baseline,
+    ))
+
+
+def _pdf_ordered_list_item_index(
+    baseline: float,
+    tolerance: float,
+    boundaries: tuple[_PdfOrderedListBoundary, ...],
+) -> int:
+    """Return the verified ordered-list item containing one visual baseline."""
+    return sum(
+        baseline <= boundary.baseline + max(tolerance, boundary.tolerance)
+        for boundary in boundaries
+    ) - 1
 
 
 def _pdf_local_flow_line_segments(
@@ -2526,10 +2960,15 @@ def _pdf_local_flow_line_segments(
     normal: tuple[float, float],
     separators: tuple[_PdfVisualSeparator, ...],
     all_shown: list[_PdfShownText],
+    ctm: tuple[float, float, float, float, float, float],
+    ordered_list_boundaries: tuple[_PdfOrderedListBoundary, ...],
 ) -> tuple[tuple[list[list[_PdfShownText]], ...], ...]:
     """Split distant visual lines before classifying local prose or tables."""
     if not lines:
         return ()
+    compatible_list_boundaries = _pdf_compatible_ordered_list_boundaries(
+        direction, normal, ctm, ordered_list_boundaries
+    )
     segments: list[list[list[list[_PdfShownText]]]] = [[lines[0]]]
     for line in lines[1:]:
         upper = segments[-1][-1]
@@ -2548,6 +2987,17 @@ def _pdf_local_flow_line_segments(
         lower_start = min(_pdf_dot(item.start, direction) for item in lower_items)
         lower_end = max(_pdf_dot(item.end, direction) for item in lower_items)
         horizontally_related = min(upper_end, lower_end) >= max(upper_start, lower_start) - font_size
+        upper_item_index = _pdf_ordered_list_item_index(
+            upper_baseline, max(item.font_size for item in upper_items) * 0.45,
+            compatible_list_boundaries,
+        )
+        lower_item_index = _pdf_ordered_list_item_index(
+            lower_baseline, max(item.font_size for item in lower_items) * 0.45,
+            compatible_list_boundaries,
+        )
+        within_ordered_list_item = (
+            upper_item_index >= 0 and upper_item_index == lower_item_index
+        )
         if (
             0.4 * font_size <= spacing <= 2.2 * font_size
             and horizontally_related
@@ -2556,7 +3006,16 @@ def _pdf_local_flow_line_segments(
                 upper_items, lower_items, direction, normal, separators
             )
             and not _pdf_intervening_text_between_lines(
-                upper_items, lower_items, all_shown, direction, normal
+                upper_items,
+                lower_items,
+                all_shown,
+                direction,
+                normal,
+                require_horizontal_overlap=not within_ordered_list_item,
+                ctm=ctm if within_ordered_list_item else None,
+                different_from_paint_context=(
+                    upper_items[0].paint_context if within_ordered_list_item else None
+                ),
             )
         ):
             segments[-1].append(line)
@@ -2580,6 +3039,10 @@ def _pdf_intervening_text_between_lines(
     all_shown: list[_PdfShownText],
     direction: tuple[float, float],
     normal: tuple[float, float],
+    *,
+    require_horizontal_overlap: bool = True,
+    ctm: tuple[float, float, float, float, float, float] | None = None,
+    different_from_paint_context: tuple[object, ...] | None = None,
 ) -> bool:
     """Return whether another text stream visibly separates two candidate lines."""
     upper_baseline = _pdf_dot(upper[0].start, normal)
@@ -2605,9 +3068,18 @@ def _pdf_intervening_text_between_lines(
             or abs(item.direction[1] - direction[1]) > 0.01
         ):
             continue
+        if ctm is not None and item.ctm != ctm:
+            continue
+        if (
+            different_from_paint_context is not None
+            and item.paint_context == different_from_paint_context
+        ):
+            continue
         baseline = _pdf_dot(item.start, normal)
         if not lower_bound + tolerance < baseline < upper_bound - tolerance:
             continue
+        if not require_horizontal_overlap:
+            return True
         start = _pdf_dot(item.start, direction)
         end = _pdf_dot(item.end, direction)
         if end >= corridor_start - tolerance and start <= corridor_end + tolerance:
@@ -2758,16 +3230,20 @@ def _pdf_make_visual_region(
     normal: tuple[float, float],
     block: bool,
     text_object_ends: set[int],
+    *,
+    anchor: _PdfShownText | None = None,
 ) -> _PdfVisualRegion:
     ordered_groups = list(groups)
     items = [item for group in ordered_groups for item in group]
     starts = [_pdf_dot(item.start, direction) for item in items]
     ends = [_pdf_dot(item.end, direction) for item in items]
     baselines = [_pdf_dot(group[0].start, normal) for group in ordered_groups]
-    size = max(item.font_size for item in items)
+    maximum_size = max(item.font_size for item in items)
+    anchor = anchor or _pdf_dominant_source_item(items)
+    size = anchor.font_size
     text = "\n".join("".join(item.text for item in group) for group in ordered_groups)
-    top = max(baselines) + size * 0.8
-    bottom = min(baselines) - size * 0.4
+    top = max(baselines) + maximum_size * 0.8
+    bottom = min(baselines) - maximum_size * 0.4
     alignment = "left"
     if block:
         group_ends = [_pdf_dot(group[-1].end, direction) for group in ordered_groups]
@@ -2778,14 +3254,57 @@ def _pdf_make_visual_region(
             alignment = "right"
         elif max(centres) - min(centres) <= size:
             alignment = "center"
-    anchor = max(items, key=lambda item: item.operation_index)
     return _PdfVisualRegion(
         tuple(item.operation_index for item in items), text, direction, normal,
-        min(starts), top, max(1.0, max(ends) - min(starts)), max(size * 1.2, top - bottom),
+        min(starts), top, max(1.0, max(ends) - min(starts)), max(maximum_size * 1.2, top - bottom),
         items[0].horizontal_stretch,
         size, alignment,
         anchor.operation_index, anchor.ctm, anchor,
     )
+
+
+def _pdf_dominant_source_item(items: list[_PdfShownText]) -> _PdfShownText:
+    """Choose a deterministic dominant source style for fitted PDF output."""
+    weights: dict[tuple[str, float], int] = {}
+    for item in items:
+        font_name = str(item.current_font[0]) if item.current_font is not None else ""
+        style = (font_name, round(item.font_size, 6))
+        weights[style] = weights.get(style, 0) + max(1, len(item.text))
+    dominant_style = max(weights, key=lambda style: (weights[style], style))
+    return min(
+        (
+            item for item in items
+            if (
+                str(item.current_font[0]) if item.current_font is not None else "",
+                round(item.font_size, 6),
+            ) == dominant_style
+        ),
+        key=lambda item: item.operation_index,
+    )
+
+
+def _pdf_dominant_paint_source_item(items: list[_PdfShownText]) -> _PdfShownText:
+    """Choose the dominant fill paint, then the normal deterministic style."""
+    weights: dict[tuple[object, ...], int] = {}
+    for item in items:
+        fill_paint = cast(tuple[object, ...], item.paint_context[0])
+        weights[fill_paint] = weights.get(fill_paint, 0) + max(1, len(item.text))
+    dominant_paint = max(
+        weights,
+        key=lambda paint: (
+            weights[paint],
+            -min(
+                item.operation_index
+                for item in items
+                if cast(tuple[object, ...], item.paint_context[0]) == paint
+            ),
+        ),
+    )
+    return _pdf_dominant_source_item([
+        item
+        for item in items
+        if cast(tuple[object, ...], item.paint_context[0]) == dominant_paint
+    ])
 
 
 def _pdf_dot(point: tuple[float, float], vector: tuple[float, float]) -> float:
@@ -2853,6 +3372,13 @@ def _pdf_fitted_region_operations(
     output_run = output_runs[0]
     source_output = (
         source_font
+        # A visual region assembled from several source operations may contain
+        # different subset fonts.  Even when its dominant simple font claims
+        # to cover the translated characters, it is not a reliable output
+        # face for text that originated across multiple runs.  Keep the
+        # source-derived geometry and measurement, but serialize the fitted
+        # portable runs instead.
+        and len(region.operation_indexes) == 1
         and len(output_runs) == 1
         and bool(output_run.source_typefaces)
         and _pdf_source_font_supports_text(

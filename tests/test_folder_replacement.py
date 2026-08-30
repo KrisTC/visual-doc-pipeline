@@ -43,6 +43,7 @@ from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
     _PdfReplacementSerializationError,
     _pdf_decode_composite_bytes,
+    _pdf_fitted_region_operations,
     _pdf_text_advance,
 )
 from pipeline.folder_replacement.xlsx import _replace_drawing
@@ -2596,6 +2597,45 @@ class FolderReplacementTests(unittest.TestCase):
             ])
 
     # Verifies FR-2026-08-29-03.
+    def test_basic_layout_pdf_uses_dominant_style_and_portable_output_for_a_multi_run_line(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 70 Td (dominant text ) Tj /F2 12 Tf (x) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            source_fonts: list[object | None] = []
+            def inspect_anchor(region: object, *arguments: object) -> object:
+                anchor = getattr(region, "anchor")
+                current_font = getattr(anchor, "current_font")
+                source_fonts.append(current_font[0] if current_font is not None else None)
+                return _pdf_fitted_region_operations(region, *arguments)  # type: ignore[arg-type]
+
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
+                side_effect=inspect_anchor,
+            ):
+                result = self._run(
+                    input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider(),
+                    document_text_layout="preserve-basic-layout-source-font",
+                )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["/F1"], [str(font) for font in source_fonts])
+            output_reader = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in stream.operations
+            ))
+
+    # Verifies FR-2026-08-29-03.
     def test_basic_layout_pdf_reflows_prose_across_equivalent_graphics_wrappers(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2673,6 +2713,240 @@ class FolderReplacementTests(unittest.TestCase):
 
             self.assertEqual(2, result.replaced_native_text_items)
             self.assertEqual(["title", "body"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+
+    # Verifies FR-2026-08-29-05.
+    def test_basic_layout_pdf_keeps_incrementing_numbered_list_items_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 130)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 112 Td (1. first) Tj T* (2. second) Tj "
+                b"T* (3. third) Tj T* (4. fourth) Tj T* (5. fifth) Tj T* (6. sixth) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(6, result.replaced_native_text_items)
+            self.assertEqual([
+                "1. first", "2. second", "3. third", "4. fourth", "5. fifth", "6. sixth",
+            ], [request.text for request in provider.requests if not request.is_filename])
+
+    # Verifies FR-2026-08-30-01.
+    def test_basic_layout_pdf_keeps_incrementing_circled_list_items_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td <FEFF2460002000660069007200730074> Tj "
+                b"T* <FEFF24610020007300650063006F006E0064> Tj "
+                b"T* <FEFF2462002000740068006900720064> Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(3, result.replaced_native_text_items)
+            self.assertEqual(3, len([request for request in provider.requests if not request.is_filename]))
+
+    # Verifies FR-2026-08-30-01.
+    def test_basic_layout_pdf_does_not_treat_an_isolated_circled_marker_as_a_list(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td <FEFF2460002000660069007200730074> Tj "
+                b"T* (continuation) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(1, len([request for request in provider.requests if not request.is_filename]))
+
+    # Verifies FR-2026-08-30-01.
+    def test_basic_layout_pdf_keeps_incrementing_alpha_and_roman_list_items_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 180)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 154 Td (A. first) Tj T* (B. second) Tj "
+                b"T* (C. third) Tj ET "
+                b"BT /F1 12 Tf 14 TL 10 98 Td (i\\) first) Tj T* (ii\\) second) Tj "
+                b"T* (iii\\) third) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(6, result.replaced_native_text_items)
+            self.assertEqual(6, len([request for request in provider.requests if not request.is_filename]))
+
+    # Verifies FR-2026-08-30-01.
+    def test_basic_layout_pdf_requires_three_alpha_or_roman_list_markers(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 180)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 154 Td (A. first) Tj T* (B. second) Tj ET "
+                b"BT /F1 12 Tf 14 TL 10 98 Td (i\\) first) Tj T* (ii\\) second) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(2, result.replaced_native_text_items)
+            self.assertEqual(2, len([request for request in provider.requests if not request.is_filename]))
+
+    # Verifies FR-2026-08-30-04.
+    def test_basic_layout_pdf_reflows_an_emphasised_ordered_item_with_its_continuation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(300, 200)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"0 G 0 g BT /F1 14 Tf 14 TL 50 160 Td (1. first heading) Tj "
+                b"10 0 Td T* (continuation one) Tj ET "
+                b"1 0 0 RG 1 0 0 rg BT /F1 14 Tf 10 132 Td (2. emphasised finding) Tj ET "
+                b"0 G 0 g BT /F1 14 Tf 14 TL 10 118 Td (continuation two) Tj "
+                b"T* (continued) Tj ET "
+                b"BT /F1 14 Tf 10 76 Td (3. third heading) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(
+                replacement_text="A deliberately longer translated replacement sentence."
+            )
+            anchors: dict[str, tuple[object, ...]] = {}
+
+            def inspect_anchor(region: object, *arguments: object) -> object:
+                anchor = getattr(region, "anchor")
+                anchors[getattr(region, "text")] = getattr(anchor, "paint_context")[0]
+                return _pdf_fitted_region_operations(region, *arguments)  # type: ignore[arg-type]
+
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
+                side_effect=inspect_anchor,
+            ):
+                result = self._run(
+                    input_root, output_root, _EmptyOcrProvider(), provider,
+                    document_text_layout="preserve-basic-layout",
+                )
+
+            self.assertEqual(3, result.replaced_native_text_items)
+            self.assertEqual([
+                "1. first heading\ncontinuation one",
+                "2. emphasised finding\ncontinuation two\ncontinued",
+                "3. third heading",
+            ], [request.text for request in provider.requests if not request.is_filename])
+            self.assertEqual(
+                b"g", anchors["2. emphasised finding\ncontinuation two\ncontinued"][0]
+            )
+
+    # Verifies FR-2026-08-30-03.
+    def test_basic_layout_pdf_keeps_interleaved_colour_rows_inside_list_items_separate(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(300, 240)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"0 g BT /F1 14 Tf 14 TL 20 210 Td (1. first heading) Tj "
+                b"T* (first continuation) Tj ET "
+                b"BT /F1 14 Tf 20 168 Td (2. before emphasis) Tj ET "
+                b"1 0 0 rg BT /F1 14 Tf 140 154 Td (emphasized row) Tj ET "
+                b"0 g BT /F1 14 Tf 20 140 Td (after emphasis) Tj ET "
+                b"BT /F1 14 Tf 20 112 Td (3. third heading) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider(
+                replacement_text="A deliberately longer translated replacement sentence."
+            )
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(5, result.replaced_native_text_items)
+            self.assertEqual([
+                "1. first heading\nfirst continuation",
+                "2. before emphasis",
+                "emphasized row",
+                "after emphasis",
+                "3. third heading",
+            ], [request.text for request in provider.requests if not request.is_filename])
+
+    # Verifies FR-2026-08-29-05.
+    def test_basic_layout_pdf_keeps_non_sequential_numeric_prose_eligible_for_grouping(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 14 TL 10 70 Td (2. first line) Tj T* (4. second line) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as output_file: writer.write(output_file)
+
+            provider = _RecordingReplacementProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["2. first line\n4. second line"], [
                 request.text for request in provider.requests if not request.is_filename
             ])
 
