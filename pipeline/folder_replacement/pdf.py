@@ -72,6 +72,16 @@ class _PdfVectorRenderDocument:
     pages_with_vector_paint: frozenset[int]
 
 
+@dataclass(frozen=True)
+class _PdfUndecodableCandidate:
+    """One page-content operation eligible for the OCR fallback."""
+
+    page: int
+    x: float
+    y: float
+    font_size: float
+
+
 def _replace_native_text(
     text: str,
     replacement_provider: TextReplacementProvider,
@@ -123,12 +133,12 @@ def replace_pdf_file(
     diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int]:
     reader = PdfReader(source)
-    vector_render_document = _pdf_vector_render_document(reader)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
     native_items = 0
     seen_forms: set[int] = set()
     seen_annotations: set[int] = set()
+    undecodable_candidates: list[_PdfUndecodableCandidate] = []
     for page_index, page in enumerate(writer.pages, start=1):
         native_items += _replace_pdf_content_text(
             page,
@@ -145,6 +155,7 @@ def replace_pdf_file(
             page_index=page_index,
             diagnostics=diagnostics,
             container_kind="pdf_page_content",
+            undecodable_candidates=undecodable_candidates,
         )
         native_items += _replace_pdf_annotations(
             page,
@@ -195,6 +206,7 @@ def replace_pdf_file(
             image_file.replace(replacement_image)
             embedded_image_index += 1
             work_completed(f"embedded image {embedded_image_index}")
+    vector_render_document = _pdf_vector_render_document(writer, keep_undecodable_text=True)
     for page_index, page in enumerate(writer.pages, start=1):
         if page_index in vector_render_document.pages_with_vector_paint:
             image_regions += _replace_pdf_vector_outline_text(
@@ -207,6 +219,7 @@ def replace_pdf_file(
                 source_language,
                 target_language,
                 diagnostics,
+                undecodable_candidates,
             )
         work_completed(f"vector OCR page {page_index}/{len(writer.pages)}")
     with destination.open("wb") as output_file:
@@ -214,17 +227,25 @@ def replace_pdf_file(
     return native_items, image_regions
 
 
-def _pdf_vector_render_document(reader: PdfReader) -> _PdfVectorRenderDocument:
+def _pdf_vector_render_document(
+    reader: PdfReader | PdfWriter, *, keep_undecodable_text: bool = False
+) -> _PdfVectorRenderDocument:
     """Return an in-memory PDF that paints paths but omits text and raster images."""
+    if isinstance(reader, PdfWriter):
+        snapshot = BytesIO()
+        reader.write(snapshot)
+        reader = PdfReader(snapshot)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
     seen_forms: set[int] = set()
     for page in writer.pages:
-        _pdf_strip_text_and_images_for_vector_render(page, writer, seen_forms)
+        _pdf_strip_text_and_images_for_vector_render(
+            page, writer, seen_forms, keep_undecodable_text=keep_undecodable_text
+        )
     pages_with_vector_paint = frozenset(
         page_index
         for page_index, page in enumerate(writer.pages, start=1)
-        if _pdf_content_has_vector_paint(page, writer, set())
+        if _pdf_content_has_detection_paint(page, writer, set())
     )
     output = BytesIO()
     writer.write(output)
@@ -232,7 +253,11 @@ def _pdf_vector_render_document(reader: PdfReader) -> _PdfVectorRenderDocument:
 
 
 def _pdf_strip_text_and_images_for_vector_render(
-    content_owner: object, writer: PdfWriter, seen_forms: set[int]
+    content_owner: object,
+    writer: PdfWriter,
+    seen_forms: set[int],
+    *,
+    keep_undecodable_text: bool,
 ) -> None:
     """Remove OCR-owned painting operations while retaining vector page artwork."""
     get_contents = getattr(content_owner, "get_contents", None)
@@ -247,9 +272,18 @@ def _pdf_strip_text_and_images_for_vector_render(
     )
     content_stream = ContentStream(contents, writer)
     retained: list[tuple[list[object], bytes]] = []
+    current_font: tuple[object, object] | None = None
+    font_resources = _pdf_font_resources(content_owner)
     changed = False
     for operands, operator in content_stream.operations:
-        if operator in _PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS or operator == b"INLINE IMAGE":
+        if operator == b"Tf" and len(operands) >= 2:
+            current_font = (operands[0], operands[1])
+        if (
+            operator in _PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS
+            and not (keep_undecodable_text and _pdf_text_showing_operation_is_undecodable(
+                operands, operator, current_font, font_resources
+            ))
+        ) or operator == b"INLINE IMAGE":
             changed = True
             continue
         if operator == b"Do" and operands and xobjects is not None:
@@ -278,7 +312,9 @@ def _pdf_strip_text_and_images_for_vector_render(
         if identifier in seen_forms:
             continue
         seen_forms.add(identifier)
-        _pdf_strip_text_and_images_for_vector_render(form, writer, seen_forms)
+        _pdf_strip_text_and_images_for_vector_render(
+            form, writer, seen_forms, keep_undecodable_text=keep_undecodable_text
+        )
 
 
 def _pdf_content_has_vector_paint(
@@ -315,6 +351,61 @@ def _pdf_content_has_vector_paint(
     return False
 
 
+def _pdf_content_has_detection_paint(
+    content_owner: object, writer: PdfWriter, seen_forms: set[int]
+) -> bool:
+    """Return whether the selective OCR render contains vector or retained text."""
+    get_contents = getattr(content_owner, "get_contents", None)
+    contents = get_contents() if callable(get_contents) else content_owner
+    if contents is None:
+        return False
+    resources = getattr(content_owner, "get", lambda _key, _default=None: None)("/Resources")
+    xobjects = (
+        resources.get_object().get("/XObject")
+        if resources is not None and resources.get_object().get("/XObject") is not None
+        else None
+    )
+    for operands, operator in ContentStream(contents, writer).operations:
+        if operator in _PDF_VECTOR_OCR_PAINT_OPERATORS | _PDF_VECTOR_OCR_TEXT_SHOWING_OPERATORS:
+            return True
+        if operator != b"Do" or not operands or xobjects is None:
+            continue
+        xobject = xobjects.get_object().get(operands[0])
+        if xobject is None:
+            continue
+        form = xobject.get_object()
+        if form.get("/Subtype") != "/Form":
+            continue
+        identifier = form.indirect_reference.idnum if form.indirect_reference is not None else id(form)
+        if identifier in seen_forms:
+            continue
+        seen_forms.add(identifier)
+        if _pdf_content_has_detection_paint(form, writer, seen_forms):
+            return True
+    return False
+
+
+def _pdf_text_showing_operation_is_undecodable(
+    operands: list[object],
+    operator: bytes,
+    current_font: tuple[object, object] | None,
+    font_resources: dict[str, object],
+) -> bool:
+    """Return whether a shown operation must remain visible for fallback OCR."""
+    values: tuple[object, ...]
+    if operator == b"TJ":
+        values = tuple(operands[0]) if operands and isinstance(operands[0], ArrayObject) else ()
+    elif operator == b'"':
+        values = (operands[2],) if len(operands) >= 3 else ()
+    else:
+        values = (operands[0],) if operands else ()
+    shown = [value for value in values if not isinstance(value, (int, float, NumberObject, FloatObject))]
+    return bool(shown) and any(
+        _pdf_text_operand_value(value, current_font, font_resources) is None
+        for value in shown
+    )
+
+
 def _replace_pdf_vector_outline_text(
     page: object,
     writer: PdfWriter,
@@ -325,6 +416,7 @@ def _replace_pdf_vector_outline_text(
     source_language: str,
     target_language: str,
     diagnostics: list[dict[str, object]] | None,
+    undecodable_candidates: list[_PdfUndecodableCandidate],
 ) -> int:
     """OCR vector-only page pixels and append safe page-space PDF replacements."""
     reason_counts: dict[str, int] = {}
@@ -352,13 +444,25 @@ def _replace_pdf_vector_outline_text(
     detected = ocr_provider.recognize(OcrRequest(rendered, source_language)).text_items
     accepted = 0
     replacements: list[tuple[OcrText, str]] = []
+    retained_region_details: list[dict[str, object]] = []
     for item in detected:
         if item.confidence < TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:
             _pdf_vector_reason(reason_counts, "vector_ocr_confidence_below_threshold")
             continue
         accepted += 1
-        if not _pdf_vector_can_render_upright(item.bounding_polygon):
+        baseline_angle = _pdf_vector_baseline_angle(item.bounding_polygon)
+        if (
+            baseline_angle is None
+            or abs(baseline_angle) > _PDF_VECTOR_OCR_UPRIGHT_TOLERANCE_DEGREES
+        ):
             _pdf_vector_reason(reason_counts, "vector_ocr_polygon_orientation_unsupported")
+            retained_region_details.append({
+                "reason_code": "vector_ocr_polygon_orientation_unsupported",
+                "detected_text": item.text,
+                "baseline_angle_degrees": (
+                    round(baseline_angle, 1) if baseline_angle is not None else None
+                ),
+            })
             continue
         colours = estimate_text_region_colours(rendered, item)
         if colours.background_colour_confidence < _PDF_VECTOR_OCR_MINIMUM_BACKGROUND_CONFIDENCE:
@@ -372,7 +476,15 @@ def _replace_pdf_vector_outline_text(
             continue
         replacements.append((item, replacement))
     if not replacements:
-        _record_pdf_vector_summary(diagnostics, page_index, len(detected), accepted, 0, reason_counts)
+        _record_pdf_vector_summary(
+            diagnostics,
+            page_index,
+            len(detected),
+            accepted,
+            0,
+            reason_counts,
+            retained_region_details,
+        )
         return 0
     font_name, font_reference = _pdf_embedded_noto_font(writer, "sans-serif", False)
     _pdf_add_font_resource(page, font_name, font_reference)
@@ -413,7 +525,15 @@ def _replace_pdf_vector_outline_text(
             content_stream.operations.extend(overlay)
             content_stream.operations.append(([], b"Q"))
             getattr(page, "replace_contents")(content_stream)
-    _record_pdf_vector_summary(diagnostics, page_index, len(detected), accepted, written, reason_counts)
+    _record_pdf_vector_summary(
+        diagnostics,
+        page_index,
+        len(detected),
+        accepted,
+        written,
+        reason_counts,
+        retained_region_details,
+    )
     return written
 
 
@@ -454,10 +574,10 @@ def _pdf_inverse_matrix(
     )
 
 
-def _pdf_vector_can_render_upright(polygon: BoundingPolygon) -> bool:
-    """Allow only the small horizontal OCR skew accepted for bitmap replacements."""
+def _pdf_vector_baseline_angle(polygon: BoundingPolygon) -> float | None:
+    """Return a signed horizontal-baseline angle for a valid OCR quadrilateral."""
     if len(polygon.vertices) != 4:
-        return False
+        return None
     edge_start, edge_end = max(
         zip(polygon.vertices, polygon.vertices[1:] + polygon.vertices[:1], strict=True),
         key=lambda edge: math.hypot(edge[1].x - edge[0].x, edge[1].y - edge[0].y),
@@ -465,12 +585,30 @@ def _pdf_vector_can_render_upright(polygon: BoundingPolygon) -> bool:
     delta_x = edge_end.x - edge_start.x
     delta_y = edge_end.y - edge_start.y
     if not all(math.isfinite(value) for value in (delta_x, delta_y)):
-        return False
+        return None
     edge_length = math.hypot(delta_x, delta_y)
     if edge_length <= 0.0:
-        return False
+        return None
     baseline_angle = (math.degrees(math.atan2(delta_y, delta_x)) + 90.0) % 180.0 - 90.0
-    return abs(baseline_angle) <= _PDF_VECTOR_OCR_UPRIGHT_TOLERANCE_DEGREES
+    return baseline_angle
+
+
+def _pdf_ocr_region_matches_undecodable_candidate(
+    polygon: BoundingPolygon,
+    candidate: _PdfUndecodableCandidate,
+    page_height: float,
+    scale: float,
+) -> bool:
+    """Match a region only when its source anchor lies in a conservative envelope."""
+    left = min(point.x for point in polygon.vertices) / scale
+    right = max(point.x for point in polygon.vertices) / scale
+    bottom = page_height - max(point.y for point in polygon.vertices) / scale
+    top = page_height - min(point.y for point in polygon.vertices) / scale
+    tolerance = max(1.0, candidate.font_size)
+    return (
+        left - tolerance <= candidate.x <= right + tolerance
+        and bottom - tolerance <= candidate.y <= top + tolerance
+    )
 
 
 def _pdf_vector_overlay_operations(
@@ -538,10 +676,11 @@ def _record_pdf_vector_summary(
     accepted: int,
     written: int,
     reasons: dict[str, int],
+    retained_region_details: list[dict[str, object]] | None = None,
 ) -> None:
     if diagnostics is None or (detected == 0 and not reasons):
         return
-    diagnostics.append({
+    entry: dict[str, object] = {
         "kind": "vector_ocr_summary",
         "page": page_index,
         "ocr_detected_regions": detected,
@@ -549,7 +688,10 @@ def _record_pdf_vector_summary(
         "replacement_written_regions": written,
         "safely_retained_regions": sum(reasons.values()),
         "retained_reason_counts": dict(sorted(reasons.items())),
-    })
+    }
+    if retained_region_details:
+        entry["retained_region_details"] = retained_region_details
+    diagnostics.append(entry)
 
 
 def _replace_pdf_annotations(
@@ -950,6 +1092,7 @@ def _replace_pdf_content_text(
     page_index: int | None = None,
     diagnostics: list[dict[str, object]] | None = None,
     container_kind: str = "pdf_page_content",
+    undecodable_candidates: list[_PdfUndecodableCandidate] | None = None,
 ) -> int:
     get_contents = getattr(content_owner, "get_contents", None)
     replace_contents = getattr(content_owner, "replace_contents", None)
@@ -1014,6 +1157,7 @@ def _replace_pdf_content_text(
             container_kind=container_kind,
             content_bounds=content_bounds,
             can_widen_single_lines=can_widen_single_lines,
+            undecodable_candidates=undecodable_candidates,
         )
     else:
         replaced_items = _replace_pdf_operations(
@@ -1056,6 +1200,7 @@ def _replace_pdf_content_text(
             page_index=page_index,
             diagnostics=diagnostics,
             container_kind="pdf_form_xobject",
+            undecodable_candidates=undecodable_candidates,
         )
     return replaced_items
 
@@ -1246,6 +1391,7 @@ def _replace_pdf_fitted_operations(
     container_kind: str = "pdf_page_content",
     content_bounds: tuple[float, float, float, float] | None = None,
     can_widen_single_lines: bool = False,
+    undecodable_candidates: list[_PdfUndecodableCandidate] | None = None,
 ) -> int:
     """Replace eligible page text as visual lines or paragraph-like blocks.
 
@@ -1536,6 +1682,9 @@ def _replace_pdf_fitted_operations(
             unverifiable_legacy_simple_font = _pdf_simple_truetype_encoding_is_unverifiable(
                 current_font, font_resources
             )
+            location = _pdf_diagnostic_text_location(
+                text_matrix, ctm, current_font, horizontal_scale, text_rise
+            )
             _record_pdf_retained_diagnostic(
                 diagnostics,
                 page_index,
@@ -1543,9 +1692,7 @@ def _replace_pdf_fitted_operations(
                 "pdf_text_undecodable",
                 operator,
                 None,
-                _pdf_diagnostic_text_location(
-                    text_matrix, ctm, current_font, horizontal_scale, text_rise
-                ),
+                location,
                 (
                     "The source /ToUnicode mapping cannot be verified against its "
                     "embedded legacy non-Unicode TrueType cmap."
@@ -1566,6 +1713,21 @@ def _replace_pdf_fitted_operations(
                 word_spacing,
                 horizontal_scale,
             )
+            if (
+                undecodable_candidates is not None
+                and container_kind == "pdf_page_content"
+                and page_index is not None
+                and location is not None
+                and undecodable_advance is not None
+            ):
+                top_left = cast(dict[str, float], location["top_left"])
+                placement = _pdf_text_placement(
+                    text_matrix, ctm, current_font, horizontal_scale
+                )
+                if placement is not None:
+                    undecodable_candidates.append(_PdfUndecodableCandidate(
+                        page_index, float(top_left["x"]), float(top_left["y"]), placement[2]
+                    ))
             if undecodable_advance is not None:
                 # Keep the source operation untouched, but preserve the text
                 # position when its source CMap and widths establish a safe

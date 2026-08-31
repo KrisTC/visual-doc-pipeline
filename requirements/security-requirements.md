@@ -247,11 +247,12 @@ files are ignored by discovery and Git.
 | Status | Implemented |
 | Source | User-approved security review for FR-2026-08-29-01 |
 | Date Added | 2026-08-29 |
-| Related Requirements | FR-2026-08-29-01, TR-2026-08-29-01, SR-2026-08-01-01 |
+| Related Requirements | FR-2026-08-29-01, FR-2026-08-29-02, TR-2026-08-29-01, TR-2026-08-29-02, SR-2026-08-01-01 |
 
 ### Description
 
-The PDFium renderer introduced for FR-2026-08-29-01 shall render only bytes
+The PDFium renderer introduced for FR-2026-08-29-01 and used by
+FR-2026-08-29-02 shall render only bytes
 already present in the submitted PDF. It shall not execute JavaScript, launch
 links or actions, fetch network resources, open external files, write rendered
 pages to disk, or transmit rendered pixels to an external service except

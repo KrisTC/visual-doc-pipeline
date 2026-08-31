@@ -1491,7 +1491,7 @@ class FolderReplacementTests(unittest.TestCase):
             )
             self.assertEqual(1, report["entries"][0]["replacement_written_regions"])
 
-    # Verifies FR-2026-08-29-01.
+    # Verifies FR-2026-08-29-01 and FR-2026-08-31-01.
     def test_retains_materially_rotated_vector_ocr_region(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -1525,9 +1525,18 @@ class FolderReplacementTests(unittest.TestCase):
             report = json.loads(
                 (output_root / "rotated.pdf.diagnostics.json").read_text(encoding="utf-8")
             )
+            summary = report["entries"][0]
             self.assertEqual(
                 {"vector_ocr_polygon_orientation_unsupported": 1},
-                report["entries"][0]["retained_reason_counts"],
+                summary["retained_reason_counts"],
+            )
+            self.assertEqual(
+                [{
+                    "reason_code": "vector_ocr_polygon_orientation_unsupported",
+                    "detected_text": "outlined",
+                    "baseline_angle_degrees": 6.3,
+                }],
+                summary["retained_region_details"],
             )
 
     # Verifies FR-2026-08-29-01 and TR-2026-08-29-01.
@@ -1555,6 +1564,45 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(1, result.processed_files)
             self.assertEqual(0, ocr_provider.calls)
             renderer.assert_not_called()
+
+    # Verifies FR-2026-08-29-02.
+    def test_runs_one_ocr_pass_for_undecodable_native_pdf_text_and_writes_overlay(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "undecodable.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            font = writer._add_object(DictionaryObject({
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type0"),
+                NameObject("/BaseFont"): NameObject("/Synthetic"),
+                NameObject("/Encoding"): NameObject("/Identity-H"),
+                NameObject("/DescendantFonts"): ArrayObject([writer._add_object(DictionaryObject({
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/CIDFontType2"),
+                    NameObject("/DW"): NumberObject(1000),
+                }))]),
+            }))
+            page[NameObject("/Resources")] = DictionaryObject({
+                NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})
+            })
+            contents = DecodedStreamObject(); contents.set_data(b"BT /F1 12 Tf 10 10 Td <0001> Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file: writer.write(source_file)
+
+            provider = _VectorOutlineOcrProvider()
+            result = self._run(
+                input_root, output_root, provider, _RecordingReplacementProvider(),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_image_regions)
+            output_reader = PdfReader(output_root / "undecodable.pdf")
+            stream = ContentStream(output_reader.pages[0].get_contents(), output_reader)
+            self.assertTrue(any(
+                operator == b"Tf" and operands[0] == "/PipelineNoto"
+                for operands, operator in stream.operations
+            ))
 
     # Verifies FR-2026-08-29-01 and TR-2026-08-29-01.
     def test_runs_vector_ocr_when_only_an_invoked_form_paints_vectors(self) -> None:

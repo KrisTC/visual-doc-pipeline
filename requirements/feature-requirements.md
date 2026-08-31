@@ -4077,40 +4077,61 @@ metadata.
 | Status | Proposed |
 | Source | User request following outlined-PDF-text implementation review |
 | Date Added | 2026-08-29 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-08-27-08, FR-2026-08-29-01, SR-2026-08-29-01 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-23-05, FR-2026-08-27-02, FR-2026-08-27-08, FR-2026-08-29-01, TR-2026-08-29-02, SR-2026-08-29-01 |
 
 ### Description
 
-When the existing native-PDF replacement path retains a visible text-showing
-operation because its font encoding cannot be decoded safely, the pipeline
-shall attempt a local OCR fallback for that operation. It shall apply only to
-the stable `pdf_text_undecodable` reason code, or to a future reason code
-explicitly classified as an undecodable visible-text encoding failure.
+When either fitted document-text layout mode, `preserve-basic-layout` or
+`preserve-basic-layout-source-font`, retains a visible native-PDF
+text-showing operation because its font encoding cannot be decoded safely, the
+pipeline shall attempt a local-render, single-OCR-pass fallback for that
+operation. It shall apply only to the stable `pdf_text_undecodable` reason
+code, or to a future reason code explicitly classified as an undecodable
+visible-text encoding failure. It shall not apply to
+`preserve-source-formatting`.
 
-The fallback shall produce an in-memory render that includes the failed
-operation and the visual context required to estimate a safe local wipe. It
-shall exclude native text that the adapter has already replaced and exclude
-embedded raster-image text already owned by the bitmap path. It shall replace
-an OCR result only when the implementation can associate its finite,
-non-degenerate page-space region with the retained undecodable operation;
-otherwise it shall retain the source unchanged.
+For each page, the fallback and the outlined-vector-text OCR path of
+FR-2026-08-29-01 shall share one in-memory detection render and one call to
+the selected OCR provider. That render shall include vector-painted page
+content, eligible undecodable native text operations, and the visual context
+needed to estimate a safe local wipe. It shall exclude native text that the
+adapter has already replaced and embedded raster-image text already owned by
+the bitmap path.
+
+Each finite, non-degenerate OCR result from that selective render shall become
+an in-memory virtual PDF visual-text item. Its OCR text and page-space geometry
+are authoritative for the item; the adapter shall not require or record a
+one-to-one association with an undecodable source operation. Before invoking
+the replacement provider, it shall combine virtual OCR items with normally
+decoded native PDF visual-text items only where the existing visual-flow
+inference can establish one compatible line or block. It shall otherwise keep
+the item as an independent visual flow. Vector-derived OCR items use the same
+model.
 
 Successful replacement shall use the selected existing OCR and
 text-replacement providers, source and target languages, confidence threshold,
-safe-background policy, and portable PDF-font output path. It shall retain the
-original page as PDF content, write only a local wipe and selectable
-replacement-text overlay, and never replace the same visible source text
-twice.
+safe-background policy, and portable PDF-font output path. A combined flow
+shall remove its decoded native source operations through the normal PDF path,
+leave its undecodable native source operations unchanged, wipe only its virtual
+OCR regions still visible in the original page, and draw one fitted selectable
+replacement overlay. The adapter shall use one local wipe for each accepted
+OCR region, rather than one enlarged wipe for the combined flow. It shall
+retain all other original page content and never replace the same visible
+source text twice.
 
 The fallback shall not apply to a missing position, an ineligible PDF text
 rendering mode, a non-decoding replacement failure, a malformed PDF that
-cannot be rendered safely, or any case where source-operation association is
-ambiguous. Those cases shall retain their current safe behaviour.
+cannot be rendered safely, or an OCR region that fails the existing confidence,
+geometry, background, or portable-font safety checks. Those cases shall retain
+their current safe behaviour. The fitted output shall use the existing portable
+PDF-font policy; it shall not infer or claim a source font for virtual OCR text.
 
-In a debug-enabled run, diagnostics shall record only the page number, stable
-reason code, and aggregate attempted/detected/replaced/retained counts. They
-shall not record OCR text, replacement text, decoded source bytes, image
-pixels, or raw OCR polygons.
+In a debug-enabled run, diagnostics shall retain the stable
+`pdf_text_undecodable` reason with its existing safe operation metadata and
+record that the page entered the OCR-enhanced visual-flow pass. The report
+shall record per-page aggregate OCR detected/replaced/retained counts, but
+shall not record an operation-to-OCR mapping. It shall not record OCR text,
+replacement text, decoded source bytes, image pixels, or raw OCR polygons.
 
 ### Rationale
 
@@ -4121,12 +4142,22 @@ the existing safety boundary and avoiding duplicate processing of nearby text.
 
 ### Notes
 
-Implementation needs a separately approved technical design for constructing
-the selective render and proving source-operation association. It must use a
-local renderer already permitted by the dependency and security requirements,
-or introduce separately approved technical and security requirements. Tests
-must use synthetic PDFs with an intentionally undecodable visible text
-operation, nearby successfully decoded native text, and nearby raster text.
+TR-2026-08-29-02 defines the approved selective-render and virtual-text design.
+FR-2026-08-29-02 supersedes the retain-unchanged clauses of FR-2026-08-23-05
+and FR-2026-08-27-02 only for an operation successfully replaced through this
+fallback. It supersedes FR-2026-08-27-08's retained-entry shape only for these
+lifecycle entries. For OCR-derived virtual flows, it supersedes
+FR-2026-08-29-01's per-region replacement wording only to permit one fitted
+replacement overlay for a compatible combined flow while retaining a local
+wipe for every OCR-derived source region. All other PDF safety rules remain
+unchanged.
+
+Tests must use synthetic PDFs with an intentionally undecodable visible text
+operation within a decoded visual flow, an isolated undecodable label, nearby
+vector text, and nearby raster text. They shall verify one OCR call per
+eligible page, virtual-text flow grouping and independent-flow fallback, local
+wipes, no duplicate native or bitmap processing, safe aggregate diagnostics,
+parser-loadable output, and independent rendering of the result.
 
 ---
 
@@ -4519,3 +4550,45 @@ replacement-provider request is made for it, and that its diagnostic uses
 `pdf_text_undecodable`. They shall cover page content and a Form XObject,
 including `TJ` arrays. No test, reference image, log, or diagnostic artifact
 may use confidential sample data.
+
+---
+
+## FR-2026-08-31-01
+
+| Property | Value |
+|----------|-------|
+| Title | Detail diagnostics for unsupported vector-OCR orientation |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-08-31 |
+| Related Requirements | FR-2026-08-29-01 |
+
+### Description
+
+When the vector-content OCR path retains an otherwise confidence-accepted
+region with the stable reason code
+`vector_ocr_polygon_orientation_unsupported`, its debug diagnostic sidecar
+shall include one per-region detail record. The record shall contain the
+detected OCR text and the signed baseline angle in degrees that was compared
+with the five-degree upright-rendering tolerance. The angle shall use the
+existing baseline normalisation range of -90 to 90 degrees and be rounded to
+one decimal place. When the retained polygon has no finite, non-degenerate
+four-corner baseline, the angle field shall be `null`.
+
+This exception applies only to that reason code. The sidecar continues to omit
+replacement text, image pixels, raw OCR polygons, and rendered-page artefacts.
+The sidecar has the same data-exposure boundary as the source document.
+
+### Rationale
+
+The aggregate retained-reason count identifies the cause of retention but not
+whether a greater orientation tolerance would safely cover a useful recognised
+region. Detected text and a normalised angle allow an operator to assess that
+decision directly.
+
+### Notes
+
+Tests shall use a synthetic rotated vector-OCR region and verify its detected
+text and rounded signed angle in the detail record, alongside the existing
+aggregate reason count.

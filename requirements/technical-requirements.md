@@ -242,3 +242,46 @@ under test. Integration tests that exercise PDFium shall use synthetic PDFs and
 verify the 200-DPI page-to-user-space coordinate conversion.
 
 ---
+
+## TR-2026-08-29-02
+
+| Property | Value |
+|----------|-------|
+| Title | One-pass PDFium virtual-text detection for undecodable native PDF text |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User-approved design for FR-2026-08-29-02 |
+| Date Added | 2026-08-31 |
+| Related Requirements | FR-2026-08-29-01, FR-2026-08-29-02, SR-2026-08-29-01 |
+
+### Description
+
+The PDF adapter shall construct one in-memory PDFium detection render per
+eligible page for the combined vector-outline and undecodable-native-text OCR
+paths. It shall clone only submitted PDF bytes, remove embedded raster images,
+remove successfully rewritten native text, retain eligible undecodable text
+showing operations with the state needed to paint them, and retain vector
+painting and its visual context. It shall invoke the selected OCR provider at
+most once for that render.
+
+The adapter shall convert every accepted OCR result to a virtual visual-text
+item with OCR text and finite page-space geometry. It shall not attempt to map
+that item to a particular undecodable source operation. It shall merge virtual
+and decoded native items only through the existing compatible visual-flow
+inference; any item that cannot be merged safely remains an independent flow.
+The replacement provider shall receive only the resulting flows.
+
+### Rationale
+
+Combining detection avoids an expensive second OCR request. Virtual text
+recovers translation context without relying on undecodable PDF operands as
+text or requiring a brittle per-operation OCR match.
+
+### Notes
+
+The render remains a transient in-memory input; it is never an output page.
+Tests shall use synthetic PDFs and mocked OCR calls to verify one request per
+page, filtering of decoded native and bitmap text, virtual-flow merging, and
+the safe independent-flow fallback.
+
+---
