@@ -4592,3 +4592,115 @@ decision directly.
 Tests shall use a synthetic rotated vector-OCR region and verify its detected
 text and rounded signed angle in the detail record, alongside the existing
 aggregate reason count.
+
+---
+
+## FR-2026-08-31-02
+
+| Property | Value |
+|----------|-------|
+| Title | Diagnose and apply reviewed legacy bullet mappings in fitted PDF text |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following portable-font coverage diagnosis |
+| Date Added | 2026-08-31 |
+| Related Requirements | FR-2026-08-27-03, FR-2026-08-27-05, FR-2026-08-27-06, FR-2026-08-27-07 |
+
+### Description
+
+When an eligible fitted PDF page visual-text region is retained with
+`portable_font_coverage_unsupported`, the debug diagnostic shall additionally
+classify an uncovered cluster as a `candidate_bullet_character` when all of
+the following are true:
+
+1. the cluster is at the start of the same newline-delimited logical line in
+   the extracted source region and replacement text, ignoring leading
+   whitespace;
+2. it is one Unicode scalar value and is the only uncovered cluster that
+   caused the region to be retained; and
+3. it is either in a Unicode Private Use Area or belongs to an explicit,
+   conservative candidate set of non-textual bullet and list-marker
+   characters maintained by the project; and
+4. the source logical line contains at least two non-whitespace Unicode
+   scalars after the candidate marker.
+
+The diagnostic shall retain `portable_font_coverage_unsupported` as its
+reason code and include `candidate_kind: "bullet_character"` in addition to
+the existing source text, replacement text, uncovered character, code point,
+candidate portable faces, page, and region anchor. It shall also include the
+effective source-font resource name when that information is available. A
+cluster that does not meet every condition shall retain the existing ordinary
+portable-font diagnostic without `candidate_kind`.
+
+For reviewability, a candidate entry shall write `candidate_kind` and
+`source_font_resource_name`, when present, immediately after `code_points` and
+before `region_location` in the JSON object.
+
+This classification is a discovery aid, not a rendering decision or proof of
+the glyph's semantic meaning. It shall not automatically replace, omit,
+normalise, or preserve a candidate independently from its containing region:
+the existing safe outcome continues to leave the complete region unchanged.
+
+The project shall provide one small, repository-owned, reviewed override
+registry for approved legacy bullet mappings. Each entry shall identify the
+extracted source scalar, the portable Unicode output scalar or cluster, and,
+where applicable, the source-font resource identity that limits the entry's
+scope. Adding an entry requires visual comparison against the source document
+to establish the intended marker and confirmation that the selected portable
+output font covers the mapped value.
+
+Before portable-font coverage selection and bounded-layout fitting, the PDF
+adapter shall apply a matching registry entry to every matching
+newline-delimited logical line in the replacement text. A match requires the
+entry's source scalar to be the first non-whitespace scalar in the same
+logical source line and replacement line returned by the provider, and
+requires any configured source-font resource identity to match. The source
+logical line shall also meet the two-following-non-whitespace-scalar threshold
+for a candidate bullet. The adapter shall substitute only that leading scalar
+on each matching line with the entry's portable output value, then fit and
+serialize the complete resulting replacement using the normal portable-face
+selection path. It shall preserve newlines and shall not send a second
+replacement-provider request. A successful mapped region shall be a normal
+replacement: it shall not be retained merely because the original legacy
+bullet was outside portable-font coverage.
+
+An override shall apply only when its complete matching conditions hold; it
+shall not turn all Private Use Area characters, all leading symbols, or all
+glyphs from a font into bullets. A missing entry, a non-matching source font,
+or a replacement that does not retain the expected leading source scalar shall
+leave the normal unsupported behaviour unchanged. Likewise, if the mapped
+replacement still has an uncovered cluster or unsupported layout, the complete
+region shall be retained and diagnosed under the existing safe outcome. An
+applied mapping does not require a diagnostic sidecar in an otherwise
+successful run; existing diagnostic reporting remains for retained work.
+
+### Rationale
+
+Legacy office fonts commonly encode visually decorative bullets as Private Use
+Area characters. Unicode coverage cannot establish their meaning, and mapping
+them automatically could change meaningful content. A precise diagnostic lets
+an operator run the conversion over local documents, search for a bounded set
+of review candidates, compare each candidate with its source rendering, and
+approve only well-understood mappings.
+
+### Notes
+
+The portable-face coverage decision remains mechanical: the adapter tests the
+actual replacement cluster against the selected base, Math, and Symbols 2 Noto
+faces in their established order. Candidate classification does not infer that
+Noto Sans Symbols 2 should cover a Private Use Area glyph, nor does it select
+an output symbol. Tests shall use synthetic PDFs only. They shall verify a
+leading unsupported Private Use Area scalar produces the additional
+classification; an unsupported middle-of-text scalar, multiple uncovered
+clusters, and an unsupported multi-scalar grapheme do not; and every case
+retains its complete source region. Tests shall also verify that a reviewed
+mapping replaces every matching logical-line-leading scalar, uses the mapped
+portable value for fitting and PDF output, preserves the remaining translated
+text and newlines in the same region, and does not make a second provider
+request. They shall verify that a provider normalisation on one line does not
+suppress a candidate on another line, and that a source-font mismatch,
+provider-returned leading-character mismatch, and any remaining uncovered
+cluster retain the complete region with the ordinary unsupported diagnostic.
+They shall also verify that a marker with zero or one following
+non-whitespace source scalar is neither classified as a candidate nor mapped,
+and that it retains the existing ordinary unsupported outcome.

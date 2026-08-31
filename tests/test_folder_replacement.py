@@ -41,17 +41,27 @@ from pipeline.folder_replacement.processor import ProgressFactory, ProgressRepor
 from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
+    _PdfShownText,
     _PdfVisualRegion,
     _PdfReplacementSerializationError,
+    _pdf_apply_legacy_bullet_override,
     _pdf_content_has_annotations,
     _pdf_decode_composite_bytes,
     _pdf_expansion_geometry_is_known,
     _pdf_fitted_region_operations,
+    _pdf_is_candidate_bullet_error,
     _pdf_text_advance,
 )
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
-from pipeline.bounded_text_layout import PortableTextUnsupportedError, noto_typefaces
+from pipeline.bounded_text_layout import (
+    BoundedTextBox,
+    BoundedTextParagraph,
+    BoundedTextRun,
+    PortableTextUnsupportedError,
+    noto_typefaces,
+)
+from pipeline.portable_bullet_overrides import LegacyBulletOverride
 from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
@@ -155,6 +165,20 @@ class _RecordingReplacementProvider:
         if request.is_filename:
             return TextReplacementResult(request.text, 1.0)
         return TextReplacementResult(self.replacement_text or "#" * len(request.text), 1.0)
+
+
+def _synthetic_pdf_visual_region(text: str, font_resource_name: str) -> _PdfVisualRegion:
+    """Construct a minimal fitted PDF region without a document-specific fixture."""
+    identity = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    anchor = _PdfShownText(
+        0, 0, text, (10.0, 10.0), (70.0, 10.0), (1.0, 0.0), (0.0, 1.0),
+        1.0, 12.0, 0, ((), (), (), ()), identity, identity, identity,
+        (NameObject(font_resource_name), FloatObject(12)), 0.0, 0.0, 1.0, 0.0, 0,
+    )
+    return _PdfVisualRegion(
+        (0,), text, (1.0, 0.0), (0.0, 1.0), 10.0, 20.0, 60.0, 15.0,
+        1.0, 12.0, "left", 0, identity, anchor,
+    )
 
 
 class _FailingReplacementProvider(_RecordingReplacementProvider):
@@ -1878,6 +1902,134 @@ class FolderReplacementTests(unittest.TestCase):
                 ["source_text", "replacement_text"],
                 list(sidecar["entries"][0])[:2],
             )
+
+    # Verifies FR-2026-08-31-02.
+    def test_basic_layout_pdf_classifies_a_leading_private_use_bullet_candidate(self) -> None:
+        region = _synthetic_pdf_visual_region("\uf0d8Inputs\n\uf0d8Scope", "/F1")
+        error = PortableTextUnsupportedError(
+            "portable_font_coverage_unsupported",
+            "\uf0d8",
+            ("Noto Sans JP", "Noto Sans Math", "Noto Sans Symbols 2"),
+            replacement_text="➢ Inputs for analysis\n\uf0d8 Scope",
+        )
+
+        self.assertTrue(_pdf_is_candidate_bullet_error(region, error))
+        self.assertFalse(_pdf_is_candidate_bullet_error(
+            _synthetic_pdf_visual_region("Inputs\nScope \uf0d8", "/F1"), error
+        ))
+        self.assertFalse(_pdf_is_candidate_bullet_error(
+            _synthetic_pdf_visual_region("\uf0d8X", "/F1"),
+            PortableTextUnsupportedError(
+                "portable_font_coverage_unsupported",
+                "\uf0d8",
+                error.selected_faces,
+                replacement_text="\uf0d8 X",
+            ),
+        ))
+        self.assertFalse(_pdf_is_candidate_bullet_error(
+            region,
+            PortableTextUnsupportedError(
+                "portable_font_coverage_unsupported",
+                "\uf0d8x",
+                error.selected_faces,
+                replacement_text=error.replacement_text,
+            ),
+        ))
+
+    # Verifies FR-2026-08-31-02.
+    def test_basic_layout_pdf_places_candidate_fields_before_region_location(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (source) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            region = _synthetic_pdf_visual_region("\uf0d8Subject", "/F3")
+            error = PortableTextUnsupportedError(
+                "portable_font_coverage_unsupported",
+                "\uf0d8",
+                ("Noto Sans JP", "Noto Sans Symbols 2"),
+                replacement_text="\uf0d8 Subject",
+            )
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_visual_regions",
+                return_value=(region,),
+            ), patch(
+                "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
+                side_effect=error,
+            ):
+                self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(),
+                    document_text_layout="preserve-basic-layout",
+                    diagnostics_enabled=True,
+                )
+
+            entry = json.loads(
+                (output_root / "document.pdf.diagnostics.json").read_text(encoding="utf-8")
+            )["entries"][0]
+            self.assertEqual(
+                ["code_points", "candidate_kind", "source_font_resource_name", "region_location"],
+                list(entry)[list(entry).index("code_points"):list(entry).index("region_location") + 1],
+            )
+
+    # Verifies FR-2026-08-31-02.
+    def test_basic_layout_pdf_applies_a_reviewed_leading_bullet_mapping_once(self) -> None:
+        box = BoundedTextBox(
+            1_000, 1_000, 0, 0, 0, 0, None,
+            (BoundedTextParagraph(
+                None, None, None, None, None, 0, None, None, None, None, None,
+                (BoundedTextRun("\uf0d8 Subject\n\uf0d8 Scope", None, "sans-serif", 12, False, False, "none", None),),
+            ),),
+        )
+        with patch(
+            "pipeline.portable_bullet_overrides.LEGACY_BULLET_OVERRIDES",
+            (LegacyBulletOverride("\uf0d8", "➢", "/F1"),),
+        ):
+            mapped = _pdf_apply_legacy_bullet_override(
+                box, "\uf0d8Subject\n\uf0d8Scope", "/F1"
+            )
+
+        self.assertEqual("➢ Subject\n➢ Scope", mapped.paragraphs[0].runs[0].text)
+
+    # Verifies FR-2026-08-31-02.
+    def test_basic_layout_pdf_uses_a_reviewed_mapping_for_output_without_a_second_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(100, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(b"BT /F1 12 Tf 10 10 Td (@Hello) Tj ET")
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            provider = _RecordingReplacementProvider(replacement_text="@ Subject")
+            with patch(
+                "pipeline.portable_bullet_overrides.LEGACY_BULLET_OVERRIDES",
+                (LegacyBulletOverride("@", "•", "/F1"),),
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    provider,
+                    document_text_layout="preserve-basic-layout",
+                )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["@Hello"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            self.assertIn("• Subject", PdfReader(output_root / "document.pdf").pages[0].extract_text())
 
     # Verifies FR-2026-08-23-01.
     def test_basic_layout_pdf_splits_widely_spaced_tj_fragments_into_visual_regions(self) -> None:

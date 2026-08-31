@@ -48,6 +48,11 @@ from pipeline.folder_replacement.common import (
     replace_native_text,
 )
 from pipeline.ocr import BoundingPolygon, OcrProvider, OcrRequest, OcrText, PixelPoint
+from pipeline.portable_bullet_overrides import (
+    apply_legacy_bullet_override,
+    candidate_bullet_character,
+    corresponding_line_leading_scalar_matches,
+)
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.runtime_assets import math_font_is_available, symbols_font_is_available
 from pipeline.text_region_colours import estimate_text_region_colours
@@ -1930,20 +1935,24 @@ def _replace_pdf_fitted_operations(
                 )
         except PortableTextUnsupportedError as error:
             if diagnostics is not None:
-                diagnostics.append(
-                    {
-                        "source_text": region.text,
-                        "replacement_text": error.replacement_text,
-                        "kind": "unsupported",
-                        "reason_code": error.reason_code,
-                        "container_kind": "pdf_visual_text",
-                        "page": page_index,
-                        "candidate_faces": list(error.selected_faces),
-                        "characters": error.characters,
-                        "code_points": [f"U+{ord(character):04X}" for character in error.characters],
-                        "region_location": _pdf_diagnostic_region_location(region),
-                    }
-                )
+                entry: dict[str, object] = {
+                    "source_text": region.text,
+                    "replacement_text": error.replacement_text,
+                    "kind": "unsupported",
+                    "reason_code": error.reason_code,
+                    "container_kind": "pdf_visual_text",
+                    "page": page_index,
+                    "candidate_faces": list(error.selected_faces),
+                    "characters": error.characters,
+                    "code_points": [f"U+{ord(character):04X}" for character in error.characters],
+                }
+                if _pdf_is_candidate_bullet_error(region, error):
+                    entry["candidate_kind"] = "bullet_character"
+                    source_font_resource_name = _pdf_source_font_resource_name(region.anchor)
+                    if source_font_resource_name is not None:
+                        entry["source_font_resource_name"] = source_font_resource_name
+                entry["region_location"] = _pdf_diagnostic_region_location(region)
+                diagnostics.append(entry)
             continue
         except _PdfReplacementSerializationError as error:
             if diagnostics is not None:
@@ -4699,6 +4708,25 @@ def _pdf_diagnostic_region_location(region: _PdfVisualRegion) -> dict[str, objec
     }
 
 
+def _pdf_is_candidate_bullet_error(
+    region: _PdfVisualRegion, error: PortableTextUnsupportedError
+) -> bool:
+    """Recognise only reviewable, leading one-scalar marker candidates."""
+    return (
+        error.reason_code == "portable_font_coverage_unsupported"
+        and candidate_bullet_character(error.characters)
+        and error.replacement_text is not None
+        and corresponding_line_leading_scalar_matches(
+            region.text, error.replacement_text, error.characters
+        )
+    )
+
+
+def _pdf_source_font_resource_name(item: _PdfShownText) -> str | None:
+    """Return the active PDF font resource name for reviewed override scope."""
+    return str(item.current_font[0]) if item.current_font is not None else None
+
+
 def _pdf_fitted_region_operations(
     region: _PdfVisualRegion,
     replacement_provider: TextReplacementProvider,
@@ -4740,6 +4768,11 @@ def _pdf_fitted_region_operations(
         replacement_provider,
         source_language,
         target_language,
+    )
+    replacement_box = _pdf_apply_legacy_bullet_override(
+        replacement_box,
+        region.text,
+        _pdf_source_font_resource_name(region.anchor),
     )
     typefaces = noto_typefaces()
     fitted = fit_explicit_noto_text_box(
@@ -4972,6 +5005,32 @@ def _pdf_fitted_region_operations(
         cursor -= line.height_pixels * 0.75
     result.extend(restore_operations)
     return result
+
+
+def _pdf_apply_legacy_bullet_override(
+    replacement_box: BoundedTextBox,
+    source_text: str,
+    source_font_resource_name: str | None,
+) -> BoundedTextBox:
+    """Apply one reviewed marker mapping before portable face selection."""
+    replacement_text = "".join(
+        run.text
+        for paragraph in replacement_box.paragraphs
+        for run in paragraph.runs
+    )
+    mapped_text = apply_legacy_bullet_override(
+        source_text, replacement_text, source_font_resource_name
+    )
+    if mapped_text == replacement_text:
+        return replacement_box
+    # PDF visual regions use one replacement paragraph and run.  Keeping this
+    # narrow makes the scalar substitution independent from paragraph layout.
+    paragraph = replacement_box.paragraphs[0]
+    run = paragraph.runs[0]
+    return replace(
+        replacement_box,
+        paragraphs=(replace(paragraph, runs=(replace(run, text=mapped_text),)),),
+    )
 
 
 def _pdf_is_source_size_single_line(fitted: FittedTextBox) -> bool:
