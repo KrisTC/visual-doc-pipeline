@@ -41,9 +41,11 @@ from pipeline.folder_replacement.processor import ProgressFactory, ProgressRepor
 from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
+    _PdfPaintSpan,
     _PdfShownText,
     _PdfVisualRegion,
     _PdfReplacementSerializationError,
+    _pdf_apply_paint_span_bullet_overrides,
     _pdf_apply_legacy_bullet_override,
     _pdf_content_has_annotations,
     _pdf_decode_composite_bytes,
@@ -1999,6 +2001,26 @@ class FolderReplacementTests(unittest.TestCase):
 
         self.assertEqual("➢ Subject\n➢ Scope", mapped.paragraphs[0].runs[0].text)
 
+    # Verifies FR-2026-09-01-01 and FR-2026-08-31-02.
+    def test_basic_layout_pdf_maps_a_colour_span_bullet_with_following_context(self) -> None:
+        marker = _synthetic_pdf_visual_region("\uf097", "/F9").anchor
+        prose = _synthetic_pdf_visual_region("Subject", "/F1").anchor
+        source_spans = (
+            _PdfPaintSpan("\uf097", marker),
+            _PdfPaintSpan("Subject", prose),
+        )
+        replacement_spans = [
+            _PdfPaintSpan("\uf097", marker),
+            _PdfPaintSpan("translated subject", prose),
+        ]
+
+        mapped = _pdf_apply_paint_span_bullet_overrides(
+            source_spans, replacement_spans
+        )
+
+        self.assertEqual("➢", mapped[0].text)
+        self.assertEqual("translated subject", mapped[1].text)
+
     # Verifies FR-2026-08-31-02.
     def test_basic_layout_pdf_uses_a_reviewed_mapping_for_output_without_a_second_request(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -2411,7 +2433,9 @@ class FolderReplacementTests(unittest.TestCase):
 
             expected_reasons = {
                 "unknown-geometry.pdf": "pdf_single_line_expansion_geometry_unavailable",
-                "no-corridor.pdf": "pdf_single_line_expansion_clear_corridor_unavailable",
+                # FR-2026-09-01-01 treats the adjacent colour-only text as
+                # one visual flow, so its remaining page corridor is fitted.
+                "no-corridor.pdf": "pdf_single_line_expansion_corridor_too_narrow",
                 "narrow-corridor.pdf": "pdf_single_line_expansion_corridor_too_narrow",
             }
             for filename, expected_reason in expected_reasons.items():
@@ -2426,19 +2450,25 @@ class FolderReplacementTests(unittest.TestCase):
                 self.assertEqual(expected_reason, entries[0]["reason_code"])
                 self.assertIn("source_region_width", entries[0])
                 self.assertIn("source_effective_font_size", entries[0])
-                self.assertEqual("A", entries[0]["source_text"])
+                expected_source_text = "AB" if filename == "no-corridor.pdf" else "A"
+                self.assertEqual(expected_source_text, entries[0]["source_text"])
+                expected_replacement_text = "A deliberately much longer translated heading" * (
+                    2 if filename == "no-corridor.pdf" else 1
+                )
+                if filename == "no-corridor.pdf":
+                    expected_replacement_text = (
+                        "A deliberately much longer translated heading "
+                        "A deliberately much longer translated heading"
+                    )
                 self.assertEqual(
-                    "A deliberately much longer translated heading",
+                    expected_replacement_text,
                     entries[0]["replacement_text"],
                 )
-                if filename == "narrow-corridor.pdf":
+                if filename in {"narrow-corridor.pdf", "no-corridor.pdf"}:
                     self.assertIn("full_corridor_fit_status", entries[0])
                     self.assertIn("full_corridor_font_scale", entries[0])
                     self.assertIn("full_corridor_effective_font_size", entries[0])
                     self.assertIn("full_corridor_line_count", entries[0])
-                elif filename == "no-corridor.pdf":
-                    self.assertEqual("text", entries[0]["clear_corridor_blocker_kind"])
-                    self.assertIn("clear_corridor_blocker_location", entries[0])
                 else:
                     self.assertNotIn("full_corridor_fit_status", entries[0])
 
@@ -3630,7 +3660,7 @@ class FolderReplacementTests(unittest.TestCase):
             self.assertEqual(2, result.replaced_native_text_items)
             self.assertEqual(2, len([request for request in provider.requests if not request.is_filename]))
 
-    # Verifies FR-2026-08-30-04.
+    # Verifies FR-2026-09-01-01.
     def test_basic_layout_pdf_reflows_an_emphasised_ordered_item_with_its_continuation(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -3652,50 +3682,75 @@ class FolderReplacementTests(unittest.TestCase):
             provider = _RecordingReplacementProvider(
                 replacement_text="A deliberately longer translated replacement sentence."
             )
-            anchors: dict[str, tuple[object, ...]] = {}
-
-            def inspect_anchor(
-                region: _PdfVisualRegion,
-                replacement_provider: TextReplacementProvider,
-                source_language: str,
-                target_language: str,
-                static_fonts: dict[str, tuple[str, object]],
-                font_resources: dict[str, object],
-                source_font: bool,
-                *,
-                expanded_width: float | None = None,
-            ) -> list[tuple[list[object], bytes]] | None:
-                anchors[region.text] = cast(
-                    tuple[object, ...], region.anchor.paint_context[0]
-                )
-                return _pdf_fitted_region_operations(
-                    region,
-                    replacement_provider,
-                    source_language,
-                    target_language,
-                    static_fonts,
-                    font_resources,
-                    source_font,
-                    expanded_width=expanded_width,
-                )
-
-            with patch(
-                "pipeline.folder_replacement.pdf._pdf_fitted_region_operations",
-                side_effect=inspect_anchor,
-            ):
-                result = self._run(
-                    input_root, output_root, _EmptyOcrProvider(), provider,
-                    document_text_layout="preserve-basic-layout",
-                )
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
 
             self.assertEqual(3, result.replaced_native_text_items)
             self.assertEqual([
                 "1. first heading\ncontinuation one",
-                "2. emphasised finding\ncontinuation two\ncontinued",
+                "2. emphasised finding\n",
+                "continuation two\ncontinued",
                 "3. third heading",
             ], [request.text for request in provider.requests if not request.is_filename])
-            self.assertEqual(
-                b"g", anchors["2. emphasised finding\ncontinuation two\ncontinued"][0]
+
+    # Verifies FR-2026-09-01-01.
+    def test_basic_layout_pdf_reflows_inline_colour_emphasis_with_per_span_translation(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(180, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 16 Tf 10 70 Td 0 g (Before) Tj 1 0 0 rg (emphasis) Tj "
+                b"0 g (after) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            class SpanProvider:
+                def __init__(self) -> None:
+                    self.requests: list[TextReplacementRequest] = []
+
+                def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                    self.requests.append(request)
+                    replacements = {
+                        "Before": "A longer introduction",
+                        "emphasis": "highlighted finding",
+                        "after": "followed by a conclusion",
+                    }
+                    return TextReplacementResult(replacements.get(request.text, request.text), 1.0)
+
+            provider = SpanProvider()
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider,
+                document_text_layout="preserve-basic-layout",
+            )
+
+            self.assertEqual(1, result.replaced_native_text_items)
+            self.assertEqual(["Before", "emphasis", "after"], [
+                request.text for request in provider.requests if not request.is_filename
+            ])
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            generated_font_sizes = [
+                float(operands[1])
+                for operands, operator in stream.operations
+                if operator == b"Tf" and operands[0] == "/PipelineNoto"
+            ]
+            self.assertTrue(generated_font_sizes)
+            self.assertEqual(1, len(set(generated_font_sizes)))
+            self.assertGreater(sum(operator == b"Tm" for _operands, operator in stream.operations), 1)
+            self.assertTrue(any(
+                operator == b"rg" and tuple(float(value) for value in operands) == (1.0, 0.0, 0.0)
+                for operands, operator in stream.operations
+            ))
+            self.assertIn(
+                "A longer introduction highlighted finding followed by a conclusion",
+                " ".join(output.pages[0].extract_text().split()),
             )
 
     # Verifies FR-2026-08-30-03.

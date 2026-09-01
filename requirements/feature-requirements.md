@@ -2560,8 +2560,10 @@ identify a finite region containing multiple compatible lines with a common
 orientation, text flow, and compatible text-painting state. The adapter shall
 not merge text across columns, table-like row or cell boundaries,
 independently positioned labels, materially different transforms, clipping
-boundaries, opacity, or colour state. If block classification is uncertain, it
-shall use independent visual-line fitting rather than paragraph reflow.
+boundaries, opacity, or incompatible paint state. FR-2026-09-01-01 defines
+the limited exception for otherwise compatible colour-emphasis spans. If block
+classification is uncertain, it shall use independent visual-line fitting
+rather than paragraph reflow.
 
 For an eligible visual line or block, the adapter shall use the shared
 bounded-text layout core. It shall pass the complete region text to the
@@ -2680,8 +2682,10 @@ The replacement shall preserve the region's applicable fill colour, colour
 space, opacity, blend state, clipping, and placement transform. A transition
 of any of those properties shall be a visual-region boundary: chunks on each
 side shall be fitted separately unless a later requirement defines a safe
-cross-state grouping rule. A later transition shall not retroactively make an
-earlier region in a different paint state ineligible.
+cross-state grouping rule. FR-2026-09-01-01 defines that exception for an
+otherwise compatible fill- or stroke-colour transition. A later transition
+shall not retroactively make an earlier region in a different paint state
+ineligible.
 
 This requirement applies to page content and reusable Form XObjects. It does
 not require support for stroked, fill-and-stroke, clipping, invisible, or
@@ -4181,9 +4185,10 @@ sizes, weights, or ordinary positioned gaps.
 
 A source formatting change shall not alone make a visual-line or visual-block
 candidate ineligible. Chunks shall remain separate when they differ in
-orientation, transform, clipping, opacity, colour or paint state, or when
-their placement provides evidence of independent labels, columns, table cells,
-or rows.
+orientation, transform, clipping, opacity, or incompatible paint state, or
+when their placement provides evidence of independent labels, columns, table
+cells, or rows. FR-2026-09-01-01 defines the limited exception for otherwise
+compatible fill- or stroke-colour transitions.
 
 Before grouping chunks into visual lines, the adapter shall derive
 non-crossable visual separators from transformed, visible PDF geometry and
@@ -4197,10 +4202,12 @@ text placement. It shall not merge chunks across:
   column streams.
 
 The adapter shall evaluate intervening text placement across all compatible and
-incompatible visual-state groups. A text line with a different effective paint
-state that lies between two proposed prose lines and occupies their horizontal
-flow corridor is a non-crossable label boundary. Matching outer text colour or
-style shall not cause the adapter to skip an intervening heading or label.
+incompatible visual-state groups. A text line with an incompatible effective
+paint state that lies between two proposed prose lines and occupies their
+horizontal flow corridor is a non-crossable label boundary. A colour-only
+paint-state difference shall be assessed under FR-2026-09-01-01. Matching
+outer text colour or style shall not cause the adapter to skip an intervening
+heading or label.
 
 A single gap on one baseline is not sufficient evidence of a table boundary.
 Conversely, the absence of a drawn border is not evidence that chunks are
@@ -4212,14 +4219,16 @@ The adapter may classify adjacent visual lines as one reflowable prose block
 even when each line contains multiple source chunks. Eligibility requires
 deterministic evidence of a shared text flow: compatible orientation and paint
 state, finite bounds, consistent line spacing, and compatible alignment or
-indentation. It shall not merge across columns, repeated cell boundaries,
-table-like rows, form fields, contents leaders, or independently positioned
-labels.
+indentation. FR-2026-09-01-01 defines when a colour-only paint-state
+difference remains compatible. It shall not merge across columns, repeated
+cell boundaries, table-like rows, form fields, contents leaders, or
+independently positioned labels.
 
 For an eligible prose block:
 
-- The adapter shall make one text-replacement-provider request for the
-  complete visual block, in visual reading order.
+- Except where FR-2026-09-01-01 applies, the adapter shall make one
+  text-replacement-provider request for the complete visual block, in visual
+  reading order.
 - Visual source line wraps shall provide translation context but shall not
   force output line breaks. The fitted-layout stage shall reflow the translated
   result within the whole inferred block.
@@ -4270,44 +4279,30 @@ Automated tests shall use synthetic PDFs only and cover:
 |----------|-------|
 | Title | Reflow emphasised ordered-list item continuations as one PDF region |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Superseded |
 | Source | User review of PDF translation-layout evaluation |
 | Date Added | 2026-08-30 |
-| Related Requirements | FR-2026-08-23-02, FR-2026-08-29-03 |
+| Related Requirements | FR-2026-08-23-02, FR-2026-08-29-03, FR-2026-09-01-01 |
 
 ### Description
 
-Within a verified ordered PDF list item, a fill- or stroke-paint colour change
-alone shall not prevent compatible marker and continuation rows from forming
-one fitted replacement region. Colour may represent inline emphasis rather
-than a semantic boundary. The item shall still remain separate from every
-other ordered-list item.
-
-The adapter shall retain the existing safety boundaries for material font-size
-changes, orientation, transform, clipping, opacity, vector separators,
-recurring gutters, columns, tables, labels, and incompatible placement. It
-shall retain separate visual regions when those signals make the continuation
-ambiguous.
-
-Because the existing fitted-output model emits one paint state for a visual
-region, a cross-colour item shall use the paint state that contributes the most
-source text. Ties shall use visual reading order. It shall not try to assign
-translated words to the source emphasis spans.
+This requirement is superseded by FR-2026-09-01-01. Its ordered-list-only
+cross-colour grouping exception and dominant-paint output rule are replaced by
+the general compatible colour-emphasis-span reflow and per-span paint-
+preserving output policy. The newer requirement retains the requirement that
+separate ordered-list items remain separate.
 
 ### Rationale
 
 Report authors often colour one sentence in a numbered item to emphasise a
-finding, then continue the same item in ordinary text. Replacing those rows
-independently loses context and allows a longer translation of the emphasised
-row to overlap its continuation.
+finding, then continue the same item in ordinary text. The original exception
+demonstrated that colour alone need not be a layout boundary; the broader rule
+now covers that case together with ordinary prose.
 
 ### Notes
 
-Automated tests shall use synthetic PDFs only. They shall verify that a
-coloured numbered-item marker row followed by aligned ordinary-colour
-continuation rows creates one provider request, uses the dominant paint state,
-and remains separate from adjacent list items and from a misaligned coloured
-row.
+The corresponding synthetic-PDF coverage is specified by
+FR-2026-09-01-01.
 
 ---
 
@@ -4704,3 +4699,101 @@ cluster retain the complete region with the ordinary unsupported diagnostic.
 They shall also verify that a marker with zero or one following
 non-whitespace source scalar is neither classified as a candidate nor mapped,
 and that it retains the existing ordinary unsupported outcome.
+
+---
+
+## FR-2026-09-01-01
+
+| Property | Value |
+|----------|-------|
+| Title | Reflow compatible PDF colour-emphasis spans as one fitted region |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PDF translation-layout review |
+| Date Added | 2026-09-01 |
+| Related Requirements | FR-2026-08-23-01, FR-2026-08-23-02, FR-2026-08-23-03, FR-2026-08-29-03, FR-2026-08-30-04 |
+
+### Description
+
+For fitted native PDF page-content and Form-XObject text, a change only to
+the effective fill or stroke paint colour shall not by itself prevent
+otherwise compatible adjacent text from forming one visual line or reflowable
+visual text block. Colour may be inline emphasis rather than a label or
+paragraph boundary.
+
+This requirement supersedes the colour-state boundary in
+FR-2026-08-23-01 and FR-2026-08-29-03 only for such compatible
+colour-emphasis spans. Every existing non-colour eligibility and safety rule
+remains decisive. In particular, the adapter shall retain separate regions
+when orientation, transform, clipping, opacity, rendering mode, placement,
+or the existing evidence of a vector separator, recurring gutter, column,
+table cell, label, or independent flow makes grouping unsafe or ambiguous.
+A colour transition shall not bypass any existing treatment of source font,
+size, weight, or other typography differences.
+
+The adapter shall assemble the source text and inferred inter-chunk
+boundaries for the combined visual flow exactly as it would for the same
+geometry with one paint state. A paint-colour transition shall neither remove
+a source whitespace boundary nor a source line-break boundary. When the
+target language's primary subtag is `en`, independently translated adjacent
+paint spans whose touching output characters are both letters or numbers and
+whose boundary contains no whitespace shall receive one U+0020 space between
+them. The inserted space shall use the preceding span's fill paint. No space
+shall be inserted for another target language or adjacent punctuation.
+
+Within an accepted combined region, the adapter shall divide the assembled
+source sequence into maximal contiguous paint spans in visual reading order.
+It shall send each non-empty paint span independently to the selected
+text-replacement provider using the existing source and target language
+settings. It shall concatenate the returned strings in that same span order,
+retaining each returned string's source effective fill paint. It shall not
+need to infer a word- or character-level correspondence between independently
+translated strings.
+
+The adapter shall fit and wrap the complete concatenated, paint-styled
+replacement sequence as one bounded layout. It shall select one uniform fitted
+font scale for the complete region and use the normal portable target-face,
+wrapping, alignment, and overflow rules. A paint span may wrap across output
+lines; every resulting output segment shall retain that span's source
+effective fill paint. For source fill-and-stroke text, output remains
+fill-only as required by FR-2026-08-23-03, using that span's source fill
+paint. The adapter shall replace every source operation in the accepted region
+with the one fitted, multi-colour replacement layout.
+
+This requirement supersedes FR-2026-08-30-04's dominant-paint output rule for
+an accepted cross-colour ordered-list item. Such an item shall instead use the
+same independently translated, per-span paint-preserving layout defined here.
+It does not change the requirement that separate ordered-list items remain
+separate.
+
+### Rationale
+
+Colour is commonly used to emphasise a word, phrase, or sentence without
+changing the intended text flow. Treating each colour as an independent
+fitting region loses the shared available width and makes longer replacements
+wrap, shrink, or collide unnecessarily. Independently translating each
+colour-emphasis span retains the existing provider contract and gives the same
+translation context as the current independent-region behaviour, while a
+single styled layout restores the intended shared reflow and uniform size.
+
+### Notes
+
+Automated tests shall use synthetic PDFs only. They shall verify that adjacent
+ordinary prose with compatible non-colour state and multiple paint colours:
+
+- creates one fitted visual region while making one provider request per
+  non-empty maximal paint span;
+- preserves the established inferred whitespace and source-boundary handling
+  across paint transitions;
+- uses one uniform fitted font scale and reflows the concatenated replacement
+  across the complete region, including a coloured span that wraps between
+  output lines;
+- emits each fitted output span in its corresponding source fill colour; and
+- remains separate when the existing separator, table, label, column,
+  clipping, opacity, transform, orientation, rendering-mode, or placement
+  rules reject grouping.
+
+Tests shall also verify the updated per-span output for a compatible
+cross-colour ordered-list item and that distinct ordered-list items remain
+separate. They shall use only repository-owned synthetic text, fonts, colours,
+and PDFs.

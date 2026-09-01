@@ -43,6 +43,7 @@ class BoundedTextRun:
     underline: str | None
     baseline: int | None
     source_typefaces: tuple["SourceTypefaceReference", ...] = ()
+    layout_span_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,7 @@ class FittedTextLineSegment:
     font_size_points: float
     bold: bool
     italic: bool
+    layout_span_id: int | None = None
 
 
 class PortableTextUnsupportedError(ValueError):
@@ -193,6 +195,7 @@ class _Style:
 class _Segment:
     text: str
     style: _Style
+    layout_span_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -682,6 +685,7 @@ def fitted_text_lines(
                     segment.style.size_pixels / PIXELS_PER_POINT,
                     segment.style.bold,
                     segment.style.italic,
+                    segment.layout_span_id,
                 )
                 for segment in line.segments
             ),
@@ -862,7 +866,7 @@ def _layout_lines(
                     if segments and paragraph_width > 0 and current_width + piece_width > paragraph_width:
                         lines.append(_line(segments, current_width, paragraph, scale))
                         segments, current_width = [], 0.0
-                    segments.append(_Segment(piece, style))
+                    segments.append(_Segment(piece, style, run.layout_span_id))
                     current_width += piece_width
         lines.append(_line(segments, current_width, paragraph, scale))
     return tuple(lines)

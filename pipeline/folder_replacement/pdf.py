@@ -39,7 +39,6 @@ from pipeline.bounded_text_layout import (
     fit_explicit_noto_text_box,
     fitted_text_lines,
     noto_typefaces,
-    replace_paragraphs,
     replace_and_fit_text_box,
 )
 from pipeline.folder_replacement.bitmap import replace_image as _process_bitmap_image
@@ -1234,6 +1233,16 @@ class _PdfShownText:
     horizontal_scale: float
     text_rise: float
     text_rendering_mode: int
+    fill_paint_operator: bytes | None = None
+    fill_paint_operands: tuple[object, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfPaintSpan:
+    """One contiguous source sequence that retains one effective fill paint."""
+
+    text: str
+    source: _PdfShownText
 
 
 @dataclass(slots=True)
@@ -1265,6 +1274,7 @@ class _PdfVisualRegion:
     insertion_index: int
     ctm: tuple[float, float, float, float, float, float]
     anchor: _PdfShownText
+    paint_spans: tuple[_PdfPaintSpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1435,6 +1445,7 @@ def _replace_pdf_fitted_operations(
         tuple[
             tuple[float, float, float, float, float, float],
             tuple[object, ...], tuple[object, ...], tuple[object, ...], tuple[object, ...],
+            bytes | None, tuple[object, ...],
         ]
     ] = []
     # A structural barrier is different from a graphics-state instruction.
@@ -1444,6 +1455,8 @@ def _replace_pdf_fitted_operations(
     # per PDF operation.
     graphics_context = 0
     fill_paint: tuple[object, ...] = ()
+    fill_paint_operator: bytes | None = None
+    fill_paint_operands: tuple[object, ...] = ()
     stroke_paint: tuple[object, ...] = ()
     external_graphics_state: tuple[object, ...] = ()
     clipping_path: tuple[object, ...] = ()
@@ -1494,13 +1507,17 @@ def _replace_pdf_fitted_operations(
         if operator == b"q":
             graphics_stack.append((
                 ctm, fill_paint, stroke_paint, external_graphics_state, clipping_path,
+                fill_paint_operator, fill_paint_operands,
             ))
             continue
         if operator == b"Q":
             if not graphics_stack:
                 barrier += 1
                 continue
-            ctm, fill_paint, stroke_paint, external_graphics_state, clipping_path = graphics_stack.pop()
+            (
+                ctm, fill_paint, stroke_paint, external_graphics_state, clipping_path,
+                fill_paint_operator, fill_paint_operands,
+            ) = graphics_stack.pop()
             continue
         if operator == b"cm":
             if len(operands) < 6:
@@ -1525,6 +1542,8 @@ def _replace_pdf_fitted_operations(
             continue
         if operator in _PDF_FILL_PAINT_OPERATORS:
             fill_paint = _pdf_paint_state_token(operator, operands)
+            fill_paint_operator = operator
+            fill_paint_operands = tuple(operands)
             continue
         if operator in _PDF_STROKE_PAINT_OPERATORS:
             stroke_paint = _pdf_paint_state_token(operator, operands)
@@ -1784,6 +1803,7 @@ def _replace_pdf_fitted_operations(
                 ctm, line_matrix,
                 text_matrix_after, current_font, character_spacing, word_spacing,
                 horizontal_scale, text_rise, text_rendering_mode,
+                fill_paint_operator, fill_paint_operands,
             ))
         # PDF advances are in text space.  The text matrix applies the
         # placement transform exactly once when deriving the next position.
@@ -3751,176 +3771,30 @@ def _pdf_visual_regions(
 ) -> tuple[_PdfVisualRegion, ...]:
     """Infer only geometry-compatible visual lines and paragraph blocks.
 
-    Text objects are deliberately not grouping boundaries.  Paint-state
-    changes and undecodable operations remain visual-region boundaries.
+    Text objects are deliberately not grouping boundaries.  A colour-only
+    paint transition is eligible for the same visual-flow analysis as one
+    paint state; every other paint-state difference remains a boundary.
     """
     eligible = [item for item in shown if item.text_object_index in text_object_ends]
-    cross_paint_list_regions = _pdf_cross_paint_ordered_list_regions(
-        eligible, text_object_ends, separators
-    )
-    claimed_operation_indexes = {
-        operation_index
-        for region in cross_paint_list_regions
-        for operation_index in region.operation_indexes
-    }
     by_context: dict[
         tuple[int, tuple[object, ...], tuple[float, float, float, float, float, float]],
         list[_PdfShownText],
     ] = {}
     for item in eligible:
-        if item.operation_index in claimed_operation_indexes:
-            continue
-        by_context.setdefault((item.graphics_context, item.paint_context, item.ctm), []).append(item)
+        # Fill and stroke colours are inline-emphasis candidates.  The
+        # remaining paint state contains opacity, clipping, and rendering
+        # mode, which must continue to partition visual flows.
+        by_context.setdefault((
+            item.graphics_context, item.paint_context[2:], item.ctm
+        ), []).append(item)
 
     ordered_list_boundaries = _pdf_ordered_list_boundaries(eligible, separators)
-    regions = list(cross_paint_list_regions)
+    regions: list[_PdfVisualRegion] = []
     for items in by_context.values():
         regions.extend(_pdf_regions_in_context(
             items, text_object_ends, separators, eligible, ordered_list_boundaries
         ))
     return tuple(sorted(regions, key=lambda region: region.insertion_index))
-
-
-def _pdf_cross_paint_ordered_list_regions(
-    shown: list[_PdfShownText],
-    text_object_ends: set[int],
-    separators: tuple[_PdfVisualSeparator, ...],
-) -> tuple[_PdfVisualRegion, ...]:
-    """Reflow well-evidenced list items whose only state transition is colour.
-
-    FR-2026-08-30-04 is deliberately narrower than ordinary visual-region
-    inference: a verified ordinal sequence supplies the semantic evidence that
-    colour is inline emphasis rather than an independent label.
-    """
-    by_non_colour_state: dict[
-        tuple[
-            int, int, int, int, tuple[float, float, float, float, float, float], tuple[object, ...],
-        ],
-        list[_PdfShownText],
-    ] = {}
-    for item in shown:
-        # The first two paint-context members are fill and stroke paint.  Both
-        # may carry inline emphasis; retain the boundary for opacity/blend
-        # state, clipping, and rendering mode.
-        by_non_colour_state.setdefault((
-            item.graphics_context,
-            round(item.direction[0] * 100),
-            round(item.direction[1] * 100),
-            round(item.horizontal_stretch * 100),
-            item.ctm,
-            item.paint_context[2:],
-        ), []).append(item)
-
-    regions: list[_PdfVisualRegion] = []
-    for items in by_non_colour_state.values():
-        direction, normal = items[0].direction, items[0].normal
-        lines = _pdf_cross_paint_visual_lines(items, direction, normal, separators)
-        for flow_lines in _pdf_ordered_list_flow_line_segments(
-            lines, direction, normal, separators
-        ):
-            marker_indexes = sorted(_pdf_ordered_list_line_indexes(
-                flow_lines, allow_continuation_rows=True
-            ))
-            for marker_position, line_index in enumerate(marker_indexes):
-                end_index = (
-                    marker_indexes[marker_position + 1]
-                    if marker_position + 1 < len(marker_indexes)
-                    else len(flow_lines)
-                )
-                item_lines = flow_lines[line_index:end_index]
-                flattened_lines = [
-                    [item for group in line for item in group]
-                    for line in item_lines
-                ]
-                if not _pdf_cross_paint_list_item_is_reflowable(
-                    flattened_lines, direction, normal, separators
-                ):
-                    continue
-                item_items = [item for line in flattened_lines for item in line]
-                if len({item.paint_context[:2] for item in item_items}) < 2:
-                    continue
-                recurring_gutters = _pdf_recurring_gutters(list(item_lines), direction)
-                if any(
-                    _pdf_group_gap_matches_gutter(
-                        line[index], line[index + 1], direction, recurring_gutters
-                    )
-                    for line in item_lines
-                    for index in range(len(line) - 1)
-                ):
-                    continue
-                regions.append(_pdf_make_visual_region(
-                    flattened_lines,
-                    direction,
-                    normal,
-                    True,
-                    text_object_ends,
-                    anchor=_pdf_dominant_paint_source_item(item_items),
-                ))
-    return tuple(regions)
-
-
-def _pdf_cross_paint_visual_lines(
-    items: list[_PdfShownText],
-    direction: tuple[float, float],
-    normal: tuple[float, float],
-    separators: tuple[_PdfVisualSeparator, ...],
-) -> list[list[list[_PdfShownText]]]:
-    """Build source lines while retaining non-crossable same-line gaps."""
-    lines: list[list[_PdfShownText]] = []
-    for item in sorted(
-        items, key=lambda value: (-_pdf_dot(value.start, normal), _pdf_dot(value.start, direction))
-    ):
-        baseline = _pdf_dot(item.start, normal)
-        line = next(
-            (
-                candidate for candidate in lines
-                if abs(_pdf_dot(candidate[0].start, normal) - baseline)
-                <= max(candidate[0].font_size, item.font_size) * 0.45
-            ),
-            None,
-        )
-        if line is None:
-            lines.append([item])
-        else:
-            line.append(item)
-
-    line_groups: list[list[list[_PdfShownText]]] = []
-    for line in lines:
-        groups: list[list[_PdfShownText]] = []
-        group: list[_PdfShownText] = []
-        for item in sorted(line, key=lambda value: _pdf_dot(value.start, direction)):
-            if group:
-                gap = _pdf_dot(item.start, direction) - _pdf_dot(group[-1].end, direction)
-                if (
-                    _pdf_separator_between_chunks(group[-1], item, direction, normal, separators)
-                    or gap > max(group[-1].font_size, item.font_size) * _PDF_VISUAL_CHUNK_GAP_FACTOR
-                ):
-                    groups.append(group)
-                    group = []
-            group.append(item)
-        if group:
-            groups.append(group)
-        line_groups.append(groups)
-    return sorted(
-        line_groups,
-        key=lambda groups: (-_pdf_dot(groups[0][0].start, normal), _pdf_dot(groups[0][0].start, direction)),
-    )
-
-
-def _pdf_cross_paint_list_item_is_reflowable(
-    lines: list[list[_PdfShownText]],
-    direction: tuple[float, float],
-    normal: tuple[float, float],
-    separators: tuple[_PdfVisualSeparator, ...],
-) -> bool:
-    """Keep only aligned multi-line item continuations eligible for reflow."""
-    if len(lines) < 2 or not _pdf_is_paragraph_like(lines, direction, normal, separators):
-        return False
-    sizes = [_pdf_dominant_font_size(line) for line in lines]
-    return all(
-        max(previous, current) < min(previous, current) * 1.5
-        for previous, current in zip(sizes, sizes[1:])
-    )
 
 
 def _pdf_regions_in_context(
@@ -4002,6 +3876,12 @@ def _pdf_regions_in_context(
                 gap = _pdf_dot(item.start, direction) - _pdf_dot(group[-1].end, direction)
                 if (
                     _pdf_separator_between_chunks(group[-1], item, direction, normal, separators)
+                    # Overlapping differently coloured chunks are typically
+                    # independently positioned labels, not inline emphasis.
+                    or (
+                        group[-1].paint_context[:2] != item.paint_context[:2]
+                        and gap < -max(group[-1].font_size, item.font_size) * 0.1
+                    )
                     or gap > max(group[-1].font_size, item.font_size) * _PDF_VISUAL_CHUNK_GAP_FACTOR
                 ):
                     line_groups.append(group)
@@ -4378,10 +4258,22 @@ def _pdf_local_flow_line_segments(
         within_ordered_list_item = (
             upper_item_index >= 0 and upper_item_index == lower_item_index
         )
+        upper_fill_paints = {item.paint_context[0] for item in upper_items}
+        lower_fill_paints = {item.paint_context[0] for item in lower_items}
+        full_line_colour_transition = (
+            not within_ordered_list_item
+            and len(upper_fill_paints) == 1
+            and len(lower_fill_paints) == 1
+            and upper_fill_paints != lower_fill_paints
+        )
         if (
             0.4 * font_size <= spacing <= 2.2 * font_size
             and horizontally_related
             and max(upper_size, lower_size) < min(upper_size, lower_size) * 1.5
+            # A full differently coloured row is a common heading/label
+            # signal. Inline colour emphasis remains eligible because its
+            # visual line contains more than one fill paint.
+            and not full_line_colour_transition
             and not _pdf_separator_between_lines(
                 upper_items, lower_items, direction, normal, separators
             )
@@ -4622,6 +4514,22 @@ def _pdf_make_visual_region(
     anchor = anchor or _pdf_dominant_source_item(items)
     size = anchor.font_size
     text = "\n".join("".join(item.text for item in group) for group in ordered_groups)
+    paint_spans: list[_PdfPaintSpan] = []
+    for group_index, group in enumerate(ordered_groups):
+        for item in group:
+            if (
+                paint_spans
+                and paint_spans[-1].source.paint_context[:2] == item.paint_context[:2]
+            ):
+                paint_spans[-1] = replace(
+                    paint_spans[-1], text=paint_spans[-1].text + item.text
+                )
+            else:
+                paint_spans.append(_PdfPaintSpan(item.text, item))
+        if group_index < len(ordered_groups) - 1:
+            # Keep the inferred source boundary attached to the preceding
+            # span.  A paint transition must not introduce or remove it.
+            paint_spans[-1] = replace(paint_spans[-1], text=paint_spans[-1].text + "\n")
     top = max(baselines) + maximum_size * 0.8
     bottom = min(baselines) - maximum_size * 0.4
     alignment = "left"
@@ -4639,7 +4547,7 @@ def _pdf_make_visual_region(
         min(starts), top, max(1.0, max(ends) - min(starts)), max(maximum_size * 1.2, top - bottom),
         items[0].horizontal_stretch,
         size, alignment,
-        anchor.operation_index, anchor.ctm, anchor,
+        anchor.operation_index, anchor.ctm, anchor, tuple(paint_spans),
     )
 
 
@@ -4663,30 +4571,6 @@ def _pdf_dominant_source_item(items: list[_PdfShownText]) -> _PdfShownText:
     )
 
 
-def _pdf_dominant_paint_source_item(items: list[_PdfShownText]) -> _PdfShownText:
-    """Choose the dominant fill paint, then the normal deterministic style."""
-    weights: dict[tuple[object, ...], int] = {}
-    for item in items:
-        fill_paint = cast(tuple[object, ...], item.paint_context[0])
-        weights[fill_paint] = weights.get(fill_paint, 0) + max(1, len(item.text))
-    dominant_paint = max(
-        weights,
-        key=lambda paint: (
-            weights[paint],
-            -min(
-                item.operation_index
-                for item in items
-                if cast(tuple[object, ...], item.paint_context[0]) == paint
-            ),
-        ),
-    )
-    return _pdf_dominant_source_item([
-        item
-        for item in items
-        if cast(tuple[object, ...], item.paint_context[0]) == dominant_paint
-    ])
-
-
 def _pdf_dot(point: tuple[float, float], vector: tuple[float, float]) -> float:
     return point[0] * vector[0] + point[1] * vector[1]
 
@@ -4706,6 +4590,150 @@ def _pdf_diagnostic_region_location(region: _PdfVisualRegion) -> dict[str, objec
             ),
         },
     }
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfFittedPaintSegment:
+    """One wrapped portable-font segment with the source fill to emit."""
+
+    text: str
+    font_classification: str
+    font_size_points: float
+    source: _PdfShownText
+
+
+def _pdf_replace_paint_spans(
+    box: BoundedTextBox,
+    region: _PdfVisualRegion,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> tuple[BoundedTextBox, tuple[_PdfPaintSpan, ...]]:
+    """Replace each colour-emphasis span without splitting its fitted layout."""
+    source_spans = tuple(
+        span for span in (region.paint_spans or (_PdfPaintSpan(region.text, region.anchor),))
+        if span.text
+    )
+    paragraph = box.paragraphs[0]
+    style = paragraph.runs[0]
+    replacement_spans: list[_PdfPaintSpan] = []
+    runs: list[BoundedTextRun] = []
+    for span_index, span in enumerate(source_spans):
+        replacement = replacement_provider.replace(
+            TextReplacementRequest(span.text, False, source_language, target_language)
+        )
+        replacement_spans.append(_PdfPaintSpan(replacement.text, span.source))
+        runs.append(replace(style, text=replacement.text, layout_span_id=span_index))
+    replacement_spans = _pdf_apply_paint_span_bullet_overrides(
+        source_spans, replacement_spans
+    )
+    runs = [
+        replace(run, text=span.text)
+        for run, span in zip(runs, replacement_spans, strict=True)
+    ]
+    for span_index in range(1, len(replacement_spans)):
+        if _pdf_needs_english_span_space(
+            replacement_spans[span_index - 1].text,
+            replacement_spans[span_index].text,
+            target_language,
+        ):
+            replacement_spans[span_index - 1] = replace(
+                replacement_spans[span_index - 1],
+                text=replacement_spans[span_index - 1].text + " ",
+            )
+            runs[span_index - 1] = replace(
+                runs[span_index - 1], text=runs[span_index - 1].text + " "
+            )
+    return (
+        replace(box, paragraphs=(replace(paragraph, runs=tuple(runs)),)),
+        tuple(replacement_spans),
+    )
+
+
+def _pdf_apply_paint_span_bullet_overrides(
+    source_spans: tuple[_PdfPaintSpan, ...],
+    replacement_spans: list[_PdfPaintSpan],
+) -> list[_PdfPaintSpan]:
+    """Apply reviewed leading-marker mappings without discarding paint runs.
+
+    A marker may be its own colour span while the following source text gives
+    the existing override its required semantic evidence.  Evaluate each span
+    against that remaining source line, then retain the mapped prefix in the
+    marker's own span.
+    """
+    mapped_spans = list(replacement_spans)
+    for span_index, (source_span, replacement_span) in enumerate(
+        zip(source_spans, mapped_spans, strict=True)
+    ):
+        source_context = "".join(span.text for span in source_spans[span_index:])
+        replacement_context = "".join(
+            span.text for span in mapped_spans[span_index:]
+        )
+        mapped_context = apply_legacy_bullet_override(
+            source_context,
+            replacement_context,
+            _pdf_source_font_resource_name(source_span.source),
+        )
+        prefix = mapped_context[:len(replacement_span.text)]
+        if prefix != replacement_span.text:
+            mapped_spans[span_index] = replace(replacement_span, text=prefix)
+    return mapped_spans
+
+
+def _pdf_needs_english_span_space(
+    previous: str, current: str, target_language: str
+) -> bool:
+    """Keep independently translated English words from running together."""
+    return bool(
+        target_language.split("-", 1)[0].casefold() == "en"
+        and previous
+        and current
+        and not previous[-1].isspace()
+        and not current[0].isspace()
+        and previous[-1].isalnum()
+        and current[0].isalnum()
+    )
+
+
+def _pdf_fitted_paint_lines(
+    fitted: FittedTextBox,
+    replacement_spans: tuple[_PdfPaintSpan, ...],
+    typefaces: dict[str, skia.Typeface],
+) -> tuple[tuple[_PdfFittedPaintSegment, ...], ...] | None:
+    """Attach source paint to wrapped output without altering shared layout."""
+    sources = {
+        span_index: span.source for span_index, span in enumerate(replacement_spans)
+    }
+    lines: list[tuple[_PdfFittedPaintSegment, ...]] = []
+    for line in fitted_text_lines(fitted, typefaces):
+        segments: list[_PdfFittedPaintSegment] = []
+        for segment in line.segments:
+            span_id = segment.layout_span_id
+            if span_id is None:
+                return None
+            source = sources.get(span_id)
+            if source is None:
+                return None
+            if (
+                segments
+                and segments[-1].source.paint_context[0] == source.paint_context[0]
+                and segments[-1].font_classification == segment.font_classification
+                and abs(segments[-1].font_size_points - segment.font_size_points) <= 1e-6
+            ):
+                segments[-1] = replace(segments[-1], text=segments[-1].text + segment.text)
+            else:
+                segments.append(_PdfFittedPaintSegment(
+                    segment.text, segment.font_classification, segment.font_size_points, source
+                ))
+        lines.append(tuple(segments))
+    return tuple(lines)
+
+
+def _pdf_fill_paint_operations(source: _PdfShownText) -> list[tuple[list[object], bytes]]:
+    """Restore or select one source fill colour for portable replacement text."""
+    if source.fill_paint_operator is None:
+        return [([NumberObject(0)], b"g")]
+    return [(list(source.fill_paint_operands), source.fill_paint_operator)]
 
 
 def _pdf_is_candidate_bullet_error(
@@ -4763,8 +4791,9 @@ def _pdf_fitted_region_operations(
             ),),
         ),),
     )
-    replacement_box = replace_paragraphs(
+    replacement_box, replacement_spans = _pdf_replace_paint_spans(
         box,
+        region,
         replacement_provider,
         source_language,
         target_language,
@@ -4774,6 +4803,17 @@ def _pdf_fitted_region_operations(
         region.text,
         _pdf_source_font_resource_name(region.anchor),
     )
+    if len(replacement_spans) == 1:
+        replacement_spans = (
+            replace(
+                replacement_spans[0],
+                text="".join(
+                    run.text
+                    for paragraph in replacement_box.paragraphs
+                    for run in paragraph.runs
+                ),
+            ),
+        )
     typefaces = noto_typefaces()
     fitted = fit_explicit_noto_text_box(
         replacement_box,
@@ -4871,6 +4911,7 @@ def _pdf_fitted_region_operations(
         # source-derived geometry and measurement, but serialize the fitted
         # portable runs instead.
         and len(region.operation_indexes) == 1
+        and len(replacement_spans) == 1
         and len(output_runs) == 1
         and bool(output_run.source_typefaces)
         and _pdf_source_font_supports_text(
@@ -4918,6 +4959,10 @@ def _pdf_fitted_region_operations(
     cursor = region.top - font_size * 0.8
     result: list[tuple[list[object], bytes]] = []
     output_typefaces = fitted.layout_typefaces or noto_typefaces()
+    layout_lines = fitted_text_lines(fitted, output_typefaces)
+    painted_lines = _pdf_fitted_paint_lines(fitted, replacement_spans, output_typefaces)
+    if painted_lines is None:
+        return None
     result.extend((
         ([NumberObject(0)], b"Tc"),
         ([NumberObject(0)], b"Tw"),
@@ -4928,6 +4973,14 @@ def _pdf_fitted_region_operations(
         # the predictable fill-only presentation required by FR-2026-08-23-03.
         ([NumberObject(0)], b"Tr"),
     ))
+    active_fill_paint = region.anchor.paint_context[0]
+    if not source_output:
+        first_painted_segment = next(
+            (segment for line in painted_lines for segment in line), None
+        )
+        if first_painted_segment is not None:
+            result.extend(_pdf_fill_paint_operations(first_painted_segment.source))
+            active_fill_paint = first_painted_segment.source.paint_context[0]
     if source_output and region.anchor.current_font is not None:
         result.append(
             ([region.anchor.current_font[0], FloatObject(font_size)], b"Tf")
@@ -4943,7 +4996,7 @@ def _pdf_fitted_region_operations(
         active_static_font = (initial_font[0], font_size)
     else:
         active_static_font = None
-    for line in fitted_text_lines(fitted, output_typefaces):
+    for line, painted_segments in zip(layout_lines, painted_lines, strict=True):
         if not line.text:
             cursor -= line.height_pixels * 0.75
             continue
@@ -4984,7 +5037,10 @@ def _pdf_fitted_region_operations(
         if source_output:
             result.append(([_pdf_text_operand(line.text, None, "sans-serif")], b"Tj"))
         else:
-            for segment in line.segments:
+            for segment in painted_segments:
+                if segment.source.paint_context[0] != active_fill_paint:
+                    result.extend(_pdf_fill_paint_operations(segment.source))
+                    active_fill_paint = segment.source.paint_context[0]
                 classification = (
                     _pdf_portable_classification(segment.font_classification)
                 )
@@ -5003,6 +5059,8 @@ def _pdf_fitted_region_operations(
                     active_static_font = selected_font
                 result.append(([ByteStringObject(encoded_text)], b"Tj"))
         cursor -= line.height_pixels * 0.75
+    if not source_output and active_fill_paint != region.anchor.paint_context[0]:
+        result.extend(_pdf_fill_paint_operations(region.anchor))
     result.extend(restore_operations)
     return result
 
@@ -5023,9 +5081,12 @@ def _pdf_apply_legacy_bullet_override(
     )
     if mapped_text == replacement_text:
         return replacement_box
-    # PDF visual regions use one replacement paragraph and run.  Keeping this
-    # narrow makes the scalar substitution independent from paragraph layout.
+    # Cross-colour replacement keeps independent translated runs.  The
+    # reviewed legacy mapping has no span correspondence, so retain those runs
+    # unchanged rather than collapsing their paint information.
     paragraph = replacement_box.paragraphs[0]
+    if len(paragraph.runs) != 1:
+        return replacement_box
     run = paragraph.runs[0]
     return replace(
         replacement_box,
