@@ -31,7 +31,7 @@ from pipeline.text_replacement import TextReplacementProvider, TextReplacementPr
 DEFAULT_FONT_PATH = PROJECT_ROOT / "tests" / "assets" / "fonts" / "NotoSansJP[wght].ttf"
 FONT_WEIGHT_AXIS_TAG = 0x77676874
 DEFAULT_FONT_WEIGHT = 500.0
-DEFAULT_TEXT_REPLACEMENT_PROVIDER = "character_mask"
+DEFAULT_TEXT_REPLACEMENT_PROVIDER = "google_cloud_translate"
 DEFAULT_OCR_PROVIDER = "paddleocr"
 DEFAULT_TARGET_LANGUAGE = "en"
 DOCUMENT_TEXT_LAYOUT_CHOICES = (
@@ -39,7 +39,7 @@ DOCUMENT_TEXT_LAYOUT_CHOICES = (
     "preserve-basic-layout",
     "preserve-basic-layout-source-font",
 )
-DEFAULT_DOCUMENT_TEXT_LAYOUT = "preserve-source-formatting"
+DEFAULT_DOCUMENT_TEXT_LAYOUT = "preserve-basic-layout-source-font"
 ANSI_BOLD_CYAN = "\033[1;36m"
 ANSI_BOLD_GREEN = "\033[1;32m"
 ANSI_BOLD = "\033[1m"
