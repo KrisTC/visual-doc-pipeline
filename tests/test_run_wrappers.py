@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the project-local uv command wrappers."""
+"""Tests for the project-local Python launcher wrappers."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
     def test_uses_local_or_explicit_dotenv_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            wrapper = _copy_script(root, "run.ps1")
+            wrapper = _copy_root_script(root, "run.ps1")
             arguments_file = root / "uv-arguments.txt"
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -35,12 +35,12 @@ class RunPowerShellWrapperTests(unittest.TestCase):
             )
             environment = _wrapper_environment(fake_bin, arguments_file)
 
-            _run_power_shell(wrapper, environment, "python", "-c", "pass")
+            _run_power_shell(wrapper, environment, "-c", "pass")
             self.assertEqual("run python -c pass", _read_arguments(arguments_file))
 
             local_env_file = root / ".env.local"
             local_env_file.write_text("PROVIDER_TOKEN=synthetic\n", encoding="utf-8")
-            _run_power_shell(wrapper, environment, "python", "-c", "pass")
+            _run_power_shell(wrapper, environment, "-c", "pass")
             arguments = _read_arguments(arguments_file)
             self.assertTrue(arguments.startswith("run --env-file=C:/"))
             self.assertNotIn("\\", arguments)
@@ -53,7 +53,6 @@ class RunPowerShellWrapperTests(unittest.TestCase):
                 environment,
                 "-EnvFile",
                 str(override_env_file),
-                "python",
                 "-c",
                 "pass",
             )
@@ -68,7 +67,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             test_runner = _copy_script(root, "run-tests.ps1")
-            _copy_script(root, "run.ps1")
+            _copy_root_script(root, "run.ps1")
             arguments_file = root / "uv-arguments.txt"
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -90,7 +89,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
     def test_applies_the_marked_dotenv_path_before_invoking_uv(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            wrapper = _copy_script(root, "run.ps1")
+            wrapper = _copy_root_script(root, "run.ps1")
             path_file = root / "uv-path.txt"
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -110,7 +109,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
                 "RUN_WRAPPER_PATH_FILE": str(path_file),
             }
 
-            _run_power_shell(wrapper, environment, "python", "-c", "pass")
+            _run_power_shell(wrapper, environment, "-c", "pass")
 
             recorded_path = path_file.read_text(encoding="utf-8").strip()
             self.assertTrue(recorded_path.startswith("C:/synthetic/cuda;C:/synthetic/cudnn;"))
@@ -124,7 +123,7 @@ class RunBashWrapperTests(unittest.TestCase):
     def test_uses_local_or_explicit_dotenv_file(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            wrapper = _copy_script(root, "run.sh")
+            wrapper = _copy_root_script(root, "run.sh")
             arguments_file = root / "uv-arguments.txt"
             fake_bin = root / "bin"
             fake_bin.mkdir()
@@ -137,12 +136,12 @@ class RunBashWrapperTests(unittest.TestCase):
             fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
             environment = _wrapper_environment(fake_bin, arguments_file)
 
-            _run_bash(wrapper, environment, "python", "-c", "pass")
+            _run_bash(wrapper, environment, "-c", "pass")
             self.assertEqual(("run", "python", "-c", "pass"), _read_argument_lines(arguments_file))
 
             local_env_file = root / ".env.local"
             local_env_file.write_text("PROVIDER_TOKEN=synthetic\n", encoding="utf-8")
-            _run_bash(wrapper, environment, "python", "-c", "pass")
+            _run_bash(wrapper, environment, "-c", "pass")
             self.assertEqual(
                 ("run", "--env-file", str(local_env_file), "python", "-c", "pass"),
                 _read_argument_lines(arguments_file),
@@ -156,7 +155,6 @@ class RunBashWrapperTests(unittest.TestCase):
                 "--env-file",
                 str(override_env_file),
                 "--",
-                "python",
                 "-c",
                 "pass",
             )
@@ -172,6 +170,13 @@ def _copy_script(root: Path, script_name: str) -> Path:
     scripts_directory.mkdir(exist_ok=True)
     destination = scripts_directory / script_name
     shutil.copy2(PROJECT_ROOT / "scripts" / script_name, destination)
+    return destination
+
+
+def _copy_root_script(root: Path, script_name: str) -> Path:
+    """Copy one repository-root launcher into an isolated project root."""
+    destination = root / script_name
+    shutil.copy2(PROJECT_ROOT / script_name, destination)
     if script_name.endswith(".sh"):
         destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
     return destination

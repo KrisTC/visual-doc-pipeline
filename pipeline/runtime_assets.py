@@ -142,9 +142,9 @@ def bootstrap_completed() -> bool:
 def bootstrap_command() -> str:
     """Return the platform-appropriate explicit runtime-asset setup command."""
     return (
-        "scripts/run.ps1 python scripts/bootstrap_runtime_assets.py"
+        ".\\run.ps1 scripts/bootstrap_runtime_assets.py"
         if os.name == "nt"
-        else "scripts/run.sh python scripts/bootstrap_runtime_assets.py"
+        else "./run.sh scripts/bootstrap_runtime_assets.py"
     )
 
 

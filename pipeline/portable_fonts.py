@@ -38,7 +38,7 @@ def static_noto_font(classification: str, bold: bool | None) -> tuple[str, Path]
         if not path.is_file():
             raise RuntimeError(
                 "Noto Sans Symbols 2 has not been bootstrapped. Run "
-                "scripts/run.sh python scripts/bootstrap_runtime_assets.py first."
+                "./run.sh scripts/bootstrap_runtime_assets.py first."
             )
         return "Noto Sans Symbols 2", path
     if classification == "math":
@@ -46,7 +46,7 @@ def static_noto_font(classification: str, bold: bool | None) -> tuple[str, Path]
         if not path.is_file():
             raise RuntimeError(
                 "Noto Sans Math has not been bootstrapped. Run "
-                "scripts/run.sh python scripts/bootstrap_runtime_assets.py first."
+                "./run.sh scripts/bootstrap_runtime_assets.py first."
             )
         return "Noto Sans Math", path
     return _FONTS.get((classification, bool(bold)), _FONTS[("sans-serif", bool(bold))])

@@ -108,7 +108,7 @@ def _create_runtime_directories(root: Path) -> tuple[Path, Path, Path, Path]:
 
 def _write_fake_run_wrapper(root: Path, captured_candidate: Path) -> None:
     """Write a wrapper that captures the temporary dotenv and returns a mock probe."""
-    wrapper = root / "scripts" / "run.ps1"
+    wrapper = root / "run.ps1"
     wrapper.write_text(
         "param()\r\n"
         "$envFile = $args[1]\r\n"

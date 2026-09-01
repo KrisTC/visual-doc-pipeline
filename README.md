@@ -24,7 +24,7 @@ uv run --no-sync python scripts/sync_verified_dependencies.py
 Check the dependency source and cooldown policy with:
 
 ```sh
-.venv/bin/python scripts/check-dependency-policy.py
+./run.sh scripts/check-dependency-policy.py
 ```
 
 Run all automated tests with:
@@ -36,7 +36,7 @@ scripts/run-tests.sh
 Type-check all Python with:
 
 ```sh
-.venv/bin/python scripts/typecheck-python.py
+./run.sh scripts/typecheck-python.py
 ```
 
 ### Windows NVIDIA GPU OCR
@@ -54,7 +54,7 @@ Install the x64 variants, then generate the local ignored runtime configuration:
 & .\scripts\configure-paddle-cuda-environment.ps1
 ```
 
-The script selects the newest valid installed CUDA Toolkit 12.x directory and cuDNN 9.x `bin\12.*\x64` directory, writes only its managed `PATH` entry to the ignored `.env.local` file, and verifies that PaddlePaddle sees a CUDA device. It preserves other `.env.local` entries, including provider credentials. Subsequent project commands use that file through `scripts/run.ps1` or `scripts/run.sh`. CPU-only and non-Windows environments continue to use the standard CPU PaddlePaddle dependency.
+The script selects the newest valid installed CUDA Toolkit 12.x directory and cuDNN 9.x `bin\12.*\x64` directory, writes only its managed `PATH` entry to the ignored `.env.local` file, and verifies that PaddlePaddle sees a CUDA device. It preserves other `.env.local` entries, including provider credentials. Subsequent project commands use that file through the repository-root `run.ps1` or `run.sh` wrapper. CPU-only and non-Windows environments continue to use the standard CPU PaddlePaddle dependency.
 
 The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md). The text-region-colour API is documented in [docs/text-region-colours-api.md](docs/text-region-colours-api.md), with its rationale and algorithm in [docs/text-region-colours-algorithm.md](docs/text-region-colours-algorithm.md). The Skia-backed in-place rendering API is documented in [docs/text-region-rendering-api.md](docs/text-region-rendering-api.md).
 
@@ -63,7 +63,7 @@ The OCR task model and plugin contract are documented in [docs/ocr-provider-api.
 Prepare local OCR inputs from the sample-data tree:
 
 ```sh
-.venv/bin/python scripts/prepare_ocr_evaluation_inputs.py
+./run.sh scripts/prepare_ocr_evaluation_inputs.py
 ```
 
 The generated outputs are ignored by Git and may contain confidential material. Do not add, stage, or commit them.
@@ -75,7 +75,7 @@ Only samples in a BCP 47 language directory are prepared. Place that directory d
 Generate visual evaluation artifacts for every discovered OCR provider:
 
 ```sh
-.venv/bin/python scripts/run_ocr_evaluations.py
+./run.sh scripts/run_ocr_evaluations.py
 ```
 
 The command first prepares inputs from `sample-data/`. Results are written below `outputs/evaluations/ocr/output/<provider>/`. Each provider root contains the existing `index.html` OCR viewer, plus `text-replacement.html` for complete and clipped output from every local text-replacement provider. Successful OCR JSON results include their input `source_language`. tqdm renders one compact progress bar at a time for each language folder and its immediate child folders. A provider is skipped when its input checksum and generated viewers are current; delete its `.input.sha256` or a viewer to regenerate it.
@@ -85,7 +85,7 @@ The command first prepares inputs from `sample-data/`. Results are written below
 Generate simple static HTML pages for the supplied colour-detection examples:
 
 ```sh
-.venv/bin/python scripts/run_colour_evaluations.py
+./run.sh scripts/run_colour_evaluations.py
 ```
 
 The pages are written below `outputs/evaluations/color-detection-examples/`. Each page shows the existing padded text-region bitmap for every OCR region, alongside labelled colour swatches, confidence values, and background classification. These local generated artifacts are ignored by Git.
@@ -95,7 +95,7 @@ The pages are written below `outputs/evaluations/color-detection-examples/`. Eac
 Generate source-language-to-English visible replacement pages for every registered text-replacement provider:
 
 ```sh
-.venv/bin/python scripts/run_text_replacement_evaluations.py
+./run.sh scripts/run_text_replacement_evaluations.py
 ```
 
 Pages and their clipped rendered text images are written below `outputs/evaluations/text-replacement-examples/`. The evaluator uses the committed Noto Sans JP font asset and does not modify inputs.

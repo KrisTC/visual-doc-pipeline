@@ -72,7 +72,7 @@ class RuntimeAssetsTests(unittest.TestCase):
                 clear=False,
             ):
                 with self.assertRaisesRegex(
-                    runtime_assets.RuntimeAssetsRequiredError, "Run scripts/run.sh python"
+                    runtime_assets.RuntimeAssetsRequiredError, "Run ./run.sh scripts"
                 ):
                     runtime_assets.require_runtime_assets(
                         "en", "paddleocr", "preserve-source-formatting"
@@ -95,7 +95,7 @@ class RuntimeAssetsTests(unittest.TestCase):
                     runtime_assets.require_runtime_assets("en", "no_ocr", "preserve-basic-layout")
                 self.assertIn(str(runtime_assets.symbols_font_path()), str(context.exception))
                 self.assertIn(str(runtime_assets.math_font_path()), str(context.exception))
-                self.assertIn("Run scripts/run.sh python", str(context.exception))
+                self.assertIn("Run ./run.sh scripts", str(context.exception))
 
                 runtime_assets.symbols_font_path().parent.mkdir(parents=True, exist_ok=True)
                 runtime_assets.symbols_font_path().write_bytes(b"synthetic-symbol-font")

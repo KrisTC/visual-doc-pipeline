@@ -601,8 +601,8 @@ The user-facing document-processing and OCR-evaluation scripts shall call one
 small shared helper before starting work. The helper shall check the fitted
 layout's optional packs and, when PaddleOCR is selected, whether the bootstrap
 has been run successfully. It shall report all missing selected prerequisites
-with a concise instruction to run the bootstrap command. `scripts/run.sh` and
-`scripts/run.ps1` shall remain unchanged.
+with a concise instruction to run the bootstrap command. Repository-root
+`run.sh` and `run.ps1` wrappers shall not manage runtime assets.
 
 ### Rationale
 

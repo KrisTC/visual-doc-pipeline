@@ -16,7 +16,7 @@ $requiredCudnnDlls = @('cudnn64_9.dll')
 $managedPathMarker = '# Managed by scripts/configure-paddle-cuda-environment.ps1'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $envFile = Join-Path $projectRoot '.env.local'
-$runScript = Join-Path $PSScriptRoot 'run.ps1'
+$runScript = Join-Path $projectRoot 'run.ps1'
 
 function Get-ExistingDirectory {
     param([string]$Path)
@@ -210,7 +210,7 @@ function Get-ManagedEnvironmentContent {
             '}))'
         ) -join "`n"
 
-        $probeOutput = @(& $runScript -EnvFile $CandidateEnvFile python -c $probeCode 2>&1)
+        $probeOutput = @(& $runScript -EnvFile $CandidateEnvFile -c $probeCode 2>&1)
         $probeText = ($probeOutput | ForEach-Object { $_.ToString() }) -join "`n"
         if ($LASTEXITCODE -ne 0) {
             throw "PaddlePaddle CUDA loading failed in the generated environment. Check the NVIDIA driver and required runtime DLLs. Paddle output: $probeText"
@@ -236,7 +236,7 @@ function Get-ManagedEnvironmentContent {
 
     try {
         if (-not (Test-Path -LiteralPath $runScript -PathType Leaf)) {
-            throw 'The required scripts/run.ps1 wrapper was not found.'
+            throw 'The required run.ps1 wrapper was not found.'
         }
 
         $cudaBinDirectory = Resolve-CudaBinDirectory $CudaRoot

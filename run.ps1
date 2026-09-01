@@ -4,7 +4,7 @@ param()
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandArgumentPassing = 'Standard'
 
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$projectRoot = (Resolve-Path $PSScriptRoot).Path
 Set-Location $projectRoot
 $managedPathMarker = '# Managed by scripts/configure-paddle-cuda-environment.ps1'
 
@@ -36,7 +36,7 @@ foreach ($argument in $args) {
 $envFile = $null
 if ($remainingArguments.Count -gt 0 -and $remainingArguments[0] -in @('-EnvFile', '--env-file')) {
     if ($remainingArguments.Count -lt 2) {
-        Write-Error 'scripts/run.ps1: -EnvFile requires a path.'
+        Write-Error 'run.ps1: -EnvFile requires a path.'
         exit 2
     }
     $envFile = $remainingArguments[1]
@@ -47,7 +47,7 @@ if ($remainingArguments.Count -gt 0 -and $remainingArguments[0] -in @('-EnvFile'
 }
 
 if ($remainingArguments.Count -eq 0) {
-    Write-Error 'Usage: scripts/run.ps1 [-EnvFile PATH] COMMAND [ARGUMENT ...]'
+    Write-Error 'Usage: .\\run.ps1 [-EnvFile PATH] PYTHON_ARGUMENT [PYTHON_ARGUMENT ...]'
     exit 2
 }
 
@@ -67,6 +67,7 @@ if ($null -ne $selectedEnvFile) {
     $uvEnvironmentFile = $selectedEnvFile -replace '\\', '/'
     $uvArguments += "--env-file=$uvEnvironmentFile"
 }
+$uvArguments += 'python'
 $uvArguments += $remainingArguments
 
 & uv @uvArguments

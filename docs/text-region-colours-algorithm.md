@@ -225,7 +225,7 @@ sufficient to reconstruct a gradient or complex background.
 Run the local evaluator:
 
 ```sh
-./.venv/bin/python scripts/run_colour_evaluations.py
+./run.sh scripts/run_colour_evaluations.py
 ```
 
 It writes a table for each supplied input below
