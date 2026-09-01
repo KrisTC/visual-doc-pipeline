@@ -18,7 +18,7 @@ from pipeline.ocr.models import OcrRequest
 from pipeline.ocr.provider import LocalContractTestSkip
 
 
-SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "run_ocr_evaluations.py"
+SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ocr_evaluations.py"
 SPECIFICATION = importlib.util.spec_from_file_location("ocr_evaluation", SCRIPT_PATH)
 assert SPECIFICATION is not None and SPECIFICATION.loader is not None
 ocr_evaluation = importlib.util.module_from_spec(SPECIFICATION)

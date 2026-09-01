@@ -17,8 +17,8 @@ from PIL import Image
 
 from pipeline.ocr import OcrProviderFactory
 from pipeline.text_replacement import TextReplacementProviderFactory
-from scripts import run_folder_replacement
-from scripts.run_folder_replacement import _argument_parser, _load_default_typeface
+from scripts import folder_replacement
+from scripts.folder_replacement import _argument_parser, _load_default_typeface
 
 PROJECT_ROOT = Path(__file__).parents[1]
 
@@ -37,19 +37,19 @@ class CliEntryPointTests(unittest.TestCase):
 
     # Verifies FR-2026-08-01-03.
     def test_evaluation_help_runs_as_a_direct_script(self) -> None:
-        self._assert_help_succeeds("run_ocr_evaluations.py")
+        self._assert_help_succeeds("ocr_evaluations.py")
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_runs_as_a_direct_script(self) -> None:
-        self._assert_help_succeeds("run_folder_replacement.py")
+        self._assert_help_succeeds("folder_replacement.py")
 
     # Verifies FR-2026-08-22-01.
     def test_development_folder_replacement_help_runs_as_a_direct_script(self) -> None:
-        self._assert_help_succeeds("run_development_folder_replacement.py")
+        self._assert_help_succeeds("development_folder_replacement.py")
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_lists_plugin_choices_and_defaults(self) -> None:
-        completed_process = self._run_help("run_folder_replacement.py")
+        completed_process = self._run_help("folder_replacement.py")
 
         self.assertEqual(0, completed_process.returncode, completed_process.stderr)
         help_output = completed_process.stdout
@@ -81,7 +81,7 @@ class CliEntryPointTests(unittest.TestCase):
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_lists_document_text_layout_choices_separately(self) -> None:
-        completed_process = self._run_help("run_folder_replacement.py")
+        completed_process = self._run_help("folder_replacement.py")
 
         self.assertEqual(0, completed_process.returncode, completed_process.stderr)
         help_output = completed_process.stdout
@@ -144,7 +144,7 @@ class CliEntryPointTests(unittest.TestCase):
                 sys,
                 "argv",
                 [
-                    "run_folder_replacement.py",
+                    "folder_replacement.py",
                     str(input_folder),
                     str(root / "output"),
                     "--source-language",
@@ -155,7 +155,7 @@ class CliEntryPointTests(unittest.TestCase):
                     "preserve-basic-layout",
                 ],
             ), patch("sys.stderr", error_output):
-                self.assertEqual(2, run_folder_replacement.main())
+                self.assertEqual(2, folder_replacement.main())
 
             message = error_output.getvalue()
             self.assertIn("Folder replacement did not start", message)
@@ -275,7 +275,7 @@ class CliEntryPointTests(unittest.TestCase):
         return subprocess.run(
             [
                 sys.executable,
-                str(PROJECT_ROOT / "scripts" / "run_folder_replacement.py"),
+                str(PROJECT_ROOT / "scripts" / "folder_replacement.py"),
                 str(input_folder),
                 str(output_folder),
                 "--source-language",

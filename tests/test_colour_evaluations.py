@@ -9,7 +9,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from scripts.run_colour_evaluations import evaluate_colour_examples
+from scripts.colour_evaluations import evaluate_colour_examples
 
 
 class ColourEvaluationTests(unittest.TestCase):

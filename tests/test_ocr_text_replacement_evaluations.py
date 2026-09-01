@@ -9,7 +9,7 @@ import unittest
 
 from PIL import Image, ImageDraw
 
-from scripts.run_ocr_text_replacement_evaluations import (
+from scripts.ocr_text_replacement_evaluations import (
     DEFAULT_FONT_WEIGHT,
     FONT_WEIGHT_AXIS_TAG,
     _is_confidential_sample_path,

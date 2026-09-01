@@ -26,7 +26,7 @@ from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import replace_text_region
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
 from pipeline.provider_cache import source_cache_scope
-from scripts.run_colour_evaluations import EvaluationTextItem, _read_successful_text_items
+from scripts.colour_evaluations import EvaluationTextItem, _read_successful_text_items
 
 
 DEFAULT_FONT_PATH = PROJECT_ROOT / "tests" / "assets" / "fonts" / "NotoSansJP[wght].ttf"

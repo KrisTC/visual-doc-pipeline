@@ -39,7 +39,7 @@ Confidence is neither a probability nor OCR confidence. `0.0` means the estimato
 Generate local static pages for the supplied examples with:
 
 ```sh
-./run.sh scripts/run_colour_evaluations.py
+./run.sh scripts/colour_evaluations.py
 ```
 
 Pages are written below `outputs/evaluations/color-detection-examples/`. Each result row references its existing padded text-region bitmap through a relative path and is a local generated artifact; do not add the pages to Git.

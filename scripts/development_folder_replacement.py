@@ -22,7 +22,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pipeline.folder_replacement import parse_include_patterns
 from pipeline.ocr import OcrProviderFactory
 from pipeline.text_replacement import TextReplacementProviderFactory
-from scripts.run_folder_replacement import (
+from scripts.folder_replacement import (
     DEFAULT_DOCUMENT_TEXT_LAYOUT,
     DEFAULT_OCR_PROVIDER,
     DEFAULT_TARGET_LANGUAGE,
@@ -32,7 +32,7 @@ from scripts.run_folder_replacement import (
 
 
 DEVELOPMENT_OUTPUT_ROOT = Path("outputs/evaluations/folder-replacement-development")
-RUN_FOLDER_REPLACEMENT_SCRIPT = PROJECT_ROOT / "scripts" / "run_folder_replacement.py"
+FOLDER_REPLACEMENT_SCRIPT = PROJECT_ROOT / "scripts" / "folder_replacement.py"
 LANGUAGE_TAG_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 
 
@@ -290,7 +290,7 @@ def _folder_replacement_command(
     """Build one direct-script command without processing files in this wrapper."""
     command = [
         sys.executable,
-        str(RUN_FOLDER_REPLACEMENT_SCRIPT),
+        str(FOLDER_REPLACEMENT_SCRIPT),
         str(source_root),
         str(output_root),
         "--source-language",

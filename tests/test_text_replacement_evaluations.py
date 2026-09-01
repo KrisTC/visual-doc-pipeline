@@ -20,7 +20,7 @@ from pptx.shapes.autoshape import Shape
 from pptx.shapes.base import BaseShape
 from pptx.util import Inches, Pt
 
-from scripts.run_text_replacement_evaluations import (
+from scripts.text_replacement_evaluations import (
     ParagraphProperties,
     TextRunProperties,
     _dominant_run,
@@ -222,7 +222,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             progress_context.__enter__.return_value = progress
 
             with patch(
-                "scripts.run_text_replacement_evaluations.tqdm",
+                "scripts.text_replacement_evaluations.tqdm",
                 return_value=progress_context,
             ) as mocked_tqdm:
                 evaluate_text_replacement_examples(input_root, root / "output")

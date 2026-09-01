@@ -31,7 +31,7 @@ The existing pipeline primitives and local evaluators need a user-facing command
 
 The existing requirements define supported bitmap formats as PNG, JPEG, TIFF, BMP, GIF, and WebP, and initial document extensions as PDF, DOCX, PPTX, and XLSX.
 
-The command is `scripts/run_folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER`. `--source-language` is required; `--target-language en`, `--ocr paddleocr`, and `--text-replacement character_mask` are its defaults. It exits non-zero if one or more eligible files fail, after continuing to process other files.
+The command is `scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER`. `--source-language` is required; `--target-language en`, `--ocr paddleocr`, and `--text-replacement character_mask` are its defaults. It exits non-zero if one or more eligible files fail, after continuing to process other files.
 
 The Office implementation processes visible WordprocessingML, DrawingML, SpreadsheetML, and VML text nodes throughout each OOXML package, which covers document body content as well as reachable package parts such as headers, footers, tables, comments, text boxes, grouped-shape text, notes, and shared spreadsheet strings. It processes every embedded raster part under an Office `media` directory.
 
@@ -152,7 +152,7 @@ The implementation shall use only synthetic OOXML package data in automated test
 
 ### Description
 
-The project shall rename `scripts/run_text_replacement_evaluations.py` to identify it as the OCR text-replacement evaluator. The name `scripts/run_text_replacement_evaluations.py` shall be used for a separate local evaluation command for native editable PowerPoint text elements.
+The project shall name `scripts/ocr_text_replacement_evaluations.py` to identify it as the OCR text-replacement evaluator. The name `scripts/text_replacement_evaluations.py` shall be used for a separate local evaluation command for native editable PowerPoint text elements.
 
 For its first pass, the native-text evaluator shall inspect each eligible text element in PPTX source files in the same local sample corpus used by the other evaluation commands, extract its basic text-box properties including autofit settings, and render that element to a bitmap with Skia. It shall skip a text frame with no non-whitespace run text, while retaining blank paragraphs in an otherwise nonempty text frame. It shall write the extracted properties as a JSON file beside each rendered bitmap. The generated static HTML evaluation shall contain one row per source text element and present the slide and object reference, a new-tab link to that row's JSON properties file, and the rendered bitmap. The HTML shall display each native-size preview with a thin red border that makes the text-box bounds visible without changing the raster bitmap. It may process `sample-data/confidential/` locally only under the repository's confidential-sample rule.
 
@@ -234,7 +234,7 @@ Automated tests shall use synthetic documents and fonts only. They shall verify 
 
 ### Description
 
-Before processing any input, `scripts/run_folder_replacement.py` shall validate its user-supplied parameters and report anticipated validation failures through argparse's normal command-line-error mechanism. It shall print the usage summary and one concise `error:` message to standard error, exit with status 2, and shall not display a Python traceback for these failures.
+Before processing any input, `scripts/folder_replacement.py` shall validate its user-supplied parameters and report anticipated validation failures through argparse's normal command-line-error mechanism. It shall print the usage summary and one concise `error:` message to standard error, exit with status 2, and shall not display a Python traceback for these failures.
 
 The command shall report an error when the input path does not exist or is not a directory, or when an existing output path is not a directory. It shall report an error when `--ocr` does not name a discovered OCR provider, or when `--text-replacement` does not name a discovered text-replacement provider. Each unavailable-provider error shall identify the invalid value and list the available provider names for that option.
 
@@ -304,7 +304,7 @@ Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. T
 
 ### Description
 
-The native PowerPoint text-replacement evaluation command, `scripts/run_text_replacement_evaluations.py`, shall use tqdm to render terminal progress. It shall render one progress bar at a time for each discovered source-language directory containing eligible PPTX files. Each bar shall be labelled with that directory's path relative to the input root, advance once per eligible presentation after it is processed or skipped, and show the current presentation basename in its postfix.
+The native PowerPoint text-replacement evaluation command, `scripts/text_replacement_evaluations.py`, shall use tqdm to render terminal progress. It shall render one progress bar at a time for each discovered source-language directory containing eligible PPTX files. Each bar shall be labelled with that directory's path relative to the input root, advance once per eligible presentation after it is processed or skipped, and show the current presentation basename in its postfix.
 
 ### Rationale
 
@@ -332,12 +332,12 @@ PowerPoint temporary lock files remain ineligible and shall not contribute to a 
 The project shall provide a separate development-only command that runs
 repeatable visible-text-replacement scenarios over sample-data language
 folders. It shall be a command-line wrapper around
-`scripts/run_folder_replacement.py`; it shall construct and invoke that
+`scripts/folder_replacement.py`; it shall construct and invoke that
 command once for each scenario, and shall not invoke the folder-processing API
 directly. It shall not change the command-line contract or generic input/output
-behaviour of `scripts/run_folder_replacement.py`.
+behaviour of `scripts/folder_replacement.py`.
 
-The command shall be named `scripts/run_development_folder_replacement.py`.
+The command shall be named `scripts/development_folder_replacement.py`.
 It shall accept one `SOURCE_FOLDER` positional argument that is relative to
 `sample-data/`, is neither absolute nor escaping, and ends in a BCP 47
 language-directory name. It shall derive the source-language option from that
@@ -711,9 +711,9 @@ output for each eligible adapter, and PDF visual and copy/search behaviour.
 
 For each source document with an unsupported file type, failed, or unsupported
 work, a debug-enabled run shall write one JSON sidecar beside that document's
-intended output path. `scripts/run_folder_replacement.py` shall enable this
+intended output path. `scripts/folder_replacement.py` shall enable this
 with an explicit `--debug` flag; ordinary runs shall not create diagnostic
-sidecars. `scripts/run_development_folder_replacement.py` shall always pass
+sidecars. `scripts/development_folder_replacement.py` shall always pass
 `--debug` to each scenario. A file excluded by `--include` is intentional run
 selection and shall be counted as ignored without producing a diagnostic
 sidecar. Its name shall be the intended output filename followed by

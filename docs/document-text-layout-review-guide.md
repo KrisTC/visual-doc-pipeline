@@ -52,7 +52,7 @@ the measurement face in either case.
 
 | Area | Entry point / call site | Basic-layout font policy | Review focus |
 |---|---|---|---|
-| CLI | [scripts/run_folder_replacement.py](../scripts/run_folder_replacement.py) | Selects and forwards the layout value. | Ensure the command value arrives unchanged at `replace_input_folder`. |
+| CLI | [scripts/folder_replacement.py](../scripts/folder_replacement.py) | Selects and forwards the layout value. | Ensure the command value arrives unchanged at `replace_input_folder`. |
 | Folder dispatcher | [pipeline/folder_replacement/processor.py](../pipeline/folder_replacement/processor.py) | Dispatches by format. | Validate the mode once and keep unsupported containers on source-formatting fallback. |
 | PPTX shapes and tables | [pipeline/folder_replacement/pptx.py](../pipeline/folder_replacement/pptx.py) | Passes `False` for basic layout and `True` for source-font mode. | Check bounds, no-autofit handling, and every supported shape reaching the shared utility. |
 | DOCX DrawingML text boxes | [pipeline/folder_replacement/docx.py](../pipeline/folder_replacement/docx.py) | Basic writes Noto; source-font mode preserves source references. | Check only finite drawing bounds opt in; flowing paragraphs stay direct replacement. |

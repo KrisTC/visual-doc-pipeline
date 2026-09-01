@@ -75,7 +75,7 @@ Only samples in a BCP 47 language directory are prepared. Place that directory d
 Generate visual evaluation artifacts for every discovered OCR provider:
 
 ```sh
-./run.sh scripts/run_ocr_evaluations.py
+./run.sh scripts/ocr_evaluations.py
 ```
 
 The command first prepares inputs from `sample-data/`. Results are written below `outputs/evaluations/ocr/output/<provider>/`. Each provider root contains the existing `index.html` OCR viewer, plus `text-replacement.html` for complete and clipped output from every local text-replacement provider. Successful OCR JSON results include their input `source_language`. tqdm renders one compact progress bar at a time for each language folder and its immediate child folders. A provider is skipped when its input checksum and generated viewers are current; delete its `.input.sha256` or a viewer to regenerate it.
@@ -85,7 +85,7 @@ The command first prepares inputs from `sample-data/`. Results are written below
 Generate simple static HTML pages for the supplied colour-detection examples:
 
 ```sh
-./run.sh scripts/run_colour_evaluations.py
+./run.sh scripts/colour_evaluations.py
 ```
 
 The pages are written below `outputs/evaluations/color-detection-examples/`. Each page shows the existing padded text-region bitmap for every OCR region, alongside labelled colour swatches, confidence values, and background classification. These local generated artifacts are ignored by Git.
@@ -95,7 +95,7 @@ The pages are written below `outputs/evaluations/color-detection-examples/`. Eac
 Generate source-language-to-English visible replacement pages for every registered text-replacement provider:
 
 ```sh
-./run.sh scripts/run_text_replacement_evaluations.py
+./run.sh scripts/text_replacement_evaluations.py
 ```
 
 Pages and their clipped rendered text images are written below `outputs/evaluations/text-replacement-examples/`. The evaluator uses the committed Noto Sans JP font asset and does not modify inputs.

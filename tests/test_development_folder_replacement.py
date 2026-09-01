@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from pipeline.text_replacement import TextReplacementProviderFactory
-from scripts import run_development_folder_replacement as development
+from scripts import development_folder_replacement as development
 
 
 class DevelopmentFolderReplacementTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
             for command in recorded_commands:
                 with self.subTest(command=command):
                     self.assertEqual(
-                        str(development.RUN_FOLDER_REPLACEMENT_SCRIPT), command[1]
+                        str(development.FOLDER_REPLACEMENT_SCRIPT), command[1]
                     )
                     self.assertEqual(str(source_folder), command[2])
                     self.assertIn("--include", command)

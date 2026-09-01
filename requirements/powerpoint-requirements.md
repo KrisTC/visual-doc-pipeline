@@ -343,7 +343,7 @@ content.
 
 ### Description
 
-`scripts/run_text_replacement_evaluations.py` shall generate previews for both
+`scripts/text_replacement_evaluations.py` shall generate previews for both
 fitted document-text layout modes. For each input presentation it shall retain
 the existing HTML report and artifact directory for `preserve-basic-layout`,
 and write a separate source-font report named `<filename>.sf.html` with a

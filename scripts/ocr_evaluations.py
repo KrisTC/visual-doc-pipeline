@@ -44,7 +44,7 @@ from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
 from scripts.prepare_ocr_evaluation_inputs import prepare_evaluation_inputs
-from scripts.run_ocr_text_replacement_evaluations import _load_default_typeface
+from scripts.ocr_text_replacement_evaluations import _load_default_typeface
 
 
 BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}

@@ -1,6 +1,6 @@
 # Folder replacer: format support
 
-`scripts/run_folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER` recursively processes supported files and writes copies below the output folder. It preserves the directory hierarchy and source file format. Each output filename is first passed to the selected text-replacement provider with `is_filename=True`; collisions receive a numeric suffix. Unsupported files are ignored, and a failure for one eligible input is reported without stopping later files.
+`scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER` recursively processes supported files and writes copies below the output folder. It preserves the directory hierarchy and source file format. Each output filename is first passed to the selected text-replacement provider with `is_filename=True`; collisions receive a numeric suffix. Unsupported files are ignored, and a failure for one eligible input is reported without stopping later files.
 
 The command requires `--source-language` and defaults to `--target-language en`, `--text-replacement character_mask`, `--ocr paddleocr`, and `--document-text-layout preserve-source-formatting`.
 
