@@ -4,7 +4,7 @@
 
 This repository is being developed using a requirements-first approach.
 
-The authoritative project requirements are stored in the `requirements/` directory.
+The authoritative project requirements are stored in the `requirements/` directory. The routing rules in `requirements/README.md` identify the focused requirement files for a task.
 
 Agents must treat those files as the source of truth.
 
@@ -30,7 +30,7 @@ It is acceptable for sample data in confidential folder to be used with plugins 
 
 Before implementing a feature:
 
-1. Read all relevant requirement files.
+1. Read `requirements/README.md`, the requirement files routed for the task, and every explicitly related requirement. Read `general-requirements.md` for common-pipeline work; read security and technical requirements when the task affects their scope or a routed requirement references them.
 2. Check for conflicts.
 3. Check for missing requirements.
 4. If requirements conflict:

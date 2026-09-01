@@ -6,7 +6,7 @@
 
 ---
 
-## FR-YYYY-MM-DD-NN
+## TR-YYYY-MM-DD-NN
 
 | Property | Value |
 |----------|-------|
