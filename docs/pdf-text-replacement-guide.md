@@ -265,4 +265,4 @@ confidential source-document material.
 - [PDF specification archive, including PDF 1.7 and the ISO 32000 family](https://pdfa.org/resource/pdf-specification-archive/)
 - [PDF 2.0 errata](https://pdf-issues.pdfa.org/32000-2-2020/)
 - [PDF adapter source](../pipeline/folder_replacement/pdf.py)
-- [Synthetic PDF regression tests](../tests/test_folder_replacement.py)
+- [Synthetic PDF regression tests](../tests/test_folder_replacement_pdf.py)
