@@ -6,15 +6,18 @@ from __future__ import annotations
 from pathlib import Path
 import sys
 
+from tqdm import tqdm
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from pipeline.ocr_plugins.paddleocr import bootstrap_models
+from pipeline.ocr_plugins.paddleocr import bootstrap_model_language
 from pipeline.runtime_assets import (
-    bootstrap_optional_fonts,
+    bootstrap_math_font,
+    bootstrap_symbols_font,
     font_cache_directory,
     mark_bootstrap_complete,
     paddle_model_cache_directory,
@@ -24,8 +27,25 @@ from pipeline.runtime_assets import (
 def main() -> int:
     """Bootstrap the small shared optional-font and PaddleOCR caches."""
     try:
-        symbols_font, math_font = bootstrap_optional_fonts()
-        bootstrap_models()
+        with tqdm(
+            total=4,
+            desc="Runtime assets",
+            dynamic_ncols=True,
+            leave=True,
+            unit="asset",
+        ) as progress:
+            progress.set_postfix_str("Noto Sans Symbols 2")
+            symbols_font = bootstrap_symbols_font()
+            progress.update()
+            progress.set_postfix_str("Noto Sans Math")
+            math_font = bootstrap_math_font()
+            progress.update()
+            progress.set_postfix_str("PaddleOCR English")
+            bootstrap_model_language("en")
+            progress.update()
+            progress.set_postfix_str("PaddleOCR Japanese")
+            bootstrap_model_language("ja")
+            progress.update()
         mark_bootstrap_complete()
     except Exception as error:
         print(f"Runtime-asset bootstrap failed: {error}", file=sys.stderr)

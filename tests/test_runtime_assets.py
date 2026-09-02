@@ -63,6 +63,65 @@ class RuntimeAssetsTests(unittest.TestCase):
                     download.call_args_list,
                 )
 
+    # Verifies FR-2026-09-02-01.
+    def test_temporary_file_operation_retries_a_transient_windows_lock(self) -> None:
+        error = PermissionError("file is being used by another process")
+        error.winerror = 32
+        attempts = 0
+
+        def temporarily_locked_operation() -> str:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise error
+            return "complete"
+
+        with patch("pipeline.runtime_assets.time.sleep") as sleep:
+            result = runtime_assets._retry_temporary_file_operation(
+                "remove", Path("temporary.zip"), temporarily_locked_operation
+            )
+
+        self.assertEqual("complete", result)
+        self.assertEqual(2, attempts)
+        sleep.assert_called_once()
+
+    # Verifies FR-2026-09-02-01.
+    def test_temporary_file_operation_reports_an_exhausted_windows_lock(self) -> None:
+        error = PermissionError("file is being used by another process")
+        error.winerror = 32
+
+        def permanently_locked_operation() -> None:
+            raise error
+
+        with patch(
+            "pipeline.runtime_assets.time.monotonic", side_effect=(100.0, 130.0)
+        ):
+            with self.assertRaisesRegex(
+                runtime_assets.RuntimeAssetTemporaryFileLockError,
+                "endpoint-security software",
+            ) as context:
+                runtime_assets._retry_temporary_file_operation(
+                    "remove", Path("temporary.zip"), permanently_locked_operation
+                )
+
+        self.assertIn("temporary.zip", str(context.exception))
+        self.assertIn("30.0 seconds", str(context.exception))
+
+    # Verifies FR-2026-09-02-01.
+    def test_temporary_file_operation_does_not_retry_other_filesystem_errors(self) -> None:
+        error = FileNotFoundError("temporary file is missing")
+
+        def missing_file_operation() -> None:
+            raise error
+
+        with patch("pipeline.runtime_assets.time.sleep") as sleep:
+            with self.assertRaises(FileNotFoundError):
+                runtime_assets._retry_temporary_file_operation(
+                    "remove", Path("temporary.zip"), missing_file_operation
+                )
+
+        sleep.assert_not_called()
+
     # Verifies FR-2026-08-27-04.
     def test_paddle_processing_requires_the_successful_bootstrap_marker(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -71,12 +130,11 @@ class RuntimeAssetsTests(unittest.TestCase):
                 {runtime_assets.FONT_CACHE_ENVIRONMENT_VARIABLE: temporary_directory},
                 clear=False,
             ):
-                with self.assertRaisesRegex(
-                    runtime_assets.RuntimeAssetsRequiredError, "Run ./run.sh scripts"
-                ):
+                with self.assertRaises(runtime_assets.RuntimeAssetsRequiredError) as context:
                     runtime_assets.require_runtime_assets(
                         "en", "paddleocr", "preserve-source-formatting"
                     )
+                self.assertIn(runtime_assets.bootstrap_command(), str(context.exception))
                 runtime_assets.mark_bootstrap_complete()
                 runtime_assets.require_runtime_assets("en", "paddleocr", "preserve-source-formatting")
 
@@ -95,7 +153,7 @@ class RuntimeAssetsTests(unittest.TestCase):
                     runtime_assets.require_runtime_assets("en", "no_ocr", "preserve-basic-layout")
                 self.assertIn(str(runtime_assets.symbols_font_path()), str(context.exception))
                 self.assertIn(str(runtime_assets.math_font_path()), str(context.exception))
-                self.assertIn("Run ./run.sh scripts", str(context.exception))
+                self.assertIn(runtime_assets.bootstrap_command(), str(context.exception))
 
                 runtime_assets.symbols_font_path().parent.mkdir(parents=True, exist_ok=True)
                 runtime_assets.symbols_font_path().write_bytes(b"synthetic-symbol-font")

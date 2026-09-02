@@ -1097,3 +1097,82 @@ messages, document-level atomic failure, and continuation to the next source
 file.
 
 ---
+
+## FR-2026-09-02-01
+
+| Property | Value |
+|----------|-------|
+| Title | Tolerate transient local file locks during runtime-asset bootstrap |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-02 |
+| Related Requirements | FR-2026-08-27-04 |
+
+### Description
+
+Runtime-asset bootstrap shall tolerate transient sharing violations affecting
+bootstrap-owned temporary files.
+
+When an operation on a temporary bootstrap file fails because the file is
+temporarily in use by another process, the operation shall be retried using
+bounded exponential backoff with jitter.
+
+Retries shall:
+
+- apply only to bootstrap-owned temporary-file cleanup, rename, or replacement
+  operations;
+- apply only to errors classified as transient file-sharing or locking
+  conflicts;
+- continue for no more than 30 seconds in total;
+- use increasing delays between attempts, capped at approximately 5 seconds.
+
+Other filesystem errors shall fail immediately.
+
+If the retry period is exhausted, bootstrap shall fail and report:
+
+- the operation being attempted;
+- the affected file path;
+- the elapsed retry duration;
+- the underlying operating-system error; and
+- that another process, such as endpoint-security software, may be holding the
+  file open.
+
+### Rationale
+
+On Windows, antivirus scanning may briefly lock a downloaded temporary archive
+while the bootstrap command cleans it up.
+
+---
+
+## FR-2026-09-02-02
+
+| Property | Value |
+|----------|-------|
+| Title | Report runtime-asset bootstrap progress |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-02 |
+| Related Requirements | FR-2026-08-27-04 |
+
+### Description
+
+The runtime-asset bootstrap command shall render one `tqdm` progress bar while
+it prepares its selected optional font packs and PaddleOCR languages. The bar
+shall have one work item for each selected font pack and one work item for each
+PaddleOCR language initialization. Its postfix shall identify the active font
+pack or language initialization.
+
+The command shall advance the bar only after the corresponding step completes.
+It shall close the bar before reporting its existing final result or failure.
+
+Automated tests shall use mocked font-pack and PaddleOCR setup steps. They
+shall verify the progress total, active-step labels, completed work items, and
+bar closure without requiring a network download or model initialization.
+
+### Rationale
+
+Font-pack downloads and first-time PaddleOCR model initialization can take long
+enough that the explicit local setup command should show which bootstrap step
+is active.

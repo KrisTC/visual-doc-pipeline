@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import platform
+import random
 import shutil
 from tempfile import NamedTemporaryFile
+import time
+from typing import Callable, TypeVar
 from urllib.request import urlopen
 from zipfile import ZipFile
 
@@ -26,14 +29,31 @@ _MATH_ARCHIVE_URL = (
 _MATH_ARCHIVE_MEMBER = "NotoSansMath/googlefonts/ttf/NotoSansMath-Regular.ttf"
 _MATH_FILENAME = "NotoSansMath-Regular.ttf"
 _SUCCESS_MARKER_FILENAME = "bootstrap-complete"
+_TEMPORARY_FILE_LOCK_RETRY_SECONDS = 30.0
+_TEMPORARY_FILE_LOCK_INITIAL_DELAY_SECONDS = 0.1
+_TEMPORARY_FILE_LOCK_MAX_DELAY_SECONDS = 5.0
 _FITTED_LAYOUT_MODES = frozenset(
     {"preserve-basic-layout", "preserve-basic-layout-source-font"}
 )
 _BASE_TARGET_LANGUAGES = frozenset({"en", "da", "es", "fr", "ja"})
+_OperationResult = TypeVar("_OperationResult")
 
 
 class RuntimeAssetsRequiredError(RuntimeError):
     """Raised when a processing command needs the local bootstrap first."""
+
+
+class RuntimeAssetTemporaryFileLockError(RuntimeError):
+    """Raised when a bootstrap temporary file remains locked after retries."""
+
+    def __init__(
+        self, operation: str, path: Path, elapsed_seconds: float, error: OSError
+    ) -> None:
+        super().__init__(
+            f"Could not {operation} temporary bootstrap file {path} after "
+            f"{elapsed_seconds:.1f} seconds of retrying: {error}. Another process, "
+            "such as endpoint-security software, may be holding the file open."
+        )
 
 
 def font_cache_directory() -> Path:
@@ -84,11 +104,19 @@ def math_font_is_available() -> bool:
 
 def bootstrap_optional_fonts() -> tuple[Path, Path]:
     """Download the selected optional portable faces into the shared cache."""
-    symbols = _bootstrap_font(
+    return bootstrap_symbols_font(), bootstrap_math_font()
+
+
+def bootstrap_symbols_font() -> Path:
+    """Download the selected optional Noto Sans Symbols 2 face."""
+    return _bootstrap_font(
         _SYMBOLS_ARCHIVE_URL, _SYMBOLS_ARCHIVE_MEMBER, symbols_font_path()
     )
-    math = _bootstrap_font(_MATH_ARCHIVE_URL, _MATH_ARCHIVE_MEMBER, math_font_path())
-    return symbols, math
+
+
+def bootstrap_math_font() -> Path:
+    """Download the selected optional Noto Sans Math face."""
+    return _bootstrap_font(_MATH_ARCHIVE_URL, _MATH_ARCHIVE_MEMBER, math_font_path())
 
 
 def _bootstrap_font(archive_url: str, archive_member: str, destination: Path) -> Path:
@@ -99,23 +127,62 @@ def _bootstrap_font(archive_url: str, archive_member: str, destination: Path) ->
     font_path: Path | None = None
     with NamedTemporaryFile(dir=destination.parent, suffix=".zip", delete=False) as archive_file:
         archive_path = Path(archive_file.name)
-        try:
-            with urlopen(archive_url) as response:
-                shutil.copyfileobj(response, archive_file)
-            archive_file.flush()
-            with ZipFile(archive_path) as archive:
-                with archive.open(archive_member) as source:
-                    with NamedTemporaryFile(
-                        dir=destination.parent, suffix=".ttf", delete=False
-                    ) as font_file:
-                        font_path = Path(font_file.name)
-                        shutil.copyfileobj(source, font_file)
-            font_path.replace(destination)
-        finally:
-            archive_path.unlink(missing_ok=True)
-            if font_path is not None:
-                font_path.unlink(missing_ok=True)
+        with urlopen(archive_url) as response:
+            shutil.copyfileobj(response, archive_file)
+        archive_file.flush()
+    try:
+        with ZipFile(archive_path) as archive:
+            with archive.open(archive_member) as source:
+                with NamedTemporaryFile(
+                    dir=destination.parent, suffix=".ttf", delete=False
+                ) as font_file:
+                    font_path = Path(font_file.name)
+                    shutil.copyfileobj(source, font_file)
+        _retry_temporary_file_operation(
+            "replace", font_path, lambda: font_path.replace(destination)
+        )
+    finally:
+        _retry_temporary_file_operation(
+            "remove", archive_path, lambda: archive_path.unlink(missing_ok=True)
+        )
+        if font_path is not None:
+            _retry_temporary_file_operation(
+                "remove", font_path, lambda: font_path.unlink(missing_ok=True)
+            )
     return destination
+
+
+def _retry_temporary_file_operation(
+    operation: str, path: Path, action: Callable[[], _OperationResult]
+) -> _OperationResult:
+    """Retry a temporary-file operation if Windows briefly reports a file lock."""
+    started_at = time.monotonic()
+    deadline = started_at + _TEMPORARY_FILE_LOCK_RETRY_SECONDS
+    delay_seconds = _TEMPORARY_FILE_LOCK_INITIAL_DELAY_SECONDS
+    while True:
+        try:
+            return action()
+        except OSError as error:
+            if not _is_transient_file_lock(error):
+                raise
+            current_time = time.monotonic()
+            if current_time >= deadline:
+                raise RuntimeAssetTemporaryFileLockError(
+                    operation, path, current_time - started_at, error
+                ) from error
+            jittered_delay_seconds = min(
+                _TEMPORARY_FILE_LOCK_MAX_DELAY_SECONDS,
+                delay_seconds * random.uniform(0.8, 1.2),
+            )
+            time.sleep(min(jittered_delay_seconds, deadline - current_time))
+            delay_seconds = min(
+                _TEMPORARY_FILE_LOCK_MAX_DELAY_SECONDS, delay_seconds * 2
+            )
+
+
+def _is_transient_file_lock(error: OSError) -> bool:
+    """Return whether an OS error is a Windows sharing or locking conflict."""
+    return getattr(error, "winerror", None) in {32, 33}
 
 
 def paddle_model_cache_directory() -> Path:

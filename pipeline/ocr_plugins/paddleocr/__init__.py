@@ -153,11 +153,16 @@ def create_provider() -> OcrProvider:
 def bootstrap_models() -> None:
     """Initialize every supported language so PaddleOCR populates its own cache."""
     for language in sorted(PaddleOcrProvider.supported_languages):
-        native_language = _paddle_language(language)
-        try:
-            _create_engine(native_language, AUTO_DEVICE)
-        except OcrProviderError:
-            _create_engine(native_language, CPU_DEVICE)
+        bootstrap_model_language(language)
+
+
+def bootstrap_model_language(language: str) -> None:
+    """Initialize one supported language so PaddleOCR populates its normal cache."""
+    native_language = _paddle_language(language)
+    try:
+        _create_engine(native_language, AUTO_DEVICE)
+    except OcrProviderError:
+        _create_engine(native_language, CPU_DEVICE)
 
 
 def _paddle_language(language: str) -> str:
