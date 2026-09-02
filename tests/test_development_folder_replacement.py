@@ -15,7 +15,7 @@ from scripts import development_folder_replacement as development
 
 
 class DevelopmentFolderReplacementTests(unittest.TestCase):
-    # Verifies FR-2026-08-22-01 and FR-2026-08-22-02.
+    # Verifies FR-2026-08-22-01, FR-2026-08-22-02, and FR-2026-09-02-04.
     def test_creates_one_revision_manifest_and_command_per_scenario(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -53,7 +53,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
             self.assertEqual(4, len(recorded_commands))
             revision_root = (
                 root
-                / "outputs/evaluations/folder-replacement-development/case/en-en/v1"
+                / "outputs/evaluations/dirdev/case/en-en/v1"
             )
             manifest = json.loads((revision_root / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual("case/en", manifest["source_folder"])
@@ -62,6 +62,24 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
             self.assertEqual(4, len(manifest["scenarios"]))
             self.assertTrue(all(result["exit_code"] == 0 for result in manifest["results"]))
             self.assertTrue(all(result["diagnostic_sidecars"] == [] for result in manifest["results"]))
+            self.assertEqual(
+                {
+                    ("character_mask", "mask"),
+                    ("identity", "identity"),
+                },
+                {
+                    (scenario["text_replacement"], scenario["text_replacement_short_name"])
+                    for scenario in manifest["scenarios"]
+                },
+            )
+            self.assertTrue(
+                all(
+                    Path(result["output_root"]).parts[-3:-1]
+                    in (("mask", "no_ocr"), ("identity", "no_ocr"))
+                    and Path(result["output_root"]).parts[-1] in ("psf", "pbl")
+                    for result in manifest["results"]
+                )
+            )
             for command in recorded_commands:
                 with self.subTest(command=command):
                     self.assertEqual(
@@ -113,7 +131,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                 )
 
             self.assertEqual(provider_count + 1, run_mock.call_count)
-            output_root = root / "outputs/evaluations/folder-replacement-development/case/en-en"
+            output_root = root / "outputs/evaluations/dirdev/case/en-en"
             self.assertTrue((output_root / "v1" / "manifest.json").is_file())
             self.assertTrue((output_root / "v2" / "manifest.json").is_file())
 

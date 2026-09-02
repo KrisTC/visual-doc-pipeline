@@ -6,6 +6,9 @@ from pipeline.ocr.models import OcrRequest, OcrResult
 from pipeline.ocr.provider import LocalContractTestSkip, OcrProvider
 
 
+SHORT_NAME = "no_ocr"
+
+
 def cache_identity() -> str:
     """Return the output-compatible implementation version for result caching."""
     return "no_ocr:v1"

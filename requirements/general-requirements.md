@@ -357,21 +357,8 @@ the command shall run their Cartesian product, producing one separately
 identifiable scenario for every combination.
 
 For an input selected as `SOURCE_FOLDER` and a target language `TARGET`, the
-command shall write outputs below
-`outputs/evaluations/folder-replacement-development/`, preserving the parent
-path of `SOURCE_FOLDER` relative to `sample-data/` and using a
-`SOURCE_LANGUAGE-TARGET` directory in place of the source-language leaf. It
-shall create one `vN` revision directory below that root, where `N` is the next
-positive integer not already allocated there. All scenario combinations for one
-invocation and one source/target-language root shall share that revision.
-Every generated scenario output shall identify its effective option values in
-its directory hierarchy or another immediately adjacent, human-readable
-artifact, so visual review can unambiguously associate each output with its
-replacement provider, OCR provider, layout mode, target language, and inferred
-source language. Each scenario shall be stored below its revision directory in
-a deterministic option hierarchy that identifies its text-replacement provider,
-OCR provider, and document-text-layout mode, followed by the source file's path
-relative to `SOURCE_FOLDER`. The revision directory shall contain a
+command shall write development-scenario outputs using the compact path
+contract defined by FR-2026-09-02-04. The revision directory shall contain a
 `manifest.json` file that records the complete effective invocation, every
 scenario combination, and an optional user comment. The command shall accept an
 optional `--comment` value and record it in that manifest without using it in a
@@ -1224,3 +1211,101 @@ The development scenario hierarchy and translated filenames can exceed the
 legacy Windows path limit. Early guidance lets a developer correct the host
 configuration before a processing run fails with an unhelpful file-not-found
 error.
+
+---
+
+## FR-2026-09-02-04
+
+| Property | Value |
+|----------|-------|
+| Title | Use compact development folder-replacement scenario paths |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following Windows path-length failure |
+| Date Added | 2026-09-02 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06, FR-2026-08-22-01, FR-2026-09-02-03 |
+
+### Description
+
+`scripts/development_folder_replacement.py` shall write outputs below
+`outputs/evaluations/dirdev/`, replacing the former
+`outputs/evaluations/folder-replacement-development/` root.
+
+It shall preserve the parent path of `SOURCE_FOLDER` relative to
+`sample-data/` and use a `SOURCE_LANGUAGE-TARGET` directory in place of the
+source-language leaf. It shall create one `vN` revision directory below that
+root, where `N` is the next positive integer not already allocated there. All
+scenario combinations for one invocation and one source/target-language root
+shall share that revision.
+
+Each scenario shall be stored beneath the revision directory in this
+deterministic hierarchy, followed by the source file's path relative to
+`SOURCE_FOLDER`:
+
+```text
+TEXT_REPLACEMENT_SHORT_NAME/OCR_SHORT_NAME/LAYOUT_ABBREVIATION/
+```
+
+Each OCR and text-replacement plugin shall explicitly declare a short name for
+development-scenario paths. The corresponding provider factory shall discover
+and expose a read-only mapping from its declared provider name to that short
+name. A short name shall be one Windows-safe directory component consisting
+only of lowercase ASCII letters, digits, `_`, and `-`; it shall not be a
+Windows reserved name. It shall be explicitly declared by the plugin, not
+derived automatically by truncation or acronym generation.
+
+Short names shall be unique, case-insensitively, within each provider kind.
+Discovery shall fail clearly before scenario processing when a plugin has a
+missing or invalid short name or when two plugins of the same kind declare the
+same short name. The initial aliases shall include:
+
+| Provider kind | Provider name | Short name |
+|---------------|---------------|------------|
+| Text replacement | `google_cloud_translate` | `gct` |
+| OCR | `paddleocr` | `ocr` |
+| OCR | `no_ocr` | `no_ocr` |
+
+The hierarchy shall contain these plugin-declared short names only; it shall
+not include option keys such as `text-replacement=`, `ocr=`, or
+`document-text-layout=`, nor a provider's full declared name. The
+document-text-layout directory abbreviations shall be:
+
+| Layout value | Directory abbreviation |
+|--------------|------------------------|
+| `preserve-source-formatting` | `psf` |
+| `preserve-basic-layout` | `pbl` |
+| `preserve-basic-layout-source-font` | `pblsf` |
+
+For example, a Google Cloud Translate, no-OCR, source-font basic-layout
+scenario with a `review` parent folder shall be written below:
+
+```text
+outputs/evaluations/dirdev/review/ja-en/v1/gct/no_ocr/pblsf/
+```
+
+The manifest shall continue to record the full effective provider and layout
+values, together with the selected short names, so a reviewer can identify
+every generated scenario without interpreting an abbreviation. Existing output
+tree mirroring, revision allocation, scenario isolation, and confidential
+sample handling remain unchanged.
+
+Automated tests shall use synthetic temporary sample-data and output trees.
+They shall verify the `dirdev` root, plugin-declared provider directory names,
+each layout abbreviation, deterministic hierarchy construction, preservation
+of full effective provider and layout values in the manifest, and absence of
+the former keyed directory names. Factory tests shall verify valid short-name
+discovery and errors for missing, invalid, and duplicate short names without
+creating a provider.
+
+### Rationale
+
+The former descriptive hierarchy repeatedly stored long option keys, provider
+names, and layout values. Plugin-declared, collision-checked short names avoid
+unsafe derived acronyms while reducing Windows path-length failures that can
+prevent generated Office files from being opened.
+
+### Notes
+
+This requirement supersedes the development-output hierarchy defined by
+FR-2026-08-22-01. It does not change the general-purpose folder-replacement
+command or its output paths.

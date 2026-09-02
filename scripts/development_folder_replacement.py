@@ -31,9 +31,14 @@ from scripts.folder_replacement import (
 )
 
 
-DEVELOPMENT_OUTPUT_ROOT = Path("outputs/evaluations/folder-replacement-development")
+DEVELOPMENT_OUTPUT_ROOT = Path("outputs/evaluations/dirdev")
 FOLDER_REPLACEMENT_SCRIPT = PROJECT_ROOT / "scripts" / "folder_replacement.py"
 LANGUAGE_TAG_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+DOCUMENT_TEXT_LAYOUT_SHORT_NAMES = {
+    "preserve-source-formatting": "psf",
+    "preserve-basic-layout": "pbl",
+    "preserve-basic-layout-source-font": "pblsf",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +48,8 @@ class Scenario:
     text_replacement: str
     ocr: str
     document_text_layout: str
+    text_replacement_short_name: str
+    ocr_short_name: str
 
     def manifest_data(self) -> dict[str, str]:
         """Return this scenario's stable manifest representation."""
@@ -50,6 +57,11 @@ class Scenario:
             "text_replacement": self.text_replacement,
             "ocr": self.ocr,
             "document_text_layout": self.document_text_layout,
+            "text_replacement_short_name": self.text_replacement_short_name,
+            "ocr_short_name": self.ocr_short_name,
+            "document_text_layout_short_name": DOCUMENT_TEXT_LAYOUT_SHORT_NAMES[
+                self.document_text_layout
+            ],
         }
 
 
@@ -196,8 +208,10 @@ def _parse_include_patterns(
 
 def _expand_scenarios(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> tuple[Scenario, ...]:
     """Expand option collections and all-values selectors into scenarios."""
-    text_replacement_names = TextReplacementProviderFactory.discover_default_plugins().provider_names
-    ocr_names = OcrProviderFactory.discover_default_plugins().provider_names
+    text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
+    ocr_factory = OcrProviderFactory.discover_default_plugins()
+    text_replacement_names = text_replacement_factory.provider_names
+    ocr_names = ocr_factory.provider_names
     replacement_values = _expand_values(
         arguments.text_replacement, text_replacement_names, "--text-replacement", parser
     )
@@ -209,7 +223,13 @@ def _expand_scenarios(arguments: argparse.Namespace, parser: argparse.ArgumentPa
         parser,
     )
     return tuple(
-        Scenario(text_replacement, ocr, layout)
+        Scenario(
+            text_replacement,
+            ocr,
+            layout,
+            text_replacement_factory.provider_short_names[text_replacement],
+            ocr_factory.provider_short_names[ocr],
+        )
         for text_replacement, ocr, layout in product(
             replacement_values, ocr_values, layout_values
         )
@@ -273,9 +293,9 @@ def _scenario_output_root(revision_root: Path, scenario: Scenario) -> Path:
     """Return the deterministic output root for one effective scenario."""
     return (
         revision_root
-        / f"text-replacement={scenario.text_replacement}"
-        / f"ocr={scenario.ocr}"
-        / f"document-text-layout={scenario.document_text_layout}"
+        / scenario.text_replacement_short_name
+        / scenario.ocr_short_name
+        / DOCUMENT_TEXT_LAYOUT_SHORT_NAMES[scenario.document_text_layout]
     )
 
 

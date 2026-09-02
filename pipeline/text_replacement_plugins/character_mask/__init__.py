@@ -5,6 +5,9 @@ from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.text_replacement_plugins._masking import mask_non_whitespace_characters
 
 
+SHORT_NAME = "mask"
+
+
 def cache_identity() -> str:
     """Return the output-compatible implementation version for result caching."""
     return "character_mask:v1"

@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from importlib import import_module
 from inspect import cleandoc
 from pkgutil import iter_modules
+import re
 from types import MappingProxyType, ModuleType
 from typing import cast
 
@@ -16,6 +17,12 @@ from pipeline.provider_cache import CachingOcrProvider, caching_is_enabled
 
 ProviderCreator = Callable[[], OcrProvider]
 PLUGIN_PACKAGE = "pipeline.ocr_plugins"
+SHORT_NAME_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$")
+WINDOWS_RESERVED_SHORT_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{number}" for number in range(1, 10)}
+    | {f"lpt{number}" for number in range(1, 10)}
+)
 
 
 class OcrProviderFactory:
@@ -26,8 +33,16 @@ class OcrProviderFactory:
         creators: Mapping[str, ProviderCreator] | None = None,
         descriptions: Mapping[str, str | None] | None = None,
         cache_identities: Mapping[str, Callable[[], str] | None] | None = None,
+        short_names: Mapping[str, str] | None = None,
     ) -> None:
         self._creators = dict(creators or {})
+        if short_names is None:
+            self._provider_short_names: Mapping[str, str] = MappingProxyType({})
+        else:
+            _validate_short_names(self._creators, short_names)
+            self._provider_short_names = MappingProxyType(
+                {name: short_names[name] for name in self._creators}
+            )
         self._cache_identities = {
             name: cache_identities.get(name) if cache_identities is not None else None
             for name in self._creators
@@ -47,6 +62,7 @@ class OcrProviderFactory:
         creators: dict[str, ProviderCreator] = {}
         descriptions: dict[str, str | None] = {}
         cache_identities: dict[str, Callable[[], str] | None] = {}
+        short_names: dict[str, str] = {}
         for module_info in iter_modules(package_paths, f"{PLUGIN_PACKAGE}."):
             if not module_info.ispkg:
                 continue
@@ -55,7 +71,8 @@ class OcrProviderFactory:
             creators[provider_name] = _provider_creator(plugin_module)
             descriptions[provider_name] = _description(plugin_module.__doc__)
             cache_identities[provider_name] = _cache_identity(plugin_module)
-        return cls(creators, descriptions, cache_identities)
+            short_names[provider_name] = _short_name(plugin_module)
+        return cls(creators, descriptions, cache_identities, short_names)
 
     def create(self, name: str) -> OcrProvider:
         """Create the provider stored under its package-derived ``name``."""
@@ -86,6 +103,11 @@ class OcrProviderFactory:
         """Return read-only descriptions keyed by package-derived provider name."""
         return self._provider_descriptions
 
+    @property
+    def provider_short_names(self) -> Mapping[str, str]:
+        """Return read-only development-scenario short names keyed by provider name."""
+        return self._provider_short_names
+
 
 def _package_paths(plugin_package: ModuleType) -> list[str]:
     package_paths = getattr(plugin_package, "__path__", None)
@@ -109,6 +131,46 @@ def _description(docstring: str | None) -> str | None:
     if docstring is None:
         return None
     return cleandoc(docstring) or None
+
+
+def _short_name(plugin_module: ModuleType) -> str:
+    """Read one required development-scenario directory name from a plugin."""
+    short_name = getattr(plugin_module, "SHORT_NAME", None)
+    if not isinstance(short_name, str):
+        message = f"OCR plugin package {plugin_module.__name__!r} has no SHORT_NAME."
+        raise RuntimeError(message)
+    return short_name
+
+
+def _validate_short_names(
+    creators: Mapping[str, ProviderCreator], short_names: Mapping[str, str]
+) -> None:
+    """Reject incomplete, unsafe, or colliding development-scenario names."""
+    missing_names = sorted(set(creators) - set(short_names))
+    if missing_names:
+        message = f"OCR plugins have no SHORT_NAME: {', '.join(missing_names)}."
+        raise RuntimeError(message)
+    invalid_names = sorted(
+        name
+        for name in creators
+        if not isinstance(short_names[name], str)
+        or not SHORT_NAME_PATTERN.fullmatch(short_names[name])
+        or short_names[name].casefold() in WINDOWS_RESERVED_SHORT_NAMES
+    )
+    if invalid_names:
+        message = f"OCR plugins have invalid SHORT_NAME values: {', '.join(invalid_names)}."
+        raise RuntimeError(message)
+    names_by_short_name: dict[str, list[str]] = {}
+    for name in creators:
+        names_by_short_name.setdefault(short_names[name].casefold(), []).append(name)
+    duplicate_names = sorted(
+        short_name
+        for short_name, names in names_by_short_name.items()
+        if len(names) > 1
+    )
+    if duplicate_names:
+        message = f"OCR plugins have duplicate SHORT_NAME values: {', '.join(duplicate_names)}."
+        raise RuntimeError(message)
 
 
 def _cache_identity(plugin_module: ModuleType) -> Callable[[], str] | None:

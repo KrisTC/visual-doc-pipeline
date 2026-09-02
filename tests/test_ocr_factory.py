@@ -11,10 +11,11 @@ from PIL import Image
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest
+from pipeline.ocr_plugins.no_ocr import NoOcrProvider
 
 
 class OcrProviderFactoryTests(unittest.TestCase):
-    # Verifies FR-2026-08-01-02, FR-2026-08-03-01, and FR-2026-08-04-02.
+    # Verifies FR-2026-08-01-02, FR-2026-08-03-01, FR-2026-08-04-02, and FR-2026-09-02-04.
     def test_discovers_provider_packages_by_their_directory_names(self) -> None:
         factory = OcrProviderFactory.discover_default_plugins()
 
@@ -26,7 +27,28 @@ class OcrProviderFactoryTests(unittest.TestCase):
             },
             dict(factory.provider_descriptions),
         )
+        self.assertEqual(
+            {"no_ocr": "no_ocr", "paddleocr": "ocr"},
+            dict(factory.provider_short_names),
+        )
         self.assertFalse(hasattr(factory.create("paddleocr"), "name"))
+
+    # Verifies FR-2026-09-02-04.
+    def test_rejects_missing_invalid_and_duplicate_short_names(self) -> None:
+        creators = {"first": NoOcrProvider, "second": NoOcrProvider}
+
+        with self.subTest("missing"):
+            with self.assertRaisesRegex(RuntimeError, "no SHORT_NAME: second"):
+                OcrProviderFactory(creators, short_names={"first": "first"})
+        with self.subTest("invalid"):
+            with self.assertRaisesRegex(RuntimeError, "invalid SHORT_NAME values: first"):
+                OcrProviderFactory(creators, short_names={"first": "not/safe", "second": "second"})
+        with self.subTest("reserved"):
+            with self.assertRaisesRegex(RuntimeError, "invalid SHORT_NAME values: first"):
+                OcrProviderFactory(creators, short_names={"first": "con", "second": "second"})
+        with self.subTest("duplicate"):
+            with self.assertRaisesRegex(RuntimeError, "duplicate SHORT_NAME values: same"):
+                OcrProviderFactory(creators, short_names={"first": "same", "second": "same"})
 
     # Verifies FR-2026-08-04-02.
     def test_no_ocr_returns_an_empty_result_without_accessing_the_image(self) -> None:

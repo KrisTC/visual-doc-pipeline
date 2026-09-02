@@ -4,6 +4,9 @@ from pipeline.text_replacement.models import TextReplacementRequest, TextReplace
 from pipeline.text_replacement.provider import TextReplacementProvider
 
 
+SHORT_NAME = "identity"
+
+
 def cache_identity() -> str:
     """Return the output-compatible implementation version for result caching."""
     return "identity:v1"
