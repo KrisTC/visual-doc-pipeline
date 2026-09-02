@@ -264,23 +264,23 @@ def replace_input_folder(
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
             else:
-                office_handler = {
-                    ".docx": replace_docx_file,
-                    ".pptx": replace_pptx_file,
-                    ".xlsx": replace_xlsx_file,
-                }[extension]
-                native_items, image_regions, retained_vectors = office_handler(
-                    source_path,
-                    temporary_destination,
-                    processing_ocr,
-                    processing_replacement,
-                    source_language,
-                    target_language,
-                    typeface,
-                    work_completed,
-                    document_text_layout=document_text_layout,
-                    failure_context=failure_context,
-                )
+                if extension == ".docx":
+                    native_items, image_regions, retained_vectors = replace_docx_file(
+                        source_path, temporary_destination, processing_ocr, processing_replacement,
+                        source_language, target_language, typeface, work_completed,
+                        document_text_layout=document_text_layout, failure_context=failure_context,
+                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                    )
+                else:
+                    office_handler = {
+                        ".pptx": replace_pptx_file,
+                        ".xlsx": replace_xlsx_file,
+                    }[extension]
+                    native_items, image_regions, retained_vectors = office_handler(
+                        source_path, temporary_destination, processing_ocr, processing_replacement,
+                        source_language, target_language, typeface, work_completed,
+                        document_text_layout=document_text_layout, failure_context=failure_context,
+                    )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
                 result.retained_vector_graphics += retained_vectors

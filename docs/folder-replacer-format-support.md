@@ -72,6 +72,13 @@ log. This is a manual compatibility check; the automated suite separately
 validates the OPC relationships, content types, font deobfuscation, and font
 parsing without relying on a locally installed Word application.
 
+For a change to Word caption cross-references, also open the synthetic output
+that contains the caption `SEQ` field and its hyperlink-wrapped `REF` field.
+In Word, open **References → Cross-reference**, select the caption reference
+type, and confirm the caption appears in the available list. Insert a new
+linked reference to it, update fields, and confirm both existing and newly
+inserted references remain linked without a repair prompt.
+
 ## Vector graphics
 
 Vector graphics retain vector content whenever possible. The handlers update supported editable text records directly and send only an already-contained raster payload through the shared bitmap path.

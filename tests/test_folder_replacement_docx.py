@@ -106,6 +106,471 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
 
             self.assertEqual({"word/media/image1.png": (16, 32, 48)}, _docx_ocr_backgrounds(document))
 
+    # Verifies FR-2026-09-02-05.
+    def test_flowing_word_text_uses_maximal_emphasis_translation_runs(self) -> None:
+        class _MappedReplacementProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+                self.replacements = {
+                    "abb": "Alpha", "c": "Beta", "d": "γ", "e": "123", "f": "Delta",
+                    "g": "Hello,", "h": "World", "i": "漢", "j": "字",
+                    "k ": "Left", "l": "Right", "keep": "Keep",
+                }
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                if request.is_filename:
+                    return TextReplacementResult(request.text, 1.0)
+                return TextReplacementResult(self.replacements[request.text], 1.0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.docx"
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:jc w:val="center"/></w:pPr>
+      <w:r><w:rPr><w:i/></w:rPr><w:t>a</w:t></w:r>
+      <w:r><w:rPr><w:b/></w:rPr><w:t>bb</w:t></w:r>
+      <w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>c</w:t></w:r>
+      <w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>d</w:t></w:r>
+      <w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>e</w:t></w:r>
+      <w:r><w:rPr><w:strike/></w:rPr><w:t>f</w:t></w:r>
+    </w:p>
+    <w:p><w:r><w:t>g</w:t></w:r><w:r><w:rPr><w:color w:val="00FF00"/></w:rPr><w:t>h</w:t></w:r></w:p>
+    <w:p><w:r><w:t>i</w:t></w:r><w:r><w:rPr><w:color w:val="0000FF"/></w:rPr><w:t>j</w:t></w:r></w:p>
+    <w:p><w:r><w:t xml:space="preserve">k </w:t></w:r><w:r><w:rPr><w:color w:val="808080"/></w:rPr><w:t>l</w:t></w:r></w:p>
+    <w:p><w:hyperlink w:anchor="bookmark"><w:r><w:t>keep</w:t></w:r></w:hyperlink></w:p>
+  </w:body>
+</w:document>''',
+                )
+            provider = _MappedReplacementProvider()
+
+            self._run(input_root, output_root, _EmptyOcrProvider(), provider)
+
+            with ZipFile(output_root / "document.docx") as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+                data = archive.read("word/document.xml")
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = document.findall(f".//{namespace}body/{namespace}p")
+            self.assertEqual(["Alpha ", "Beta", "γ", "123 ", "Delta"], [
+                "".join(text.text or "" for text in run.findall(f"{namespace}t"))
+                for run in paragraphs[0].findall(f"{namespace}r")
+            ])
+            self.assertIsNotNone(paragraphs[0].find(f"{namespace}pPr/{namespace}jc"))
+            first_properties = paragraphs[0].find(f"{namespace}r/{namespace}rPr")
+            self.assertIsNotNone(first_properties)
+            assert first_properties is not None
+            self.assertIsNotNone(first_properties.find(f"{namespace}b"))
+            colour = paragraphs[0].findall(f"{namespace}r")[1].find(f"{namespace}rPr/{namespace}color")
+            superscript = paragraphs[0].findall(f"{namespace}r")[2].find(f"{namespace}rPr/{namespace}vertAlign")
+            subscript = paragraphs[0].findall(f"{namespace}r")[3].find(f"{namespace}rPr/{namespace}vertAlign")
+            self.assertIsNotNone(colour)
+            self.assertIsNotNone(superscript)
+            self.assertIsNotNone(subscript)
+            assert colour is not None and superscript is not None and subscript is not None
+            self.assertEqual("FF0000", colour.get(f"{namespace}val"))
+            self.assertEqual("superscript", superscript.get(f"{namespace}val"))
+            self.assertEqual("subscript", subscript.get(f"{namespace}val"))
+            self.assertIsNotNone(paragraphs[0].findall(f"{namespace}r")[4].find(f"{namespace}rPr/{namespace}strike"))
+            self.assertEqual(["Hello,", "World"], [item.text for item in paragraphs[1].iter(f"{namespace}t")])
+            self.assertEqual(["漢", "字"], [item.text for item in paragraphs[2].iter(f"{namespace}t")])
+            self.assertEqual(["Left", "Right"], [item.text for item in paragraphs[3].iter(f"{namespace}t")])
+            self.assertEqual(["Keep"], [item.text for item in paragraphs[4].iter(f"{namespace}t")])
+            self.assertNotIn(b"Noto Sans", data)
+            self.assertFalse((output_root / "document.docx.diagnostics.json").exists())
+            self.assertEqual(
+                ["abb", "c", "d", "e", "f", "g", "h", "i", "j", "k ", "l", "keep"],
+                [request.text for request in provider.requests if not request.is_filename],
+            )
+
+    # Verifies FR-2026-09-02-05 and FR-2026-09-02-06.
+    def test_flowing_word_structure_fallback_translates_and_reports_debug_details(self) -> None:
+        class _PrefixReplacementProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                return TextReplacementResult(request.text if request.is_filename else f"translated-{request.text}", 1.0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            with ZipFile(input_root / "document.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "word/document.xml",
+                    b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>plain</w:t></w:r></w:p>
+    <w:p><w:bookmarkStart w:id="0" w:name="bookmark"/><w:r><w:t>bookmark</w:t></w:r></w:p>
+    <w:p><w:hyperlink w:anchor="bookmark"><w:r><w:t>hyperlink</w:t></w:r></w:hyperlink></w:p>
+    <w:p><w:r><w:t>marker</w:t><w:lastRenderedPageBreak/></w:r></w:p>
+  </w:body>
+</w:document>''',
+                )
+            provider = _PrefixReplacementProvider()
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), provider, diagnostics_enabled=True
+            )
+
+            with ZipFile(output_root / "document.docx") as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            self.assertEqual(
+                ["translated-plain", "translated-bookmark", "translated-hyperlink", "translated-marker"],
+                [item.text for item in document.iter(f"{namespace}t")],
+            )
+            self.assertEqual(1, len(result.diagnostic_sidecars))
+            diagnostic = json.loads((output_root / "document.docx.diagnostics.json").read_text("utf-8"))
+            entries = diagnostic["entries"]
+            self.assertEqual(3, len(entries))
+            self.assertEqual(
+                ["docx_paragraph_child_bookmarkStart"], entries[0]["structure_reasons"]
+            )
+            self.assertEqual(
+                ["docx_paragraph_child_hyperlink"], entries[1]["structure_reasons"]
+            )
+            self.assertEqual(
+                ["docx_run_child_lastRenderedPageBreak"], entries[2]["structure_reasons"]
+            )
+            self.assertEqual([1, 2, 3], [entry["location"]["paragraph_index"] for entry in entries])
+            self.assertTrue(all(entry["kind"] == "fallback" for entry in entries))
+            self.assertTrue(all(
+                entry["reason_code"] == "docx_flowing_paragraph_structure_fallback"
+                for entry in entries
+            ))
+            self.assertEqual(
+                ["plain", "bookmark", "hyperlink", "marker"],
+                [request.text for request in provider.requests if not request.is_filename],
+            )
+
+    # Verifies FR-2026-09-02-07.
+    def test_word_caption_cross_references_remain_live_and_share_caption_translation(self) -> None:
+        class _MappedReplacementProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+                self.replacements = {
+                    "label 1": "Figure 1",
+                    "label ": "Figure ",
+                    "1": "1",
+                    "after reference": "This is a description.",
+                    " after reference": "This is a description.",
+                    "cached missing": "Missing result",
+                    "cached malformed": "Malformed result",
+                    "cached ambiguous": "Ambiguous result",
+                    "unrelated": "Unused",
+                }
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                if request.is_filename:
+                    return TextReplacementResult(request.text, 1.0)
+                return TextReplacementResult(self.replacements[request.text], 1.0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.docx"
+            self._write_complete_docx(source)
+            with ZipFile(source) as archive:
+                parts = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+            parts["word/document.xml"] = b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:bookmarkStart w:id="1" w:name="caption_figure"/>
+    <w:p>
+      <w:r><w:t>label </w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> SEQ Figure \\* ARABIC </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>1</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      <w:bookmarkEnd w:id="1"/>
+      <w:r><w:t xml:space="preserve"> after reference</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:hyperlink r:id="rIdCrossReference">
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+        <w:r><w:instrText xml:space="preserve"> REF caption_figure \\h </w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+        <w:r><w:t>label 1</w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      </w:hyperlink>
+      <w:r><w:t>after reference</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> REF caption_figure \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:r><w:t>label 1</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+      <w:r><w:t>after reference</w:t></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> REF missing_caption \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached missing</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> REF malformed_caption \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached malformed</w:t></w:r>
+    </w:p>
+    <w:p><w:bookmarkStart w:id="2" w:name="ambiguous_caption"/><w:r><w:t>unrelated</w:t></w:r><w:bookmarkEnd w:id="2"/></w:p>
+    <w:p><w:bookmarkStart w:id="3" w:name="ambiguous_caption"/><w:r><w:t>unrelated</w:t></w:r><w:bookmarkEnd w:id="3"/></w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> REF ambiguous_caption \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>cached ambiguous</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:p>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> PAGEREF caption_figure \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>2</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>'''
+            parts["word/_rels/document.xml.rels"] = b'''<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdCrossReference" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.invalid/caption" TargetMode="External"/>
+</Relationships>'''
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                for name, contents in parts.items():
+                    archive.writestr(name, contents)
+            provider = _MappedReplacementProvider()
+
+            self._run(input_root, output_root, _EmptyOcrProvider(), provider, diagnostics_enabled=True)
+
+            output = output_root / "document.docx"
+            Document(str(output))
+            with ZipFile(output) as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+                relationships = archive.read("word/_rels/document.xml.rels")
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            paragraphs = document.findall(f".//{namespace}body/{namespace}p")
+            self.assertEqual(
+                "Figure 1 This is a description.",
+                "".join(item.text or "" for item in paragraphs[0].iter(f"{namespace}t")),
+            )
+            self.assertEqual(["Figure ", "1", " ", "This is a description."], [
+                item.text for item in paragraphs[0].iter(f"{namespace}t")
+            ])
+            self.assertEqual(
+                "Figure 1 This is a description.",
+                "".join(item.text or "" for item in paragraphs[1].iter(f"{namespace}t")),
+            )
+            self.assertEqual(
+                "Figure 1 This is a description.",
+                "".join(item.text or "" for item in paragraphs[2].iter(f"{namespace}t")),
+            )
+            self.assertEqual("Missing result", next(paragraphs[3].iter(f"{namespace}t")).text)
+            self.assertEqual("Malformed result", next(paragraphs[4].iter(f"{namespace}t")).text)
+            self.assertEqual("Ambiguous result", next(paragraphs[7].iter(f"{namespace}t")).text)
+            self.assertEqual("2", next(paragraphs[8].iter(f"{namespace}t")).text)
+            self.assertEqual(3, len(document.findall(f".//{namespace}bookmarkStart")))
+            self.assertEqual(3, len(document.findall(f".//{namespace}bookmarkEnd")))
+            self.assertEqual(20, len(document.findall(f".//{namespace}fldChar")))
+            self.assertEqual(7, len(document.findall(f".//{namespace}instrText")))
+            self.assertEqual(1, len(document.findall(f".//{namespace}hyperlink")))
+            self.assertIn(b'rIdCrossReference', relationships)
+            self.assertEqual(
+                1,
+                [request.text for request in provider.requests if not request.is_filename].count("label 1"),
+            )
+            diagnostic = json.loads((output_root / "document.docx.diagnostics.json").read_text("utf-8"))
+            cross_reference_entries = [
+                entry
+                for entry in diagnostic["entries"]
+                if entry["container_kind"] == "docx_cross_reference"
+            ]
+            self.assertEqual(
+                [
+                    "docx_cross_reference_bookmark_missing",
+                    "docx_cross_reference_unbalanced_field",
+                    "docx_cross_reference_bookmark_ambiguous",
+                ],
+                [entry["reason_code"] for entry in cross_reference_entries],
+            )
+            self.assertEqual(["REF", "REF", "REF"], [
+                entry["field_kind"] for entry in cross_reference_entries
+            ])
+            self.assertEqual(
+                ["missing_caption", "malformed_caption", "ambiguous_caption"],
+                [entry["bookmark_identity"] for entry in cross_reference_entries],
+            )
+            self.assertEqual(
+                ["cached missing", "cached malformed", "cached ambiguous"],
+                [entry["field_result_text"] for entry in cross_reference_entries],
+            )
+
+    # Verifies FR-2026-09-02-08.
+    def test_word_field_boundaries_preserve_system_fields_and_safe_joiners(self) -> None:
+        class _RecordingIdentityProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                return TextReplacementResult(request.text, 1.0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.docx"
+            self._write_complete_docx(source)
+            with ZipFile(source) as archive:
+                parts = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+            page_fields = b'''<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>7</w:t></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r>'''
+            page_count_field = b'''<w:r><w:fldChar w:fldCharType="begin"/></w:r>
+<w:r><w:instrText xml:space="preserve"> NUMPAGES </w:instrText></w:r>
+<w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>22</w:t></w:r>
+<w:r><w:fldChar w:fldCharType="end"/></w:r>'''
+            parts["word/document.xml"] = b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t xml:space="preserve">P. </w:t></w:r>''' + page_fields + b'''<w:r><w:t>/</w:t></w:r>''' + page_count_field + b'''</w:p>
+    <w:p>''' + page_fields + b'''<w:r><w:t>after</w:t></w:r></w:p>
+    <w:p><w:r><w:t>left</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> DOCVARIABLE sample </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>fallback</w:t></w:r>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:t>right</w:t></w:r></w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>'''
+            parts["word/footer1.xml"] = b'''<?xml version="1.0"?>
+<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:p><w:r><w:t xml:space="preserve">P. </w:t></w:r>''' + page_fields + b'''<w:r><w:t>/</w:t></w:r>''' + page_count_field + b'''</w:p>
+</w:ftr>'''
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                for name, contents in parts.items():
+                    archive.writestr(name, contents)
+            provider = _RecordingIdentityProvider()
+
+            self._run(input_root, output_root, _EmptyOcrProvider(), provider)
+
+            output = output_root / "document.docx"
+            Document(str(output))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            with ZipFile(output) as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+                footer = ElementTree.fromstring(archive.read("word/footer1.xml"))
+            paragraphs = document.findall(f".//{namespace}body/{namespace}p")
+            self.assertEqual(["P. ", "7", "/", "22"], [
+                item.text for item in paragraphs[0].iter(f"{namespace}t")
+            ])
+            self.assertEqual(["7", " ", "after"], [
+                item.text for item in paragraphs[1].iter(f"{namespace}t")
+            ])
+            self.assertEqual(["P. ", "7", "/", "22"], [
+                item.text for item in footer.iter(f"{namespace}t")
+            ])
+            self.assertEqual(["PAGE", "NUMPAGES"], [
+                (item.text or "").strip() for item in footer.iter(f"{namespace}instrText")
+            ])
+            requested = [request.text for request in provider.requests if not request.is_filename]
+            self.assertNotIn("7", requested)
+            self.assertNotIn("22", requested)
+            self.assertNotIn("leftright", requested)
+            self.assertTrue({"left", "fallback", "right"}.issubset(requested))
+
+    # Verifies FR-2026-09-02-09.
+    def test_word_toc_result_retains_tabs_and_page_fields_without_generated_spaces(self) -> None:
+        class _MappedReplacementProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                replacements = {"entry one": "Entry One", "entry two": "Entry Two"}
+                return TextReplacementResult(
+                    request.text if request.is_filename else replacements[request.text], 1.0
+                )
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.docx"
+            self._write_complete_docx(source)
+            with ZipFile(source) as archive:
+                parts = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+            parts["word/document.xml"] = b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr>
+      <w:r><w:fldChar w:fldCharType="begin"/></w:r>
+      <w:r><w:instrText xml:space="preserve"> TOC \\h </w:instrText></w:r>
+      <w:r><w:fldChar w:fldCharType="separate"/></w:r>
+      <w:hyperlink w:anchor="toc_one"><w:r><w:t>entry one</w:t></w:r><w:r><w:tab/></w:r>
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGEREF toc_one \\h </w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>5</w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>
+    </w:p>
+    <w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="9000"/></w:tabs></w:pPr>
+      <w:hyperlink w:anchor="toc_two"><w:r><w:t>entry two</w:t></w:r><w:r><w:tab/></w:r>
+        <w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGEREF toc_two \\h </w:instrText></w:r>
+        <w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>8</w:t></w:r>
+        <w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink>
+      <w:r><w:fldChar w:fldCharType="end"/></w:r>
+    </w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>'''
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                for name, contents in parts.items():
+                    archive.writestr(name, contents)
+            provider = _MappedReplacementProvider()
+
+            self._run(input_root, output_root, _EmptyOcrProvider(), provider)
+
+            output = output_root / "document.docx"
+            Document(str(output))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            with ZipFile(output) as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+            paragraphs = document.findall(f".//{namespace}body/{namespace}p")
+            self.assertEqual(["Entry One", "5"], [
+                item.text for item in paragraphs[0].iter(f"{namespace}t")
+            ])
+            self.assertEqual(["Entry Two", "8"], [
+                item.text for item in paragraphs[1].iter(f"{namespace}t")
+            ])
+            self.assertEqual(4, len(document.findall(f".//{namespace}tab")))
+            self.assertEqual(["dot", "dot"], [
+                item.get(f"{namespace}leader")
+                for item in document.findall(f".//{namespace}pPr/{namespace}tabs/{namespace}tab")
+            ])
+            self.assertEqual(2, len(document.findall(f".//{namespace}hyperlink")))
+            self.assertEqual(["TOC \\h", "PAGEREF toc_one \\h", "PAGEREF toc_two \\h"], [
+                (item.text or "").strip() for item in document.iter(f"{namespace}instrText")
+            ])
+            requested = [request.text for request in provider.requests if not request.is_filename]
+            self.assertEqual(["entry one", "entry two"], requested)
+
     # Verifies FR-2026-08-04-07 and FR-2026-08-22-03.
     def test_docx_basic_layout_fits_drawing_text_and_embeds_conformant_fonts(self) -> None:
         with TemporaryDirectory() as temporary_directory:
