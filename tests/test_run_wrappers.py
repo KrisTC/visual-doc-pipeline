@@ -18,6 +18,33 @@ PROJECT_ROOT = Path(__file__).parents[1]
 class RunPowerShellWrapperTests(unittest.TestCase):
     """Verify the PowerShell wrapper with a synthetic uv executable."""
 
+    # Verifies FR-2026-09-02-03.
+    @unittest.skipUnless(os.name == "nt", "PowerShell wrapper requires Windows.")
+    def test_warns_only_when_windows_long_paths_are_not_enabled(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            wrapper = _copy_root_script(root, "run.ps1")
+            environment = _wrapper_environment(root / "unused-bin", root / "unused.txt")
+
+            for registry_value, expected_warning in (
+                ("1", False),
+                ("0", True),
+                ("unreadable", True),
+            ):
+                with self.subTest(registry_value=registry_value):
+                    completed_process = _run_power_shell_with_long_paths_value(
+                        wrapper, environment, registry_value
+                    )
+
+                    self.assertEqual(0, completed_process.returncode, completed_process.stderr)
+                    self.assertEqual(
+                        expected_warning,
+                        "Windows long paths are disabled or could not be verified"
+                        in completed_process.stderr,
+                    )
+                    if expected_warning:
+                        self.assertIn("New-ItemProperty -Path", completed_process.stderr)
+
     # Verifies FR-2026-08-24-03.
     @unittest.skipUnless(os.name == "nt", "PowerShell wrapper requires Windows.")
     def test_uses_local_or_explicit_dotenv_file(self) -> None:
@@ -202,6 +229,31 @@ def _run_power_shell(wrapper: Path, environment: dict[str, str], *arguments: str
     )
     if completed_process.returncode != 0:
         raise AssertionError(completed_process.stderr)
+
+
+def _run_power_shell_with_long_paths_value(
+    wrapper: Path, environment: dict[str, str], registry_value: str
+) -> subprocess.CompletedProcess[str]:
+    """Run the wrapper with synthetic registry and uv commands."""
+    wrapper_path = str(wrapper).replace("'", "''")
+    script = f"""
+function Get-ItemPropertyValue {{
+    if ($env:RUN_WRAPPER_LONG_PATHS_VALUE -eq 'unreadable') {{
+        throw 'Synthetic registry read failure.'
+    }}
+    return [int]$env:RUN_WRAPPER_LONG_PATHS_VALUE
+}}
+function uv {{ exit 0 }}
+& '{wrapper_path}' -c pass
+exit $LASTEXITCODE
+"""
+    return subprocess.run(
+        ["pwsh", "-NoProfile", "-Command", script],
+        check=False,
+        capture_output=True,
+        env={**environment, "RUN_WRAPPER_LONG_PATHS_VALUE": registry_value},
+        text=True,
+    )
 
 
 def _run_bash(wrapper: Path, environment: dict[str, str], *arguments: str) -> None:

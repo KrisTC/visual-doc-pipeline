@@ -1176,3 +1176,51 @@ bar closure without requiring a network download or model initialization.
 Font-pack downloads and first-time PaddleOCR model initialization can take long
 enough that the explicit local setup command should show which bootstrap step
 is active.
+
+---
+
+## FR-2026-09-02-03
+
+| Property | Value |
+|----------|-------|
+| Title | Warn when Windows long paths are disabled |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following folder-replacement path-length failure |
+| Date Added | 2026-09-02 |
+| Related Requirements | TR-2026-08-01-01, FR-2026-08-22-01 |
+
+### Description
+
+On Windows, `run.ps1` shall read `LongPathsEnabled` from
+`HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem` before it invokes `uv`.
+When the value is not `1`, or the value cannot be read, it shall write a
+concise warning to standard error and continue with the requested Python
+command.
+
+The warning shall state that Windows long paths are disabled or could not be
+verified, explain that deeply nested output or translated filenames may fail,
+and instruct the user to run the following command separately from an elevated
+PowerShell session:
+
+```powershell
+New-ItemProperty `
+  -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+  -Name LongPathsEnabled `
+  -Value 1 `
+  -PropertyType DWORD `
+  -Force
+```
+
+The wrapper shall not attempt elevation, modify the registry, or block an
+otherwise valid invocation. When the value is `1`, it shall not emit a warning.
+
+Automated tests shall verify the enabled, disabled, and unreadable-registry
+outcomes without accessing the real registry or invoking `uv`.
+
+### Rationale
+
+The development scenario hierarchy and translated filenames can exceed the
+legacy Windows path limit. Early guidance lets a developer correct the host
+configuration before a processing run fails with an unhelpful file-not-found
+error.

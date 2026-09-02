@@ -28,6 +28,23 @@ function Set-ManagedDotenvPath {
     }
 }
 
+function Test-WindowsLongPathsEnabled {
+    try {
+        return (Get-ItemPropertyValue `
+            -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name LongPathsEnabled `
+            -ErrorAction Stop) -eq 1
+    } catch {
+        return $false
+    }
+}
+
+if (-not (Test-WindowsLongPathsEnabled)) {
+    [Console]::Error.WriteLine('Warning: Windows long paths are disabled or could not be verified. Deeply nested output paths or translated filenames may fail.')
+    [Console]::Error.WriteLine('In an elevated PowerShell session, run:')
+    [Console]::Error.WriteLine("New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' -Name LongPathsEnabled -Value 1 -PropertyType DWORD -Force")
+}
+
 $remainingArguments = [System.Collections.Generic.List[string]]::new()
 foreach ($argument in $args) {
     $remainingArguments.Add([string]$argument)
