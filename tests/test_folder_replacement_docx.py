@@ -726,6 +726,61 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
             with self.assertRaisesRegex(ValueError, "not in CT_Settings order"):
                 _validate_docx_embedded_fonts(misplaced_setting_parts)
 
+    # Verifies FR-2026-08-22-11.
+    def test_docx_drawing_text_resolves_default_paragraph_style_font_size(self) -> None:
+        def text_box_font_sizes(path: Path) -> list[int]:
+            with ZipFile(path) as archive:
+                document = ElementTree.fromstring(archive.read("word/document.xml"))
+            namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+            return [
+                int(size.get(f"{namespace}val", "0"))
+                for size in document.findall(
+                    f".//{namespace}txbxContent//{namespace}rPr/{namespace}sz"
+                )
+            ]
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            short_input = root / "short-input"
+            short_output = root / "short-output"
+            short_input.mkdir()
+            short_source = short_input / "document.docx"
+            self._write_complete_docx(short_source)
+            with ZipFile(short_source) as archive:
+                entries = [
+                    (entry, archive.read(entry.filename)) for entry in archive.infolist()
+                ]
+            widened_entries = [
+                (
+                    entry,
+                    data.replace(
+                        b'cx="914400" cy="457200"', b'cx="5486400" cy="5486400"'
+                    ).replace(b'<w:sz w:val="48"/>', b'')
+                    if entry.filename == "word/document.xml" else data,
+                )
+                for entry, data in entries
+            ]
+            with ZipFile(short_source, "w", ZIP_DEFLATED) as archive:
+                for entry, data in widened_entries:
+                    archive.writestr(entry, data)
+                archive.writestr(
+                    "word/styles.xml",
+                    b'''<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal">
+    <w:rPr><w:sz w:val="21"/></w:rPr>
+  </w:style>
+</w:styles>''',
+                )
+            self._run(
+                short_input, short_output, _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="Short"),
+                document_text_layout="preserve-basic-layout-source-font",
+            )
+            self.assertEqual(
+                [21, 21, 21], text_box_font_sizes(short_output / "document.docx")
+            )
+
     # Verifies FR-2026-08-28-03.
     def test_word_failure_records_safe_native_text_context_and_continues(self) -> None:
         with TemporaryDirectory() as temporary_directory:

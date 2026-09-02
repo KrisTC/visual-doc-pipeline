@@ -175,7 +175,7 @@ glyphs fall back without corrupting or expanding the existing font parts.
 
 | Property | Value |
 |----------|-------|
-| Title | Resolve DOCX theme fonts for source-font fitting |
+| Title | Resolve DOCX inherited typography for fitted layout |
 | Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
@@ -184,12 +184,20 @@ glyphs fall back without corrupting or expanding the existing font parts.
 
 ### Description
 
-For eligible DOCX DrawingML text containers processed in
-`preserve-basic-layout-source-font` mode, the DOCX adapter shall resolve
-WordprocessingML run-font settings through direct run properties, applicable
+For eligible DOCX DrawingML text containers processed in a fitted
+document-text layout mode, the DOCX adapter shall resolve WordprocessingML
+run-font settings and font size through direct run properties, applicable
 character and paragraph styles, document defaults, and the document theme
-before calling the common source-font resolver. It shall preserve the original
-WordprocessingML references when writing source-font output.
+before fitting. It shall preserve the original WordprocessingML references
+when writing source-font output.
+
+When a text-box paragraph has no explicit `w:pStyle`, the adapter shall apply
+the default paragraph style declared by `w:style/@w:default="1"` in the
+document's `word/styles.xml`, including its `w:basedOn` chain. The default
+paragraph style's `w:sz` shall supply the effective source size when no later
+paragraph, character, or direct-run property overrides it. This is the
+template default used by Word; the adapter shall not substitute its generic
+18-point fallback while that value is available.
 
 The adapter shall resolve `w:asciiTheme`, `w:hAnsiTheme`, `w:eastAsiaTheme`,
 and `w:cstheme` font references to the reachable Word theme's DrawingML
@@ -218,9 +226,10 @@ formatting retained in output.
 This requirement does not add fitting for flowing Word paragraphs or alter
 their existing source-formatting fallback. Embedded DOCX source-font recovery
 remains FR-2026-08-22-05. Automated tests shall use synthetic DOCX packages
-with document defaults, styles, and relationship-reachable themes; they shall
-verify direct overrides, each theme font attribute, script segmentation,
-fallbacks, and unchanged serialized source references.
+with document defaults, a default paragraph style, styles, and
+relationship-reachable themes; they shall verify direct overrides, default
+paragraph-style size inheritance, each theme font attribute, script
+segmentation, fallbacks, and unchanged serialized source references.
 
 ---
 

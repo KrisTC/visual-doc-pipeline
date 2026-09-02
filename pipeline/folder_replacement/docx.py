@@ -954,11 +954,10 @@ def _run(
 ) -> BoundedTextRun:
     properties = element.find("w:rPr", _NS)
     fonts = None if properties is None else properties.find("w:rFonts", _NS)
-    size = None if properties is None else properties.find("w:sz", _NS)
     text = "".join(text.text or "" for text in element.iter(_tag(_W, "t")))
     references = font_resolver.references_for(element, paragraph, text)
     family = next((item.original_family for item in references if item.script == "latin"), None)
-    size_points = None if size is None else float(size.get(_tag(_W, "val"), "36")) / 2
+    size_points = font_resolver.font_size_for(element, paragraph)
     return BoundedTextRun(text, family, _classification(family), size_points,
         properties is not None and properties.find("w:b", _NS) is not None,
         properties is not None and properties.find("w:i", _NS) is not None,
@@ -1070,6 +1069,9 @@ def _word_on_off(element: ElementTree.Element | None) -> bool:
 class _DocxFontResolver:
     defaults: tuple[SourceTypefaceReference, ...]
     styles: dict[str, tuple[str | None, tuple[SourceTypefaceReference, ...]]]
+    default_paragraph_style: str | None
+    default_font_size_points: float | None
+    style_font_sizes: dict[str, tuple[str | None, float | None]]
     theme: PptxThemeFonts | None
 
     @classmethod
@@ -1077,9 +1079,13 @@ class _DocxFontResolver:
         styles_root = _xml(parts.get("word/styles.xml"))
         defaults: tuple[SourceTypefaceReference, ...] = ()
         styles: dict[str, tuple[str | None, tuple[SourceTypefaceReference, ...]]] = {}
+        default_paragraph_style = None
+        default_font_size_points = None
+        style_font_sizes: dict[str, tuple[str | None, float | None]] = {}
         if styles_root is not None:
             default_properties = styles_root.find("w:docDefaults/w:rPrDefault/w:rPr", _NS)
             defaults = _word_source_typefaces(default_properties, None, "")
+            default_font_size_points = _word_font_size_points(default_properties)
             for style in styles_root.findall("w:style", _NS):
                 style_id = style.get(_tag(_W, "styleId"))
                 if not style_id:
@@ -1088,8 +1094,17 @@ class _DocxFontResolver:
                 parent = None if based_on is None else based_on.get(_tag(_W, "val"))
                 properties = style.find("w:rPr", _NS)
                 styles[style_id] = (parent, _word_source_typefaces(properties, None, ""))
+                style_font_sizes[style_id] = (parent, _word_font_size_points(properties))
+                if (
+                    style.get(_tag(_W, "type")) == "paragraph"
+                    and style.get(_tag(_W, "default"), "false").casefold() in {"1", "true", "on"}
+                ):
+                    default_paragraph_style = style_id
         theme = _docx_theme(parts)
-        return cls(defaults, styles, theme)
+        return cls(
+            defaults, styles, default_paragraph_style, default_font_size_points,
+            style_font_sizes, theme,
+        )
 
     def references_for(
         self, run: ElementTree.Element, paragraph: ElementTree.Element, text: str
@@ -1097,8 +1112,19 @@ class _DocxFontResolver:
         references = self.defaults
         paragraph_properties = paragraph.find("w:pPr", _NS)
         paragraph_style = None if paragraph_properties is None else paragraph_properties.find("w:pStyle", _NS)
-        if paragraph_style is not None:
-            references = _merge_word_typefaces(references, self._style_references(paragraph_style.get(_tag(_W, "val"))))
+        paragraph_style_id = (
+            paragraph_style.get(_tag(_W, "val"))
+            if paragraph_style is not None
+            else self.default_paragraph_style
+        )
+        if paragraph_style_id is not None:
+            references = _merge_word_typefaces(
+                references, self._style_references(paragraph_style_id)
+            )
+        if paragraph_properties is not None:
+            references = _merge_word_typefaces(
+                references, _word_source_typefaces(paragraph_properties.find("w:rPr", _NS), None, text)
+            )
         run_properties = run.find("w:rPr", _NS)
         run_style = None if run_properties is None else run_properties.find("w:rStyle", _NS)
         if run_style is not None:
@@ -1106,6 +1132,26 @@ class _DocxFontResolver:
         return _resolve_word_theme_typefaces(
             _merge_word_typefaces(references, _word_source_typefaces(run_properties, None, text)), self.theme, text
         )
+
+    def font_size_for(
+        self, run: ElementTree.Element, paragraph: ElementTree.Element
+    ) -> float | None:
+        size = self.default_font_size_points
+        paragraph_properties = paragraph.find("w:pPr", _NS)
+        paragraph_style = None if paragraph_properties is None else paragraph_properties.find("w:pStyle", _NS)
+        paragraph_style_id = (
+            paragraph_style.get(_tag(_W, "val"))
+            if paragraph_style is not None
+            else self.default_paragraph_style
+        )
+        size = self._style_font_size(paragraph_style_id, size)
+        if paragraph_properties is not None:
+            size = _word_font_size_points(paragraph_properties.find("w:rPr", _NS)) or size
+        run_properties = run.find("w:rPr", _NS)
+        run_style = None if run_properties is None else run_properties.find("w:rStyle", _NS)
+        if run_style is not None:
+            size = self._style_font_size(run_style.get(_tag(_W, "val")), size)
+        return _word_font_size_points(run_properties) or size
 
     def _style_references(self, style_id: str | None) -> tuple[SourceTypefaceReference, ...]:
         references: tuple[SourceTypefaceReference, ...] = ()
@@ -1118,6 +1164,32 @@ class _DocxFontResolver:
             style_id, direct = style
             references = _merge_word_typefaces(direct, references)
         return references
+
+    def _style_font_size(self, style_id: str | None, inherited: float | None) -> float | None:
+        sizes: list[float | None] = []
+        seen: set[str] = set()
+        while style_id and style_id not in seen:
+            seen.add(style_id)
+            style = self.style_font_sizes.get(style_id)
+            if style is None:
+                break
+            style_id, direct = style
+            sizes.append(direct)
+        for direct in reversed(sizes):
+            if direct is not None:
+                inherited = direct
+        return inherited
+
+
+def _word_font_size_points(properties: ElementTree.Element | None) -> float | None:
+    size = None if properties is None else properties.find("w:sz", _NS)
+    if size is None:
+        return None
+    try:
+        value = float(size.get(_tag(_W, "val"), "")) / 2.0
+    except ValueError:
+        return None
+    return value if value > 0.0 else None
 
 
 def _xml(data: bytes | None) -> ElementTree.Element | None:
