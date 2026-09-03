@@ -24,7 +24,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from PIL import Image, ImageDraw
-from tqdm import tqdm
 # skia-python does not publish PEP 561 stubs; the evaluator passes its native Typeface through.
 import skia  # type: ignore[import-not-found]
 
@@ -39,6 +38,7 @@ from pipeline.ocr import (
 )
 from pipeline.ocr.languages import discover_language_directories
 from pipeline.provider_cache import source_cache_scope
+from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
@@ -98,7 +98,7 @@ class ViewerEntry:
 
 
 class EvaluationProgress(Protocol):
-    """The small portion of tqdm used while evaluating one input folder."""
+    """The active Rich task operations used while evaluating one input folder."""
 
     def set_postfix_str(self, s: str, refresh: bool = ...) -> None:
         """Set the current provider and image label."""
@@ -198,14 +198,14 @@ def evaluate_ocr_inputs(
         entries_by_provider[provider_name] = []
 
     if providers:
-        for folder, folder_images in progress_groups(images).items():
-            with tqdm(
-                total=len(folder_images) * len(providers),
-                desc=_progress_label(folder.as_posix()),
-                dynamic_ncols=True,
-                leave=True,
-                unit="evaluation",
-            ) as progress:
+        with LiveProgress() as display:
+            display.start_overall(len(images) * len(providers), "evaluation")
+            for folder, folder_images in progress_groups(images).items():
+                progress = display.start_current(
+                    _progress_label(folder.as_posix()),
+                    len(folder_images) * len(providers),
+                    "evaluation",
+                )
                 for provider_name, provider_root, provider in providers:
                     entries_by_provider[provider_name].extend(
                         _evaluate_provider(
@@ -215,8 +215,10 @@ def evaluate_ocr_inputs(
                             provider_root,
                             result,
                             progress,
+                            display.advance_overall,
                         )
                     )
+                display.clear_current()
 
     for provider_name, provider_root, _ in providers:
         _write_viewer(provider_root, entries_by_provider[provider_name])
@@ -315,6 +317,7 @@ def _evaluate_provider(
     provider_root: Path,
     result: EvaluationRunResult,
     progress: EvaluationProgress,
+    overall_completed: Callable[[], None] | None = None,
 ) -> list[ViewerEntry]:
     entries: list[ViewerEntry] = []
     for image in images:
@@ -361,6 +364,8 @@ def _evaluate_provider(
             )
         finally:
             progress.update(1)
+            if overall_completed is not None:
+                overall_completed()
     return entries
 
 

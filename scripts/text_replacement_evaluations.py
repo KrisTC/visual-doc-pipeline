@@ -34,7 +34,6 @@ from pptx.shapes.group import GroupShape
 from pptx.text.text import TextFrame, _Paragraph, _Run
 from pptx.util import Length
 from PIL import Image
-from tqdm import tqdm
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
@@ -51,6 +50,7 @@ from pipeline.bounded_text_layout import (
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.provider_cache import source_cache_scope
+from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import (
     TextReplacementProviderFactory,
     TextReplacementRequest,
@@ -229,22 +229,28 @@ def evaluate_text_replacement_examples(
     factory = TextReplacementProviderFactory.discover_default_plugins()
     provider_names = factory.local_evaluation_provider_names
     result = TextReplacementEvaluationRunResult()
-    for language_directory in discover_language_directories(input_root):
-        source_paths = tuple(
+    language_directories = discover_language_directories(input_root)
+    source_paths_by_directory = {
+        language_directory: tuple(
             source_path
             for source_path in sorted(language_directory.rglob("*.pptx"))
             if not source_path.name.startswith("~$")
         )
-        if not source_paths:
-            continue
-        relative_language_directory = language_directory.relative_to(input_root).as_posix()
-        with tqdm(
-            total=len(source_paths),
-            desc=relative_language_directory,
-            dynamic_ncols=True,
-            leave=True,
-            unit="presentation",
-        ) as progress:
+        for language_directory in language_directories
+    }
+    with LiveProgress() as display:
+        display.start_overall(
+            sum(len(source_paths) for source_paths in source_paths_by_directory.values()),
+            "presentation",
+        )
+        for language_directory in language_directories:
+            source_paths = source_paths_by_directory[language_directory]
+            if not source_paths:
+                continue
+            relative_language_directory = language_directory.relative_to(input_root).as_posix()
+            progress = display.start_current(
+                relative_language_directory, len(source_paths), "presentation"
+            )
             for source_path in source_paths:
                 progress.set_postfix_str(source_path.name)
                 result.processed_presentations += 1
@@ -306,6 +312,8 @@ def evaluate_text_replacement_examples(
                 finally:
                     cache_scope.__exit__(None, None, None)
                     progress.update(1)
+                    display.advance_overall()
+            display.clear_current()
     return result
 
 

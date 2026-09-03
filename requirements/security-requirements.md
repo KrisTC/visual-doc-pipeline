@@ -85,7 +85,8 @@ The approved-hash file is a custom project security-control input, rather than a
 
 An exception requirement shall state whether the standard seven-day cooldown applies to its registry. If the registry does not publish reliable upload timestamps, that exception must expressly justify an alternative control before the registry can be used.
 
-The artifact-approval and verified-installation workflows shall use `tqdm` byte-progress bars while downloading an artifact. Each bar shall identify the artifact filename, use the registry's declared content length when available, and remain usable when that length is absent.
+The artifact-approval and verified-installation workflows' download progress is
+defined by FR-2026-09-03-01.
 
 ---
 

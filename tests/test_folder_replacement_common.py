@@ -289,10 +289,13 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertEqual(1, result.processed_files)
             self.assertEqual("Processing: document.docx\n", standard_output.getvalue())
             self.assertEqual(1, len(progress_bars))
-            self.assertEqual(2, progress_bars[0].total)
+            self.assertEqual(3, progress_bars[0].total)
             self.assertEqual("document.docx", progress_bars[0].label)
-            self.assertEqual(["embedded image 1", "native text"], progress_bars[0].postfixes)
-            self.assertEqual(2, progress_bars[0].updates)
+            self.assertEqual(
+                ["embedded image 1", "native text", "native text layout"],
+                progress_bars[0].postfixes,
+            )
+            self.assertEqual(3, progress_bars[0].updates)
             self.assertTrue(progress_bars[0].closed)
 
     # Verifies FR-2026-08-03-03.

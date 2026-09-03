@@ -51,16 +51,29 @@ No source or output content may be sent to external services. The selected provi
 |----------|-------|
 | Title | Report folder-replacement progress |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-02-03, FR-2026-08-03-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01 |
 
 ### Description
 
-The folder-replacement command shall use tqdm to render terminal progress while it processes supported input files. It shall render one progress bar at a time for each input folder that contains eligible files, labelled with that folder's path relative to the input root. The bar shall show the basename of the current source file in its postfix.
+The folder-replacement command shall render terminal progress as defined by
+FR-2026-09-03-01. Its overall bar shall include every eligible source file
+selected after applying the include patterns, using 100 units for each source
+file. Its current-task bar shall show the source basename and retain the
+existing work-item totals and labels.
 
-The command shall print the relative path of each source file when it starts processing it. It shall render one tqdm progress bar for that source file. A bitmap file's bar shall contain one work item. A document file's bar shall contain one native-text work item and one work item for every embedded raster bitmap. A PDF's bar shall additionally contain one vector-content review work item for every page. The document's bar shall advance after each work item completes, allowing a user to see progress through its embedded-image and PDF-vector work.
+The command shall write the relative path of each source file when it starts
+processing it. A bitmap source's current-task bar shall contain one work item.
+A document source's current-task bar shall contain one native-text work item
+and one work item for every embedded raster bitmap. A PDF's bar shall
+additionally contain one vector-content review work item for every page. The
+current-task bar shall advance after each work item completes. After each
+current-task advance, the overall bar shall advance to the corresponding
+percentage of that source file's 100-unit share. A completed or failed source
+shall advance the overall bar to the end of its share, so later source files
+start at the next 100-unit boundary.
 
 ### Rationale
 
@@ -68,7 +81,10 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
-The progress bar shall show its current native-text, embedded-image, or PDF-vector work item in its postfix. Existing one-line per-file failure reporting shall remain visible without stopping later work. A failure shall close that file's bar and later files shall still be processed.
+The active-task text shall show the current native-text, embedded-image, or
+PDF-vector work item. Existing one-line per-file failure reporting shall remain
+visible without stopping later work. A failure shall reset the current-task and
+nested-operation rows before later files are processed.
 
 ---
 
@@ -297,14 +313,20 @@ Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. T
 |----------|-------|
 | Title | Report native text-replacement evaluation progress |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-04 |
-| Related Requirements | FR-2026-08-03-13 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-09-03-01 |
 
 ### Description
 
-The native PowerPoint text-replacement evaluation command, `scripts/text_replacement_evaluations.py`, shall use tqdm to render terminal progress. It shall render one progress bar at a time for each discovered source-language directory containing eligible PPTX files. Each bar shall be labelled with that directory's path relative to the input root, advance once per eligible presentation after it is processed or skipped, and show the current presentation basename in its postfix.
+The native PowerPoint text-replacement evaluation command,
+`scripts/text_replacement_evaluations.py`, shall render terminal progress as
+defined by FR-2026-09-03-01. Its overall bar shall contain every eligible
+presentation in the run. Its current-task bar shall contain the eligible
+presentations in the active source-language directory, be labelled with that
+directory's path relative to the input root, and show the active presentation
+basename.
 
 ### Rationale
 
@@ -312,7 +334,9 @@ Native-text evaluation may process many presentations and render every eligible 
 
 ### Notes
 
-PowerPoint temporary lock files remain ineligible and shall not contribute to a progress bar's total. Existing one-line skipped-presentation reporting shall remain visible and later presentations shall continue processing.
+PowerPoint temporary lock files remain ineligible and shall not contribute to
+either progress total. Existing one-line skipped-presentation reporting shall
+remain visible and later presentations shall continue processing.
 
 ---
 
@@ -1138,25 +1162,27 @@ while the bootstrap command cleans it up.
 |----------|-------|
 | Title | Report runtime-asset bootstrap progress |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-09-02 |
-| Related Requirements | FR-2026-08-27-04 |
+| Related Requirements | FR-2026-08-27-04, FR-2026-09-03-01 |
 
 ### Description
 
-The runtime-asset bootstrap command shall render one `tqdm` progress bar while
-it prepares its selected optional font packs and PaddleOCR languages. The bar
-shall have one work item for each selected font pack and one work item for each
-PaddleOCR language initialization. Its postfix shall identify the active font
-pack or language initialization.
+The runtime-asset bootstrap command shall render terminal progress as defined
+by FR-2026-09-03-01 while it prepares its selected optional font packs and
+PaddleOCR languages. Its current-task bar shall have one work item for each
+selected font pack and one work item for each PaddleOCR language
+initialization. Its active-step text shall identify the active font pack or
+language initialization.
 
 The command shall advance the bar only after the corresponding step completes.
 It shall close the bar before reporting its existing final result or failure.
 
 Automated tests shall use mocked font-pack and PaddleOCR setup steps. They
-shall verify the progress total, active-step labels, completed work items, and
-bar closure without requiring a network download or model initialization.
+shall verify the overall and current-task totals, active-step labels, completed
+work items, and live-display closure without requiring a network download or
+model initialization.
 
 ### Rationale
 
@@ -1309,3 +1335,150 @@ prevent generated Office files from being opened.
 This requirement supersedes the development-output hierarchy defined by
 FR-2026-08-22-01. It does not change the general-purpose folder-replacement
 command or its output paths.
+
+---
+
+## FR-2026-09-03-01
+
+| Property | Value |
+|----------|-------|
+| Title | Render bounded, nested Rich terminal progress |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-09-03 |
+| Related Requirements | FR-2026-08-02-01, FR-2026-08-03-03, FR-2026-08-03-04, FR-2026-08-04-14, FR-2026-09-02-02, SR-2026-08-21-02, TR-2026-08-01-01 |
+
+### Description
+
+The project shall replace every current `tqdm` terminal-progress display with
+one Rich live display. This applies to the folder-replacement command, OCR
+evaluation command, native text-replacement evaluation command, runtime-asset
+bootstrap command, approved-dependency-artifact workflow, and verified-
+dependency-installation workflow. `rich` shall be a locked runtime dependency
+managed under TR-2026-08-01-01. The replaced `tqdm` dependency and its type
+stub dependency shall be removed when no remaining product or test code uses
+them.
+
+While work is active, the live display shall occupy no more than three
+progress rows:
+
+1. An **Overall** row shall represent the complete set of root tasks selected
+   for the command invocation. It shall normally advance only after a root task
+   completes or fails; FR-2026-08-03-04 defines the more granular mapping for
+   folder replacement.
+2. A **Current** row shall represent the work of the active root task and
+   retain the task-specific unit, total, and active-operation label required by
+   its owning requirement. Its description shall be the active source filename
+   (or equivalent root-task name), without a `Current:` prefix. The description
+   column shall be capped at 40 terminal cells and use an ellipsis when that
+   name exceeds the width. Its active-operation label shall appear in the
+   detail column, not replace the filename.
+3. A **Nested** row shall appear only while the active folder-replacement
+   source performs an OCR-backed embedded bitmap or PDF vector-analysis
+   operation. It shall identify that document part and advance through exactly
+   three stages: OCR recognition; processing the OCR results, including
+   confidence filtering, text replacement, and colour analysis; and rendering
+   the replacement image. It shall be cleared when that operation finishes or
+   fails.
+
+The current row and nested row shall be reset for each next task rather than
+left as historical completed bars. The overall row shall remain visible until
+the command completes. The live display shall close before the command writes
+its existing final summary or returns an error.
+
+Every determinate row shall show its completed and total count, percentage,
+elapsed time, and an explicitly labelled ETA when Rich has enough completed
+work to calculate one. Before that point, it shall show `ETA —` rather than
+fabricate a value. The current transfer row for a downloaded artifact
+shall additionally show bytes transferred and transfer rate, use the declared
+content length when available, and omit an ETA rather than fabricate one when
+the length is unknown. Download commands' overall row shall count the selected
+artifacts, while their current row shall retain byte-based progress.
+
+The live display shall route ordinary processing, skipped-item, and
+per-item-failure lines through its Rich console so those lines remain intact
+above the active rows. It shall not interleave terminal-control sequences with
+those lines or leave an unbounded history of completed progress bars. When the
+output stream does not support an interactive live display, the commands shall
+write stable plain-text status and failure lines without terminal-control
+sequences.
+
+For the complete lifetime of an interactive live display, Rich stdout and
+stderr redirection shall both be enabled explicitly. Existing Python `print()`
+calls and ordinary writes to `sys.stderr` shall therefore be rendered above the
+active rows without each call site needing a Rich-console migration. The
+implementation shall not disable either redirect option merely because Rich
+currently enables it by default. Automated tests shall exercise both redirected
+stdout and stderr output while progress is live.
+
+The command-specific row mappings are:
+
+- Folder replacement: the overall row counts eligible selected source files;
+  the current row keeps the source work-item model of FR-2026-08-03-04.
+- OCR evaluation: the overall row counts all non-cached provider/image
+  evaluations; the current row counts those for the active progress folder.
+- Native text-replacement evaluation: the overall row counts all eligible
+  presentations; the current row counts those in the active source-language
+  directory.
+- Runtime-asset bootstrap: the overall and current rows use its selected setup
+  steps; the current row identifies the active step.
+- Artifact approval and verified installation: the overall row counts selected
+  artifacts and the current row represents the active artifact download.
+
+Automated tests shall use synthetic inputs and mocked clocks or rendering
+boundaries. They shall verify the row totals and advancement rules, active
+labels, three nested image-operation stages, cleanup after a failure, bounded
+row count, and preservation of regular status/failure output. Tests shall
+verify determinate time columns and the unknown-length download case without a
+network request.
+
+### Rationale
+
+A single live Rich display provides the Docker Compose-like view of overall,
+current, and nested work while keeping output readable during long OCR and
+document-processing runs. Retaining measurement and ETA information prevents
+the improved layout from reducing the operational feedback currently provided
+by tqdm.
+
+### Notes
+
+This requirement replaces FR-2026-08-02-03, which has been removed. It
+supersedes the terminal-renderer and progress-row-cardinality clauses of
+FR-2026-08-02-01, FR-2026-08-03-04, FR-2026-08-04-14,
+FR-2026-09-02-02, and SR-2026-08-21-02. Their task-specific work totals,
+eligibility rules, and failure handling remain in force unless this requirement
+expressly changes them.
+
+---
+
+## FR-2026-09-03-02
+
+| Property | Value |
+|----------|-------|
+| Title | Report post-native-pass DOCX layout progress |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | Implementation diagnosis |
+| Date Added | 2026-09-03 |
+| Related Requirements | FR-2026-08-03-04, FR-2026-09-03-01 |
+
+### Description
+
+The folder-replacement current-task total for a DOCX source shall include one
+work item for its post-native-pass DOCX layout rewrite. The bar shall display
+`native text layout` while that rewrite runs and shall advance that work item
+only after the rewritten package has been written successfully. It shall not
+reach 100% before that work is complete.
+
+### Rationale
+
+DOCX processing performs a separate layout-aware XML and package rewrite after
+the initial native-text and embedded-media pass. Leaving that rewrite outside
+the work total makes the terminal report completion while substantial work is
+still running.
+
+### Notes
+
+This requirement needs confirmation before implementation because it changes
+the established DOCX current-task work-item total in FR-2026-08-03-04.

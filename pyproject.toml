@@ -18,15 +18,14 @@ dependencies = [
     "python-docx",
     "python-pptx",
     "regex",
+    "rich>=15.0.0",
     "skia-python>=144.0.post2",
-    "tqdm",
 ]
 
 [dependency-groups]
 dev = [
     "mypy",
     "types-openpyxl",
-    "types-tqdm",
 ]
 
 [tool.uv]

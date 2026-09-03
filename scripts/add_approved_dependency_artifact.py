@@ -14,8 +14,7 @@ from pathlib import Path
 from urllib.parse import urldefrag, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
-from tqdm import tqdm
-
+from pipeline.terminal_progress import LiveProgress
 
 ROOT = Path(__file__).resolve().parents[1]
 SECURITY_REQUIREMENTS = ROOT / "requirements" / "security-requirements.md"
@@ -130,7 +129,8 @@ def _wheel_urls(registry: str, distribution: str, version: str) -> tuple[str, ..
 
 
 def _download_artifact(
-    requirement: str, distribution: str, version: str, url: str, directory: Path
+    requirement: str, distribution: str, version: str, url: str, directory: Path,
+    display: LiveProgress | None = None,
 ) -> Artifact:
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / _cache_filename(url)
@@ -149,17 +149,14 @@ def _download_artifact(
         content_length = response.headers.get("Content-Length")
         total = existing_size + int(content_length) if content_length is not None else None
         mode = "ab" if append else "wb"
-        with destination.open(mode) as output, tqdm(
-            total=total,
-            initial=existing_size,
-            unit="B",
-            unit_scale=True,
-            desc=Path(urlsplit(url).path).name,
-        ) as progress:
+        if display is not None:
+            display.start_download(Path(urlsplit(url).path).name, total, existing_size)
+        with destination.open(mode) as output:
             while chunk := response.read(CHUNK_SIZE):
                 digest.update(chunk)
                 output.write(chunk)
-                progress.update(len(chunk))
+                if display is not None:
+                    display.advance_download(len(chunk))
     size = destination.stat().st_size
     metadata_name, metadata_version = _wheel_metadata(destination)
     if _normalize_distribution(metadata_name) != _normalize_distribution(distribution):
@@ -286,12 +283,17 @@ def add_artifacts(
     retained = [artifact for artifact in existing if artifact not in matching]
     approved = approved if not replace else []
     matching_urls = {artifact.url for artifact in approved}
-    for url in urls:
-        if url in matching_urls and not replace:
-            continue
-        artifact = _download_artifact(requirement, distribution, version, url, CACHE_DIRECTORY)
-        approved.append(artifact)
-        _write_allowlist(allowlist, [*retained, *approved])
+    pending_urls = tuple(url for url in urls if url not in matching_urls or replace)
+    with LiveProgress() as display:
+        display.start_overall(len(pending_urls), "artifact")
+        for url in pending_urls:
+            artifact = _download_artifact(
+                requirement, distribution, version, url, CACHE_DIRECTORY, display
+            )
+            approved.append(artifact)
+            _write_allowlist(allowlist, [*retained, *approved])
+            display.advance_overall()
+            display.clear_current()
     return tuple(approved)
 
 

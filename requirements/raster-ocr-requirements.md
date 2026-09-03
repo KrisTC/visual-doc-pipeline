@@ -166,14 +166,18 @@ Each provider root shall contain a checksum representing its complete evaluation
 |----------|-------|
 | Title | Report OCR-evaluation progress |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-02 |
-| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01 |
+| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01, FR-2026-09-03-01 |
 
 ### Description
 
-The OCR-evaluation command shall use Rich to render live terminal progress while it evaluates images. It shall display a progress bar for each folder below an input language-code directory.
+The OCR-evaluation command shall render terminal progress as defined by
+FR-2026-09-03-01. Its overall bar shall contain every non-cached
+provider/image evaluation in the run. Its current-task bar shall contain the
+non-cached provider/image evaluations in the active folder below an input
+language-code directory.
 
 ### Rationale
 
@@ -181,7 +185,10 @@ OCR evaluation against the local real-data corpus can take substantial time. Fol
 
 ### Notes
 
-Images directly in a language-code directory shall be represented by that language directory's progress bar. Each bar shall aggregate image evaluations across all providers that are not checksum-skipped and shall show the current provider and image. The command shall write a one-line skipped status for each checksum-skipped provider.
+Images directly in a language-code directory shall be represented by that
+language directory's current-task bar. It shall show the current provider and
+image. The command shall write a one-line skipped status for each
+checksum-skipped provider.
 
 ---
 
@@ -207,31 +214,6 @@ The table gives a compact, legible visual comparison of every detected region an
 ### Notes
 
 The viewer shall retain the input and black-masked comparison images above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
-
----
-
-## FR-2026-08-02-03
-
-| Property | Value |
-|----------|-------|
-| Title | Render OCR-evaluation progress with tqdm |
-| Owner | KrisTC |
-| Status | Implemented |
-| Source | User request |
-| Date Added | 2026-08-02 |
-| Related Requirements | FR-2026-08-02-01 |
-
-### Description
-
-The OCR-evaluation command shall use tqdm, rather than Rich, to render terminal progress.
-
-### Rationale
-
-tqdm provides the compact notebook-style progress display preferred for this command.
-
-### Notes
-
-The command shall render one folder bar at a time, labelled with the folder. It shall show the current provider and image basename in the bar postfix. Each bar shall aggregate all non-cached provider/image evaluations for that folder, and checksum-skipped providers shall be written as one-line status messages.
 
 ---
 

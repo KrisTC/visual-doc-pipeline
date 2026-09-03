@@ -22,8 +22,9 @@ class BootstrapRuntimeAssetsTests(unittest.TestCase):
     def test_prints_the_shared_font_and_paddle_cache_locations(self) -> None:
         output = StringIO()
         progress = MagicMock()
-        progress_bar = MagicMock()
-        progress_bar.__enter__.return_value = progress
+        display = MagicMock()
+        display.__enter__.return_value = display
+        display.start_current.return_value = progress
         with (
             patch.object(
                 bootstrap,
@@ -37,7 +38,7 @@ class BootstrapRuntimeAssetsTests(unittest.TestCase):
             patch.object(bootstrap, "mark_bootstrap_complete"),
             patch.object(bootstrap, "font_cache_directory", return_value=Path("/fonts")),
             patch.object(bootstrap, "paddle_model_cache_directory", return_value=Path("/models")),
-            patch.object(bootstrap, "tqdm", return_value=progress_bar) as progress_factory,
+            patch.object(bootstrap, "LiveProgress", return_value=display) as progress_factory,
             redirect_stdout(output),
         ):
             self.assertEqual(0, bootstrap.main())
@@ -45,13 +46,9 @@ class BootstrapRuntimeAssetsTests(unittest.TestCase):
         self.assertIn(f"Font cache: {Path('/fonts')}", output.getvalue())
         self.assertIn(f"Noto Sans Math: {Path('/fonts/math.ttf')}", output.getvalue())
         self.assertIn(f"PaddleOCR model cache: {Path('/models')}", output.getvalue())
-        progress_factory.assert_called_once_with(
-            total=4,
-            desc="Runtime assets",
-            dynamic_ncols=True,
-            leave=True,
-            unit="asset",
-        )
+        progress_factory.assert_called_once_with()
+        display.start_overall.assert_called_once_with(4, "asset")
+        display.start_current.assert_called_once_with("Runtime assets", 4, "asset")
         self.assertEqual(
             [
                 call("Noto Sans Symbols 2"),
@@ -62,5 +59,6 @@ class BootstrapRuntimeAssetsTests(unittest.TestCase):
             progress.set_postfix_str.call_args_list,
         )
         self.assertEqual([call(), call(), call(), call()], progress.update.call_args_list)
+        self.assertEqual([call(), call(), call(), call()], display.advance_overall.call_args_list)
         self.assertEqual([call("en"), call("ja")], bootstrap_language.call_args_list)
-        progress_bar.__exit__.assert_called_once()
+        display.__exit__.assert_called_once()

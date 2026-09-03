@@ -14,7 +14,6 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 from PIL import Image
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
-from tqdm import tqdm
 
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
@@ -25,6 +24,7 @@ from pipeline.folder_replacement.failure_diagnostics import (
     exception_cause_types,
 )
 from pipeline.provider_cache import is_cache_sidecar, provider_diagnostic_name, source_cache_scope
+from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.vector_text import replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
@@ -117,12 +117,24 @@ def replace_input_folder(
 
     result = FolderReplacementResult()
     reserved_paths: set[Path] = set()
-    for source_path in sorted(
+    source_paths = tuple(sorted(
         path for path in input_root.rglob("*") if path.is_file() and not is_cache_sidecar(path)
-    ):
+    ))
+    eligible_source_count = sum(
+        path.suffix.lower() in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
+        and matches_include_patterns(path.relative_to(input_root), include_patterns)
+        for path in source_paths
+    )
+    display = LiveProgress() if show_progress and progress_factory is None else None
+    if display is not None:
+        display.__enter__()
+        display.start_overall(eligible_source_count * 100, "source %")
+    completed_sources = 0
+    try:
+      for source_path in source_paths:
         temporary_destination: Path | None = None
         destination: Path | None = None
-        progress = None
+        progress: ProgressReporter | None = None
         extension = source_path.suffix.lower()
         relative_source_path = source_path.relative_to(input_root)
         if extension not in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS:
@@ -167,13 +179,20 @@ def replace_input_folder(
         try:
             print(f"Processing: {relative_source_path}")
             if show_progress:
-                make_progress = progress_factory or _make_progress_bar
-                progress = make_progress(_source_work_total(source_path), relative_source_path.name)
+                if display is not None:
+                    progress = display.start_current(
+                        relative_source_path.name, _source_work_total(source_path), "work item"
+                    )
+                else:
+                    make_progress = progress_factory or _make_progress_bar
+                    progress = make_progress(_source_work_total(source_path), relative_source_path.name)
 
             def work_completed(label: str) -> None:
                 if progress is not None:
                     progress.set_postfix_str(label)
                     progress.update()
+                    if display is not None:
+                        display.set_overall_from_current(completed_sources)
 
             if failure_context is not None:
                 failure_context.set_location(
@@ -347,8 +366,15 @@ def replace_input_folder(
                 )
         finally:
             cache_scope.__exit__(None, None, None)
-            if progress is not None:
+            if display is not None:
+                display.complete_overall_source(completed_sources)
+                completed_sources += 1
+                display.clear_current()
+            elif progress is not None:
                 progress.close()
+    finally:
+        if display is not None:
+            display.__exit__(None, None, None)
     return result
 
 
@@ -496,6 +522,12 @@ def _source_work_total(source_path: Path) -> int:
         return 1
     if extension in VECTOR_EXTENSIONS:
         return 1
+    if extension == ".docx":
+        with ZipFile(source_path) as archive:
+            return 2 + sum(
+                _is_office_bitmap_part(name) or _is_office_vector_part(name)
+                for name in archive.namelist()
+            )
     if extension in OFFICE_DOCUMENT_EXTENSIONS:
         with ZipFile(source_path) as archive:
             return 1 + sum(
@@ -507,13 +539,7 @@ def _source_work_total(source_path: Path) -> int:
 
 def _make_progress_bar(total: int, label: str) -> ProgressReporter:
     """Create the standard terminal bar for one source file."""
-    return tqdm(
-        total=total,
-        desc=label,
-        dynamic_ncols=True,
-        leave=True,
-        unit="work item",
-    )
+    raise RuntimeError("A Rich live display is required when no test progress factory is supplied.")
 
 
 def _replace_bitmap_file(

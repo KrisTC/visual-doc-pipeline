@@ -219,38 +219,27 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             (input_root / "ja" / "~$locked.pptx").write_bytes(b"not a presentation")
             progress = MagicMock()
             progress_context = MagicMock()
-            progress_context.__enter__.return_value = progress
+            progress_context.__enter__.return_value = progress_context
+            progress_context.start_current.return_value = progress
 
             with patch(
-                "scripts.text_replacement_evaluations.tqdm",
+                "scripts.text_replacement_evaluations.LiveProgress",
                 return_value=progress_context,
-            ) as mocked_tqdm:
+            ) as mocked_progress:
                 evaluate_text_replacement_examples(input_root, root / "output")
 
+            mocked_progress.assert_called_once_with()
+            progress_context.start_overall.assert_called_once_with(2, "presentation")
             self.assertEqual(
-                [
-                    call(
-                        total=1,
-                        desc="ja",
-                        dynamic_ncols=True,
-                        leave=True,
-                        unit="presentation",
-                    ),
-                    call(
-                        total=1,
-                        desc="sample_data/en",
-                        dynamic_ncols=True,
-                        leave=True,
-                        unit="presentation",
-                    ),
-                ],
-                mocked_tqdm.call_args_list,
+                [call("ja", 1, "presentation"), call("sample_data/en", 1, "presentation")],
+                progress_context.start_current.call_args_list,
             )
             self.assertEqual(
                 [call("first.pptx"), call("second.pptx")],
                 progress.set_postfix_str.call_args_list,
             )
             self.assertEqual([call(1), call(1)], progress.update.call_args_list)
+            self.assertEqual([call(), call()], progress_context.advance_overall.call_args_list)
 
     # Verifies FR-2026-08-03-13, FR-2026-08-04-12, and FR-2026-08-22-09.
     def test_processes_the_configured_confidential_subtree_locally(self) -> None:

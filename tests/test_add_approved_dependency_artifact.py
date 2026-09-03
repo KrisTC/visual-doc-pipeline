@@ -152,7 +152,7 @@ def _write_wheel(path: Path, name: str, version: str) -> None:
 
 
 def _copy_artifact(wheel: Path, *values: object) -> approval.Artifact:
-    requirement, distribution, version, url, _ = values
+    requirement, distribution, version, url, _ = values[:5]
     filename = wheel.name.removesuffix(".whl")
     wheel_tags = "-".join(filename.rsplit("-", maxsplit=3)[-3:])
     return approval.Artifact(

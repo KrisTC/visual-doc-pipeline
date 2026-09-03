@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from tqdm import tqdm
-
+from pipeline.terminal_progress import LiveProgress
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = ROOT / "approved-dependency-artifact-hashes.toml"
@@ -107,17 +106,21 @@ def _select_artifact(artifacts: tuple[ApprovedArtifact, ...], distribution: str,
     return matches[0]
 
 
-def _download_verified(artifact: ApprovedArtifact, directory: Path) -> Path:
+def _download_verified(
+    artifact: ApprovedArtifact, directory: Path, display: LiveProgress | None = None
+) -> Path:
     destination = directory / Path(artifact.url).name
     digest = hashlib.sha256()
     with urlopen(Request(artifact.url)) as response, destination.open("wb") as output:
         content_length = response.headers.get("Content-Length")
         total = int(content_length) if content_length is not None else None
-        with tqdm(total=total, unit="B", unit_scale=True, desc=destination.name) as progress:
-            while chunk := response.read(CHUNK_SIZE):
-                digest.update(chunk)
-                output.write(chunk)
-                progress.update(len(chunk))
+        if display is not None:
+            display.start_download(destination.name, total)
+        while chunk := response.read(CHUNK_SIZE):
+            digest.update(chunk)
+            output.write(chunk)
+            if display is not None:
+                display.advance_download(len(chunk))
     if digest.hexdigest() != artifact.sha256:
         destination.unlink(missing_ok=True)
         raise ValueError(f"SHA-256 verification failed for {artifact.url}.")
@@ -135,14 +138,18 @@ def sync_dependencies() -> None:
     artifacts = _approved_artifacts(ALLOWLIST)
     with tempfile.TemporaryDirectory(prefix="verified-dependency-") as temporary_directory:
         directory = Path(temporary_directory)
-        for distribution, version in non_default_packages:
-            artifact = _select_artifact(artifacts, distribution, version)
-            wheel = _download_verified(artifact, directory)
-            subprocess.run(
-                ["uv", "pip", "install", "--offline", "--no-deps", str(wheel)],
-                check=True,
-                cwd=ROOT,
-            )
+        with LiveProgress() as display:
+            display.start_overall(len(non_default_packages), "artifact")
+            for distribution, version in non_default_packages:
+                artifact = _select_artifact(artifacts, distribution, version)
+                wheel = _download_verified(artifact, directory, display)
+                subprocess.run(
+                    ["uv", "pip", "install", "--offline", "--no-deps", str(wheel)],
+                    check=True,
+                    cwd=ROOT,
+                )
+                display.advance_overall()
+                display.clear_current()
 
 
 def main() -> int:
