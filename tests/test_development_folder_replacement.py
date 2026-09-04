@@ -74,11 +74,20 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                     for scenario in manifest["scenarios"]
                 },
             )
+            self.assertEqual(
+                {
+                    Path(result["output_root"]).name for result in manifest["results"]
+                },
+                {
+                    "mask-no_ocr-psf",
+                    "mask-no_ocr-pbl",
+                    "identity-no_ocr-psf",
+                    "identity-no_ocr-pbl",
+                },
+            )
             self.assertTrue(
                 all(
-                    Path(result["output_root"]).parts[-3:-1]
-                    in (("mask", "no_ocr"), ("identity", "no_ocr"))
-                    and Path(result["output_root"]).parts[-1] in ("psf", "pbl")
+                    Path(result["output_root"]).parent == revision_root.relative_to(root)
                     for result in manifest["results"]
                 )
             )
@@ -137,6 +146,28 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
             output_root = root / "outputs/evaluations/dirdev/case/en-en"
             self.assertTrue((output_root / "v1" / "manifest.json").is_file())
             self.assertTrue((output_root / "v2" / "manifest.json").is_file())
+
+    # Verifies FR-2026-09-02-04.
+    def test_rejects_scenarios_that_share_a_combined_output_name(self) -> None:
+        first = development.Scenario(
+            "first",
+            "ocr_first",
+            "preserve-source-formatting",
+            "full",
+            "first-ocr",
+            "second",
+        )
+        second = development.Scenario(
+            "second",
+            "ocr_second",
+            "preserve-source-formatting",
+            "full",
+            "first",
+            "ocr-second",
+        )
+
+        with self.assertRaisesRegex(ValueError, "first-ocr-second-psf"):
+            development._validate_unique_scenario_output_names((first, second))
 
 
 if __name__ == "__main__":

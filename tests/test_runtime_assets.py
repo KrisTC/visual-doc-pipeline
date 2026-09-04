@@ -66,7 +66,7 @@ class RuntimeAssetsTests(unittest.TestCase):
     # Verifies FR-2026-09-02-01.
     def test_temporary_file_operation_retries_a_transient_windows_lock(self) -> None:
         error = PermissionError("file is being used by another process")
-        error.winerror = 32
+        setattr(error, "winerror", 32)
         attempts = 0
 
         def temporarily_locked_operation() -> str:
@@ -88,7 +88,7 @@ class RuntimeAssetsTests(unittest.TestCase):
     # Verifies FR-2026-09-02-01.
     def test_temporary_file_operation_reports_an_exhausted_windows_lock(self) -> None:
         error = PermissionError("file is being used by another process")
-        error.winerror = 32
+        setattr(error, "winerror", 32)
 
         def permanently_locked_operation() -> None:
             raise error

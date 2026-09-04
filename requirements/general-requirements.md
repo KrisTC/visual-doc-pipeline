@@ -11,13 +11,13 @@ Shared folder-processing, layout, diagnostics, caching, and development-workflow
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06, FR-2026-08-02-10, FR-2026-08-03-02, TR-2026-08-01-02 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-02-06, FR-2026-08-02-10, FR-2026-08-03-02, FR-2026-08-27-02, SR-2026-08-24-01, TR-2026-08-01-02 |
 
 ### Description
 
 The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported.
 
-The command shall accept a text-replacement-provider name, defaulting to `character_mask`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined. Its `--help` output shall display one command-options section containing each option's concise description and default, together with separate, non-duplicative text-replacement-provider, OCR-provider, and document-text-layout reference sections. The provider sections shall list every name discovered from the default plugin directories, with its discovered plugin description when one is declared. The document-text-layout reference section shall list every accepted value; the usage and command-option entry shall use the metavar `LAYOUT` rather than repeat those values. When stdout is an interactive terminal whose `TERM` is not `dumb` and `NO_COLOR` is unset, it shall use ANSI colour without colouring descriptions: section headings shall be bold, option names bold cyan, choice names bold green, and default-value annotations yellow. It shall emit plain text when stdout is not interactive, `TERM` is `dumb`, or `NO_COLOR` is set.
+The command shall accept a text-replacement-provider name, defaulting to `google_cloud_translate`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined. Its `--help` output shall display one command-options section containing each option's concise description and default, together with separate, non-duplicative text-replacement-provider, OCR-provider, and document-text-layout reference sections. The provider sections shall list every name discovered from the default plugin directories, with its discovered plugin description when one is declared. The document-text-layout reference section shall list every accepted value; the usage and command-option entry shall use the metavar `LAYOUT` rather than repeat those values. When stdout is an interactive terminal whose `TERM` is not `dumb` and `NO_COLOR` is unset, it shall use ANSI colour without colouring descriptions: section headings shall be bold, option names bold cyan, choice names bold green, and default-value annotations yellow. It shall emit plain text when stdout is not interactive, `TERM` is `dumb`, or `NO_COLOR` is set.
 
 For bitmap images, the command shall use the selected OCR provider, text-region colour estimator, and existing batch text-region renderer to replace detected text. It shall skip a detected text region when its normalized OCR confidence is less than `0.65`; colour-estimate confidence shall not affect eligibility. For supported document files, it shall replace both native editable text and text in every embedded raster bitmap. Native editable text is not subject to an OCR-confidence threshold.
 
@@ -31,7 +31,7 @@ The existing pipeline primitives and local evaluators need a user-facing command
 
 The existing requirements define supported bitmap formats as PNG, JPEG, TIFF, BMP, GIF, and WebP, and initial document extensions as PDF, DOCX, PPTX, and XLSX.
 
-The command is `scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER`. `--source-language` is required; `--target-language en`, `--ocr paddleocr`, and `--text-replacement character_mask` are its defaults. It exits non-zero if one or more eligible files fail, after continuing to process other files.
+The command is `scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER`. `--source-language` is required; `--target-language en`, `--ocr paddleocr`, and `--text-replacement google_cloud_translate` are its defaults. `--document-text-layout` defaults to `preserve-basic-layout-source-font`. It exits non-zero if one or more eligible files fail, after continuing to process other files.
 
 The Office implementation processes visible WordprocessingML, DrawingML, SpreadsheetML, and VML text nodes throughout each OOXML package, which covers document body content as well as reachable package parts such as headers, footers, tables, comments, text boxes, grouped-shape text, notes, and shared spreadsheet strings. It processes every embedded raster part under an Office `media` directory.
 
@@ -41,7 +41,7 @@ Native text replacement is applied to individual native text items. Embedded bit
 
 Automated tests shall use synthetic input folders and files only. They shall cover supported-file discovery, ignored files, output-filename collisions, isolated file failures, confidence gating, native OOXML and PDF text replacement, embedded Office bitmap processing, and the direct-script help entry point, including its non-duplicative provider/layout sections, metavar, coloured-terminal styling, and plain-output behaviour.
 
-No source or output content may be sent to external services. The selected providers must be locally eligible when inputs might contain confidential information.
+Using `google_cloud_translate`, including by accepting its default, authorizes the configured provider to transmit replacement text, filename text, and source and target language tags to Google Cloud Translation under SR-2026-08-24-01. The user remains responsible for confirming that the configured project, identity, endpoint, and applicable terms are approved for the input. Automated local evaluation shall not invoke that provider. Other providers shall not transmit source or output content to external services unless a security requirement expressly permits it.
 
 ---
 
@@ -94,16 +94,16 @@ nested-operation rows before later files are processed.
 |----------|-------|
 | Title | Select native document-text layout-preservation mode |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-08-02-10 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-02-10, FR-2026-08-27-02 |
 
 ### Description
 
 The folder-replacement command shall provide a document-text layout mode for native editable text in PDF, DOCX, PPTX, and XLSX output. The mode shall not change the established OCR bitmap replacement path or direct editable-vector-text replacement path.
 
-`preserve-source-formatting` shall be the default. It shall replace native text while retaining the source document's existing font and size. It shall not attempt to resize, reflow, or otherwise fit the replacement text to its original bounds.
+`preserve-basic-layout-source-font` shall be the default. Its fitted-layout and source-font behaviour is defined by FR-2026-08-27-02. `preserve-source-formatting` shall remain available; it shall replace native text while retaining the source document's existing font and size. It shall not attempt to resize, reflow, or otherwise fit the replacement text to its original bounds.
 
 `preserve-basic-layout` shall replace text using an appropriate Noto font distributed under the SIL Open Font License and shall adjust font size to fit the replacement text within the source text item's explicit bounding box. It shall favour fitting within the original visible region over retaining the source font or font size. It shall apply to explicitly laid-out native document text and editable vector text, including PowerPoint shapes and grouped shapes, Word text boxes and embedded diagrams, and Excel and PowerPoint drawing text.
 
@@ -115,9 +115,8 @@ Source formatting may be essential to a document's design, but translated text c
 
 ### Notes
 
-The command-line option name and its exact accepted values remain to be defined. The current implementation's native-document replacement behaviour corresponds to `preserve-source-formatting`.
-
-Before implementation, define the bounding-box source and fitting behaviour for each format, including PowerPoint shapes and grouped shapes, Word text boxes and embedded diagrams, Excel cells and drawing text, and PDF content/form/annotation text. Also define the target-language-to-Noto-face mapping, handling when no committed Noto face supports the target language, wrapping, and overflow behaviour when a minimum readable font size cannot fit.
+The option's accepted values and the source-font fitted-layout semantics are
+defined by FR-2026-08-03-14 and FR-2026-08-27-02.
 
 The `preserve-basic-layout` implementation shall use a repository-owned,
 redistributable Noto font asset. It shall not depend on operating-system fonts
@@ -126,7 +125,9 @@ bootstrap cache of FR-2026-08-27-04 are project-selected assets for this
 purpose. The font selection and all fitting calculations shall be deterministic
 for the same input, options, and font assets.
 
-Automated tests shall use synthetic documents and fonts only. They shall verify the default mode retains source font settings, the fitting mode selects the specified Noto font and reduces or increases size as needed, and each supported document format's output remains valid.
+Automated tests shall use synthetic documents and fonts only. They shall verify
+the default source-font fitted mode, the source-formatting alternative, the
+Noto fitted mode, and valid output for each supported document format.
 
 ---
 
@@ -211,11 +212,11 @@ Automated tests shall use synthetic documents only. They shall verify property e
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-03-13 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-03-13, FR-2026-08-27-02 |
 
 ### Description
 
-The folder-replacement command shall expose `--document-text-layout` with values `preserve-source-formatting` (default) and `preserve-basic-layout`. The latter shall apply only to native editable text for which a format adapter can determine a finite text rectangle and write explicit text formatting back to that same container. It shall not change the OCR bitmap or editable-vector replacement paths. Free-flowing document text without a stable bounding box shall retain source formatting.
+The folder-replacement command shall expose `--document-text-layout` with values `preserve-source-formatting`, `preserve-basic-layout`, and `preserve-basic-layout-source-font` (default). The latter's behaviour is defined by FR-2026-08-27-02. `preserve-basic-layout` shall apply only to native editable text for which a format adapter can determine a finite text rectangle and write explicit text formatting back to that same container. Neither fitted mode shall change the OCR bitmap or editable-vector replacement paths. Free-flowing document text without a stable bounding box shall retain source formatting.
 
 The product shall provide a shared bounded-text layout core. It shall accept styled paragraphs and runs, bounds, padding, rotation or writing direction, alignment, and list settings; obtain a replacement for each nonempty paragraph; select the dominant source run style for each returned paragraph; select an appropriate committed Noto face; wrap and fit the replacement within the box; and return explicit writable text-frame, paragraph, and run settings with autofit disabled. A token that alone exceeds line width shall be character-wrapped before font reduction. A fit that cannot meet the minimum one-pixel font size shall remain visible as overflow rather than silently clipping.
 
@@ -1264,13 +1265,17 @@ root, where `N` is the next positive integer not already allocated there. All
 scenario combinations for one invocation and one source/target-language root
 shall share that revision.
 
-Each scenario shall be stored beneath the revision directory in this
-deterministic hierarchy, followed by the source file's path relative to
-`SOURCE_FOLDER`:
+Each scenario shall be stored beneath the revision directory in one
+deterministic combined directory, followed by the source file's path relative
+to `SOURCE_FOLDER`:
 
 ```text
-TEXT_REPLACEMENT_SHORT_NAME/OCR_SHORT_NAME/LAYOUT_ABBREVIATION/
+TEXT_REPLACEMENT_SHORT_NAME-OCR_SHORT_NAME-LAYOUT_ABBREVIATION/
 ```
+
+The combined directory name shall be unique across every expanded scenario in
+an invocation. The command shall reject colliding scenario names before
+allocating a revision directory or processing a scenario.
 
 Each OCR and text-replacement plugin shall explicitly declare a short name for
 development-scenario paths. The corresponding provider factory shall discover
@@ -1291,10 +1296,10 @@ same short name. The initial aliases shall include:
 | OCR | `paddleocr` | `ocr` |
 | OCR | `no_ocr` | `no_ocr` |
 
-The hierarchy shall contain these plugin-declared short names only; it shall
-not include option keys such as `text-replacement=`, `ocr=`, or
-`document-text-layout=`, nor a provider's full declared name. The
-document-text-layout directory abbreviations shall be:
+The combined directory name shall contain these plugin-declared short names and
+the layout abbreviation only; it shall not include option keys such as
+`text-replacement=`, `ocr=`, or `document-text-layout=`, nor a provider's full
+declared name. The document-text-layout directory abbreviations shall be:
 
 | Layout value | Directory abbreviation |
 |--------------|------------------------|
@@ -1306,7 +1311,7 @@ For example, a Google Cloud Translate, no-OCR, source-font basic-layout
 scenario with a `review` parent folder shall be written below:
 
 ```text
-outputs/evaluations/dirdev/review/ja-en/v1/gct/no_ocr/pblsf/
+outputs/evaluations/dirdev/review/ja-en/v1/gct-no_ocr-pblsf/
 ```
 
 The manifest shall continue to record the full effective provider and layout
@@ -1317,7 +1322,8 @@ sample handling remain unchanged.
 
 Automated tests shall use synthetic temporary sample-data and output trees.
 They shall verify the `dirdev` root, plugin-declared provider directory names,
-each layout abbreviation, deterministic hierarchy construction, preservation
+each layout abbreviation, deterministic combined-directory construction,
+rejection of colliding combined names before revision allocation, preservation
 of full effective provider and layout values in the manifest, and absence of
 the former keyed directory names. Factory tests shall verify valid short-name
 discovery and errors for missing, invalid, and duplicate short names without

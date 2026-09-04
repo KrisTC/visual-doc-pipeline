@@ -132,6 +132,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     include_patterns = _parse_include_patterns(arguments.include, parser)
     scenarios = _expand_scenarios(arguments, parser)
+    try:
+        _validate_unique_scenario_output_names(scenarios)
+    except ValueError as error:
+        parser.error(str(error))
     revision_root = _create_revision_root(source_relative_path, source_language, target_language)
     run_results: list[dict[str, object]] = []
     manifest: dict[str, object] = {
@@ -301,12 +305,29 @@ def _create_revision_root(
 
 def _scenario_output_root(revision_root: Path, scenario: Scenario) -> Path:
     """Return the deterministic output root for one effective scenario."""
-    return (
-        revision_root
-        / scenario.text_replacement_short_name
-        / scenario.ocr_short_name
-        / DOCUMENT_TEXT_LAYOUT_SHORT_NAMES[scenario.document_text_layout]
+    return revision_root / _scenario_output_name(scenario)
+
+
+def _scenario_output_name(scenario: Scenario) -> str:
+    """Return the compact directory name for one effective scenario."""
+    return "-".join(
+        (
+            scenario.text_replacement_short_name,
+            scenario.ocr_short_name,
+            DOCUMENT_TEXT_LAYOUT_SHORT_NAMES[scenario.document_text_layout],
+        )
     )
+
+
+def _validate_unique_scenario_output_names(scenarios: Sequence[Scenario]) -> None:
+    """Reject expanded scenarios that would write to one output directory."""
+    names = [_scenario_output_name(scenario) for scenario in scenarios]
+    duplicate_names = sorted({name for name in names if names.count(name) > 1})
+    if duplicate_names:
+        raise ValueError(
+            "Selected scenarios produce duplicate output directory name(s): "
+            f"{', '.join(duplicate_names)}."
+        )
 
 
 def _folder_replacement_command(

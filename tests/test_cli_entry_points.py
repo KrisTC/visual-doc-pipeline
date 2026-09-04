@@ -71,10 +71,10 @@ class CliEntryPointTests(unittest.TestCase):
                         f"{name}: {description}", normalized_help_output
                     )
         for default in (
-            "character_mask",
+            "google_cloud_translate",
             "paddleocr",
             "en",
-            "preserve-source-formatting",
+            "preserve-basic-layout-source-font",
         ):
             with self.subTest(default=default):
                 self.assertIn(f"(default: {default})", normalized_help_output)
@@ -104,8 +104,11 @@ class CliEntryPointTests(unittest.TestCase):
         self.assertIn("\033[1mcommand options:\033[0m", help_output)
         self.assertIn("\033[1;36m--text-replacement PROVIDER\033[0m", help_output)
         self.assertIn("\033[1;32mcharacter_mask:\033[0m", help_output)
-        self.assertIn("\033[33m(default: character_mask)\033[0m", help_output)
-        self.assertIn("Deterministic placeholder text-replacement provider.", help_output)
+        self.assertIn("\033[33m(default: google_cloud_translate)\033[0m", help_output)
+        self.assertIn(
+            "Google Cloud Translation Advanced v3 text-replacement provider.",
+            help_output,
+        )
         self.assertIn(
             "Target-language BCP 47 tag. \033[33m(default: en)\033[0m",
             help_output,
@@ -183,6 +186,8 @@ class CliEntryPointTests(unittest.TestCase):
             completed_process = self._run_folder_replacement(
                 input_folder,
                 output_folder,
+                "--text-replacement",
+                "character_mask",
                 "--ocr",
                 "no_ocr",
             )
