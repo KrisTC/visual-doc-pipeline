@@ -18,7 +18,7 @@ from pipeline.text_replacement import TextReplacementProvider, TextReplacementRe
 
 def replace_bitmap_file(source: Path, destination: Path, ocr: OcrProvider, replacement: TextReplacementProvider, source_language: str, target_language: str, typeface: skia.Typeface) -> int:
     with Image.open(source) as opened:
-        image, format_name = opened.copy(), opened.format
+        image, format_name = _replacement_image(opened.copy()), opened.format
     if format_name is None: raise ValueError(f"Could not determine bitmap format: {source}")
     count = replace_image(image, ocr, replacement, source_language, target_language, typeface)
     image.save(destination, format=format_name)
@@ -26,11 +26,18 @@ def replace_bitmap_file(source: Path, destination: Path, ocr: OcrProvider, repla
 
 def replace_bitmap_bytes(data: bytes, ocr: OcrProvider, replacement: TextReplacementProvider, source_language: str, target_language: str, typeface: skia.Typeface, ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND, nested_completed: Callable[[str], None] | None = None) -> tuple[bytes, int]:
     with Image.open(BytesIO(data)) as opened:
-        image, format_name = opened.copy(), opened.format
+        image, format_name = _replacement_image(opened.copy()), opened.format
     if format_name is None: raise ValueError("Could not determine embedded bitmap format.")
     count = replace_image(image, ocr, replacement, source_language, target_language, typeface, ocr_background, nested_completed)
     output = BytesIO(); image.save(output, format=format_name)
     return output.getvalue(), count
+
+
+def _replacement_image(image: Image.Image) -> Image.Image:
+    """Return an alpha-capable image for a transparent indexed-PNG replacement."""
+    if image.mode == "P" and "transparency" in image.info:
+        return image.convert("RGBA")
+    return image
 
 def replace_image(image: Image.Image, ocr: OcrProvider, replacement: TextReplacementProvider, source_language: str, target_language: str, typeface: skia.Typeface, ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND, nested_completed: Callable[[str], None] | None = None) -> int:
     prepared: list[TextRegionReplacement] = []

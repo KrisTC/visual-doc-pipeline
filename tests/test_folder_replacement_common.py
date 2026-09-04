@@ -16,7 +16,7 @@ from uuid import UUID
 import xml.etree.ElementTree as ElementTree
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from docx import Document
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, Protection
@@ -90,6 +90,66 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementCommonTests(FolderReplacementTestCase):
+    # Verifies FR-2026-09-04-02.
+    def test_preserves_transparent_paletted_png_alpha_for_standalone_and_docx_media(self) -> None:
+        class _TransparentPaletteOcrProvider(_EmptyOcrProvider):
+            def recognize(self, request: OcrRequest) -> OcrResult:
+                return OcrResult(
+                    (
+                        OcrText(
+                            "source",
+                            1.0,
+                            BoundingPolygon(
+                                (
+                                    PixelPoint(10, 8),
+                                    PixelPoint(46, 8),
+                                    PixelPoint(46, 36),
+                                    PixelPoint(10, 36),
+                                )
+                            ),
+                        ),
+                    )
+                )
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            image_data = _transparent_paletted_png()
+            (input_root / "standalone.png").write_bytes(image_data)
+            with ZipFile(input_root / "embedded.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr("word/media/image1.png", image_data)
+
+            result = self._run(
+                input_root,
+                output_root,
+                _TransparentPaletteOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="#"),
+            )
+
+            self.assertEqual(2, result.processed_files)
+            with Image.open(BytesIO(image_data)) as source_image:
+                source_rgba = source_image.convert("RGBA")
+            with ZipFile(output_root / "embedded.docx") as archive:
+                embedded_data = archive.read("word/media/image1.png")
+            for output_data in (
+                (output_root / "standalone.png").read_bytes(),
+                embedded_data,
+            ):
+                with Image.open(BytesIO(output_data)) as output_image:
+                    self.assertEqual("PNG", output_image.format)
+                    self.assertEqual(source_rgba.size, output_image.size)
+                    output_rgba = output_image.convert("RGBA")
+                self.assertEqual(source_rgba.getpixel((2, 2)), output_rgba.getpixel((2, 2)))
+                self.assertEqual(source_rgba.getpixel((70, 50)), output_rgba.getpixel((70, 50)))
+                replacement_alpha = [
+                    cast(tuple[int, ...], output_rgba.getpixel((x, y)))[3]
+                    for x in range(10, 47)
+                    for y in range(8, 37)
+                ]
+                self.assertEqual(255, max(replacement_alpha))
+
     # Verifies FR-2026-08-22-02.
     def test_include_patterns_select_relative_supported_paths(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -412,6 +472,16 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertFalse(any(not request.is_filename for request in provider.requests))
             self.assertIn("broken.png", failure_output.getvalue())
 
+def _transparent_paletted_png() -> bytes:
+    """Create a synthetic indexed PNG with transparent and opaque palette entries."""
+    image = Image.new("P", (80, 60), 0)
+    image.putpalette([240, 230, 220, 20, 50, 200] + [0] * 762)
+    image.info["transparency"] = bytes([0, 255])
+    ImageDraw.Draw(image).text((16, 12), "A", fill=1)
+    image.putpixel((70, 50), 1)
+    output = BytesIO()
+    image.save(output, "PNG")
+    return output.getvalue()
 
 
 if __name__ == "__main__":

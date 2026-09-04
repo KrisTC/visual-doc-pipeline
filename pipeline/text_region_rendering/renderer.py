@@ -266,7 +266,15 @@ def _draw_on_image(image: Image.Image, draw: Callable[[skia.Canvas], None]) -> N
     canvas = surface.getCanvas()
     canvas.drawImage(skia.Image.fromarray(source), 0, 0)
     draw(canvas)
-    rendered = Image.fromarray(surface.makeImageSnapshot().toarray(), "RGBA")
+    rendered_pixels = surface.makeImageSnapshot().toarray()
+    transparent_source = source[:, :, 3] == 0
+    transparent_output = rendered_pixels[:, :, 3] == 0
+    # Skia can canonicalize an alpha-zero pixel's otherwise unobservable RGB
+    # channels. Retain the source representation where rendering left it transparent.
+    rendered_pixels[transparent_source & transparent_output, :3] = source[
+        transparent_source & transparent_output, :3
+    ]
+    rendered = Image.fromarray(rendered_pixels, "RGBA")
     if image.mode == "RGBA":
         image.paste(rendered)
     else:

@@ -571,6 +571,73 @@ The scope is limited to preparing raster pixels for OCR. It does not require gen
 
 ---
 
+## FR-2026-09-04-02
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve transparent paletted PNG alpha through raster text replacement |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported DOCX embedded-image defect |
+| Date Added | 2026-09-04 |
+| Related Requirements | FR-2026-08-02-10, FR-2026-08-27-01, FR-2026-08-03-03 |
+
+### Description
+
+When the raster text-replacement pipeline processes a PNG with palette-based
+transparency, including a PNG whose Pillow mode is `P` and whose transparency
+is represented by a per-palette-entry byte sequence, it shall preserve the
+decoded non-premultiplied RGBA semantics of the image through replacement and
+output encoding.
+
+Before the Skia rendering result is written back, the pipeline shall use an
+alpha-capable working/output representation. It shall not paste or otherwise
+copy palette indices generated for a different palette into the source
+image's palette. Such an operation may change the opacity or colour represented
+by an unchanged source pixel and is prohibited.
+
+For every pixel outside all replacement background-wipe outsets, the decoded
+output RGBA value shall equal the decoded input RGBA value. Replacement
+background wipes and glyphs shall retain the alpha values selected by the
+existing colour-estimation and rendering rules. In particular, an opaque source
+or replacement glyph shall not become translucent solely because the source
+PNG uses palette transparency.
+
+The pipeline shall retain the PNG file format and source dimensions. It may
+encode the output as truecolour RGBA rather than indexed palette PNG when that
+is necessary to preserve the required pixel semantics. This requirement does
+not require preservation of the source PNG palette, palette order, ancillary
+metadata, or encoded bytes.
+
+This applies equally to standalone bitmap processing and to raster PNG parts
+embedded in supported Office documents. It does not alter FR-2026-08-27-01's
+temporary OCR-only flattening rule: colour estimation, replacement rendering,
+and output encoding shall continue to use the transparency-preserving image.
+
+### Rationale
+
+An indexed PNG's pixels are palette indices, while its alpha may be stored in
+a separate palette transparency table. Converting a rendered RGBA result to a
+new palette and then copying those indices into the original image treats the
+new indices as entries in the old palette. The resulting pixels can become
+nearly transparent even when the original or rendered glyphs are opaque.
+
+### Notes
+
+Automated tests shall use only synthetic images and documents. They shall
+create a paletted PNG with a byte-sequence transparency table containing both
+fully transparent and fully opaque entries, then process it through the normal
+raster replacement path using deterministic OCR and replacement doubles. They
+shall verify decoded RGBA equality for representative unaffected transparent
+and opaque pixels, retained source dimensions and PNG format, and replacement
+glyph pixels with the expected non-zero, opaque alpha where the selected text
+colour is opaque. They shall also process that PNG as a media part in a
+synthetic DOCX and verify the same decoded-alpha properties after extracting
+the resulting media part. Tests shall not use confidential samples or derived
+artifacts.
+
+---
+
 ## FR-2026-08-04-02
 
 | Property | Value |
