@@ -131,6 +131,7 @@ def replace_xlsx_file(
     if document_text_layout == "preserve-source-formatting":
         return _replace_office_file(
             source, destination, ocr, processing_provider, source_language, target_language, typeface, completed,
+            document_text_layout=document_text_layout,
             failure_context=failure_context,
             nested_progress=nested_progress,
         )
@@ -148,6 +149,7 @@ def replace_xlsx_file(
         target_language,
         typeface,
         completed,
+        document_text_layout=document_text_layout,
         skip_native_xml_part=_is_custom_xlsx_part,
         failure_context=failure_context,
         nested_progress=nested_progress,

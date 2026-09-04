@@ -602,6 +602,7 @@ def _replace_office_file(
     typeface: skia.Typeface,
     work_completed: Callable[[str], None],
     *,
+    document_text_layout: str = "preserve-source-formatting",
     replace_native_xml: bool = True,
     skip_native_xml_part: Callable[[str], bool] | None = None,
     ocr_backgrounds: Mapping[str, RgbColour] | None = None,
@@ -678,6 +679,9 @@ def _replace_office_file(
                         target_language,
                         typeface,
                     ),
+                    document_text_layout=document_text_layout,
+                    replacement_provider=replacement_provider,
+                    target_language=target_language,
                 )
                 data = vector_result.data
                 native_items += vector_result.replaced_text_items

@@ -7,10 +7,19 @@ from io import BytesIO
 import base64
 import struct
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
+from pipeline import bounded_text_layout
 from pipeline.vector_text import replace_vector_text
+from pipeline.vector_text.replacer import (
+    _EmfFont,
+    _EmfRectangle,
+    _EmfTextCandidate,
+    _emf_measured_source_bounds,
+    _emf_unclipped_fit_contexts,
+)
 from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
 
 
@@ -96,6 +105,124 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual("#####", _emf_text(result.data))
         self.assertEqual(len(result.data), struct.unpack_from("<I", result.data, 48)[0])
 
+    # Verifies FR-2026-09-04-01.
+    def test_fits_unclipped_emf_text_and_stops_at_a_vertical_line(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return TextReplacementResult("A considerably longer heading", 1.0)
+
+        source = _emf_with_unclipped_text(line_x=60)
+        contexts = _emf_unclipped_fit_contexts(source, measure_source_fonts=False)
+        context = next(iter(contexts.values()))
+
+        result = replace_vector_text(
+            source,
+            ".emf",
+            _mask,
+            "en",
+            document_text_layout="preserve-basic-layout",
+            replacement_provider=_Provider(),
+            target_language="en",
+        )
+
+        self.assertEqual(60, context.fitting_bounds.right)
+        self.assertEqual("A considerably longer heading", _emf_text(result.data))
+        self.assertEqual((0.0, 0.0), _emf_text_scales(result.data)[0])
+        font_heights = _emf_font_heights(result.data)
+        self.assertLess(abs(font_heights[0]), abs(font_heights[1]))
+        self.assertEqual(-20, font_heights[1])
+        self.assertEqual([1, 82, 82], _emf_record_types(result.data)[:3])
+        self.assertEqual(10, struct.unpack_from("<I", result.data, 52)[0])
+        self.assertEqual(3, struct.unpack_from("<H", result.data, 56)[0])
+
+    # Verifies FR-2026-09-04-01.
+    def test_unclipped_emf_fitting_stops_at_adjacent_text_and_rejects_transforms(self) -> None:
+        adjacent_source = _emf_with_unclipped_text(adjacent_text_left=60)
+        adjacent_contexts = _emf_unclipped_fit_contexts(
+            adjacent_source, measure_source_fonts=False
+        )
+        first_context = next(iter(adjacent_contexts.values()))
+        self.assertEqual(60, first_context.fitting_bounds.right)
+
+        transformed_source = _emf_with_unclipped_text(include_world_transform=True)
+        self.assertEqual(
+            {}, _emf_unclipped_fit_contexts(transformed_source, measure_source_fonts=False)
+        )
+        result = replace_vector_text(
+            transformed_source,
+            ".emf",
+            _mask,
+            "en",
+            document_text_layout="preserve-basic-layout-source-font",
+            replacement_provider=_LongReplacementProvider(),
+            target_language="en",
+        )
+        self.assertEqual((0.0, 0.0), _emf_text_scales(result.data)[0])
+
+    # Verifies FR-2026-09-04-01.
+    def test_unclipped_emf_uses_noto_for_basic_layout_and_requests_source_measurement(self) -> None:
+        source = _emf_with_unclipped_text(font_family="Unavailable Test Source Face")
+        with patch(
+            "pipeline.bounded_text_layout.source_font_measurement",
+            wraps=bounded_text_layout.source_font_measurement,
+        ) as source_measurement:
+            replace_vector_text(
+                source,
+                ".emf",
+                _mask,
+                "en",
+                document_text_layout="preserve-basic-layout",
+                replacement_provider=_LongReplacementProvider(),
+                target_language="en",
+            )
+            self.assertEqual(0, source_measurement.call_count)
+
+        with patch(
+            "pipeline.bounded_text_layout.source_font_measurement",
+            wraps=bounded_text_layout.source_font_measurement,
+        ) as source_measurement:
+            replace_vector_text(
+                source,
+                ".emf",
+                _mask,
+                "en",
+                document_text_layout="preserve-basic-layout-source-font",
+                replacement_provider=_LongReplacementProvider(),
+                target_language="en",
+            )
+            self.assertGreater(source_measurement.call_count, 0)
+
+    # Verifies FR-2026-09-04-01.
+    def test_unclipped_emf_accepts_one_unit_source_bound_rounding(self) -> None:
+        font = _EmfFont("Noto Sans JP", 12.0, False, False)
+        wide_candidate = _EmfTextCandidate(
+            0,
+            _EmfRectangle(0, 0, 1_000, 20),
+            "Old",
+            font,
+            1,
+            b"font",
+            0,
+            True,
+        )
+        measured = _emf_measured_source_bounds(wide_candidate, False)
+        self.assertIsNotNone(measured)
+        assert measured is not None
+        tight_candidate = _EmfTextCandidate(
+            0,
+            _EmfRectangle(0, 0, measured.right - 1, 20),
+            "Old",
+            font,
+            1,
+            b"font",
+            0,
+            True,
+        )
+        reconciled = _emf_measured_source_bounds(tight_candidate, False)
+        self.assertIsNotNone(reconciled)
+        assert reconciled is not None
+        self.assertEqual(tight_candidate.bounds.right, reconciled.right)
+
     # Verifies FR-2026-08-03-09.
     def test_replaces_embedded_emf_stretchdibits_image_in_memory(self) -> None:
         source = _emf_with_stretchdibits_image()
@@ -160,12 +287,117 @@ def _emf_with_text(text: str) -> bytes:
 
 
 def _emf_text(data: bytes) -> str:
-    record_offset = struct.unpack_from("<I", data, 4)[0]
-    string_length = struct.unpack_from("<I", data, record_offset + 44)[0]
-    string_offset = struct.unpack_from("<I", data, record_offset + 48)[0]
-    return data[
-        record_offset + string_offset : record_offset + string_offset + (string_length * 2)
-    ].decode("utf-16-le")
+    record_offset = 0
+    while record_offset < len(data):
+        record_type, record_size = struct.unpack_from("<II", data, record_offset)
+        if record_type == 84:
+            string_length = struct.unpack_from("<I", data, record_offset + 44)[0]
+            string_offset = struct.unpack_from("<I", data, record_offset + 48)[0]
+            return data[
+                record_offset + string_offset : record_offset + string_offset + (string_length * 2)
+            ].decode("utf-16-le")
+        record_offset += record_size
+    raise AssertionError("Expected an EMR_EXTTEXTOUTW record.")
+
+
+class _LongReplacementProvider:
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        return TextReplacementResult("A considerably longer heading", 1.0)
+
+
+def _emf_text_scales(data: bytes) -> list[tuple[float, float]]:
+    scales: list[tuple[float, float]] = []
+    offset = 0
+    while offset < len(data):
+        record_type, record_size = struct.unpack_from("<II", data, offset)
+        if record_type == 84:
+            scales.append(struct.unpack_from("<ff", data, offset + 28))
+        offset += record_size
+    return scales
+
+
+def _emf_font_heights(data: bytes) -> list[int]:
+    heights: list[int] = []
+    offset = 0
+    while offset < len(data):
+        record_type, record_size = struct.unpack_from("<II", data, offset)
+        if record_type == 82:
+            heights.append(struct.unpack_from("<i", data, offset + 12)[0])
+        offset += record_size
+    return heights
+
+
+def _emf_record_types(data: bytes) -> list[int]:
+    record_types: list[int] = []
+    offset = 0
+    while offset < len(data):
+        record_type, record_size = struct.unpack_from("<II", data, offset)
+        record_types.append(record_type)
+        offset += record_size
+    return record_types
+
+
+def _emf_with_unclipped_text(
+    *,
+    line_x: int | None = None,
+    adjacent_text_left: int | None = None,
+    include_world_transform: bool = False,
+    font_family: str = "Noto Sans JP",
+) -> bytes:
+    records = [_emf_font_record(font_family), _emf_select_object_record(1)]
+    if include_world_transform:
+        records.append(_emf_world_transform_record())
+    if line_x is not None:
+        records.extend((_emf_move_to_record(line_x, -10), _emf_line_to_record(line_x, 30)))
+    records.append(_emf_exttextout_record("Old", 0, 0, 40, 20))
+    if adjacent_text_left is not None:
+        records.append(_emf_exttextout_record("Value", adjacent_text_left, 0, 120, 20))
+    header = bytearray(88)
+    struct.pack_into("<II", header, 0, 1, len(header))
+    eof = struct.pack("<IIIII", 14, 20, 0, 0, 0)
+    result = bytearray(header + b"".join(records) + eof)
+    struct.pack_into("<I", result, 48, len(result))
+    struct.pack_into("<I", result, 52, len(records) + 2)
+    return bytes(result)
+
+
+def _emf_font_record(family: str) -> bytes:
+    record = bytearray(104)
+    struct.pack_into("<II", record, 0, 82, len(record))
+    struct.pack_into("<I", record, 8, 1)
+    struct.pack_into("<iiiii", record, 12, -20, 0, 0, 0, 400)
+    record[40:104] = family.encode("utf-16-le").ljust(64, b"\0")
+    return bytes(record)
+
+
+def _emf_select_object_record(handle: int) -> bytes:
+    return struct.pack("<III", 37, 12, handle)
+
+
+def _emf_move_to_record(x: int, y: int) -> bytes:
+    return struct.pack("<IIii", 27, 16, x, y)
+
+
+def _emf_line_to_record(x: int, y: int) -> bytes:
+    return struct.pack("<IIii", 54, 16, x, y)
+
+
+def _emf_world_transform_record() -> bytes:
+    return struct.pack("<IIffffff", 35, 32, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+
+
+def _emf_exttextout_record(text: str, left: int, top: int, right: int, bottom: int) -> bytes:
+    text_bytes = text.encode("utf-16-le")
+    record = bytearray(76 + len(text_bytes))
+    struct.pack_into("<II", record, 0, 84, len(record))
+    struct.pack_into("<iiii", record, 8, left, top, right, bottom)
+    struct.pack_into("<ii", record, 36, left, top)
+    struct.pack_into("<I", record, 44, len(text))
+    struct.pack_into("<I", record, 48, 76)
+    record[76:] = text_bytes
+    record.extend(b"\0" * ((-len(record)) % 4))
+    struct.pack_into("<I", record, 4, len(record))
+    return bytes(record)
 
 
 def _emf_with_stretchdibits_image() -> bytes:

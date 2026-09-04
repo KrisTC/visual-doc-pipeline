@@ -96,6 +96,7 @@ def replace_docx_file(
         native, images, vectors = _replace_office_file(
             source, destination, ocr, replacement, source_language, target_language, typeface,
             completed,
+            document_text_layout=document_text_layout,
             skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
             ocr_backgrounds=ocr_backgrounds,
             failure_context=failure_context,
@@ -113,6 +114,7 @@ def replace_docx_file(
     native, images, vectors = _replace_office_file(
         source, destination, ocr, replacement, source_language, target_language, typeface,
         completed,
+        document_text_layout=document_text_layout,
         skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
         ocr_backgrounds=ocr_backgrounds,
         failure_context=failure_context,

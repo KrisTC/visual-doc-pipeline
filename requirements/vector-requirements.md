@@ -261,3 +261,82 @@ order, style matching, glyph fallback, malformed-CSS fallback, and that no
 external reference is opened.
 
 ---
+
+## FR-2026-09-04-01
+
+| Property | Value |
+|----------|-------|
+| Title | Fit un-clipped horizontal EMF text to measured source geometry |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF table-label diagnosis |
+| Date Added | 2026-09-04 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02 |
+
+### Description
+
+This requirement extends fitted-layout eligibility for editable EMF
+`EMR_EXTTEXTOUTA` and `EMR_EXTTEXTOUTW` records that have no explicit clipping
+rectangle.  It supersedes the EMF-specific explicit-clipping-only rule in
+FR-2026-08-04-07, but only for the eligible records below.  It does not change
+`preserve-source-formatting`, which shall retain its existing direct native
+text replacement behaviour.
+
+In either fitted layout mode, the EMF adapter shall first reconstruct the
+selected source GDI font and original horizontal text placement.  It shall
+measure the original non-empty, single-line text at its original size to derive
+its occupied source rectangle.  The record's non-degenerate rendered bounds
+shall be retained as independent geometry evidence and a safety limit; a
+measurement that cannot be reconciled safely with those bounds is ineligible.
+
+`preserve-basic-layout` shall measure the source text with the appropriate
+committed Noto face.  `preserve-basic-layout-source-font` shall first measure
+with the resolved source face when it is available and usable, and otherwise
+shall measure with the appropriate committed Noto face.  Replacement-face
+selection and fitting shall follow FR-2026-08-27-02.  As ordinary EMF has no
+safe portable font-embedding path, the output shall retain its source font
+reference while applying the selected fitting scale.
+
+The measured source rectangle shall be the default replacement fitting bound.
+For a source record and returned replacement that each contain one horizontal
+line, the adapter may expand that bound along the baseline only into verified
+empty space.  It shall not expand vertically or introduce a new line.  It
+shall stop before the nearest intersecting source-text rectangle or a
+recognised vector line segment.  The complete fitted replacement glyph bounds
+shall remain within the resulting rectangle and shall not intersect another
+source-text rectangle or recognised vector line segment.  A left-aligned
+record may expand rightward, a right-aligned record may expand leftward, and a
+centred record may expand symmetrically.
+
+The initial eligible geometry is ordinary, axis-aligned horizontal text and
+axis-aligned `EMR_MOVETOEX`/`EMR_LINETO` line segments in a safely resolved EMF
+coordinate system.  The adapter shall not infer table cells, paragraph blocks,
+or obstacles from arbitrary paths, fills, images, rotations, shears,
+unresolved transforms, or ambiguous graphics state.  An unsupported or
+ambiguous record shall retain the existing `preserve-source-formatting`
+fallback rather than risk crossing a line or other text.
+
+### Rationale
+
+EMF drawings often encode table and heading labels as independent text records
+without a clipping rectangle.  Measuring the original visual line provides a
+safe default bound.  Limited expansion into evidenced empty horizontal space
+preserves readable translated headings while retaining table rules and
+neighbouring values as hard layout boundaries.
+
+### Notes
+
+The adapter may use the shared bounded-text layout core for face selection and
+fitting, but it must retain one-line EMF output semantics.  It must not use OCR
+or rasterize the EMF graphic for this feature.
+
+Automated tests shall use synthetic EMF inputs only.  They shall verify
+Noto-only source measurement in `preserve-basic-layout`; source-face
+measurement and Noto fallback in `preserve-basic-layout-source-font`; fitting
+to the measured source rectangle; permitted horizontal expansion; stopping at
+both an adjacent text rectangle and a vertical line segment; alignment-aware
+expansion; and unchanged direct replacement for multi-line, rotated,
+transformed, ambiguous, or otherwise ineligible records.  Tests shall verify
+that generated EMF files remain structurally valid.
+
+---
