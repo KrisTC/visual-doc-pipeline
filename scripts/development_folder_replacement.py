@@ -20,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from pipeline.folder_replacement import parse_include_patterns
+from pipeline.folder_replacement.xlsx import XLSX_TRANSLATION_MODE_CHOICES
 from pipeline.ocr import OcrProviderFactory
 from pipeline.text_replacement import TextReplacementProviderFactory
 from scripts.folder_replacement import (
@@ -48,6 +49,7 @@ class Scenario:
     text_replacement: str
     ocr: str
     document_text_layout: str
+    xlsx_translation_mode: str
     text_replacement_short_name: str
     ocr_short_name: str
 
@@ -57,6 +59,7 @@ class Scenario:
             "text_replacement": self.text_replacement,
             "ocr": self.ocr,
             "document_text_layout": self.document_text_layout,
+            "xlsx_translation_mode": self.xlsx_translation_mode,
             "text_replacement_short_name": self.text_replacement_short_name,
             "ocr_short_name": self.ocr_short_name,
             "document_text_layout_short_name": DOCUMENT_TEXT_LAYOUT_SHORT_NAMES[
@@ -96,6 +99,12 @@ def _argument_parser() -> argparse.ArgumentParser:
         default=DEFAULT_DOCUMENT_TEXT_LAYOUT,
         metavar="LAYOUT[,LAYOUT...]|all",
         help="Layout mode(s), or all modes (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--xlsx-translation-mode",
+        choices=XLSX_TRANSLATION_MODE_CHOICES,
+        default="full",
+        help="XLSX translation mode forwarded to every scenario (default: %(default)s).",
     )
     parser.add_argument(
         "--include",
@@ -227,6 +236,7 @@ def _expand_scenarios(arguments: argparse.Namespace, parser: argparse.ArgumentPa
             text_replacement,
             ocr,
             layout,
+            arguments.xlsx_translation_mode,
             text_replacement_factory.provider_short_names[text_replacement],
             ocr_factory.provider_short_names[ocr],
         )
@@ -323,6 +333,8 @@ def _folder_replacement_command(
         scenario.ocr,
         "--document-text-layout",
         scenario.document_text_layout,
+        "--xlsx-translation-mode",
+        scenario.xlsx_translation_mode,
         "--debug",
     ]
     for include_option_value in include_option_values:

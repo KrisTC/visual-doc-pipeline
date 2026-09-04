@@ -40,6 +40,8 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                         "no_ocr",
                         "--document-text-layout",
                         "preserve-source-formatting,preserve-basic-layout",
+                        "--xlsx-translation-mode",
+                        "fast",
                         "--include",
                         "*.pptx,*.pdf",
                         "--include",
@@ -88,6 +90,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                     self.assertEqual(str(source_folder), command[2])
                     self.assertIn("--include", command)
                     self.assertIn("--debug", command)
+                    self.assertEqual("fast", command[command.index("--xlsx-translation-mode") + 1])
                     self.assertIn("*.pptx,*.pdf", command)
                     self.assertIn("slides/*.pptx", command)
 

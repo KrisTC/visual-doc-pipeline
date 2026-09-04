@@ -556,3 +556,68 @@ ordinary prose after their sequence number, so they need the normal joiner;
 TOC entries instead require their existing tab-driven layout.
 
 ---
+
+## FR-2026-09-03-03
+
+| Property | Value |
+|----------|-------|
+| Title | Translate native DOCX chart text and embedded chart workbooks |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-03 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-14, FR-2026-09-03-06, TR-2026-08-03-01 |
+
+### Description
+
+The DOCX adapter shall translate visible text in relationship-reachable native
+DrawingML chart parts while preserving a Word-openable package. It shall
+translate rich DrawingML text in chart titles, axis titles, custom data-label
+text, and relationship-reachable chart user-shape text. It shall preserve the
+rich-text paragraph and run structure and their directly expressed formatting.
+
+For a chart whose `c:externalData` relationship resolves to an embedded XLSX
+workbook, the DOCX adapter shall invoke the XLSX adapter's in-memory fast mode
+defined by FR-2026-09-03-06. It shall not select the complete-workbook mode for
+that embedded workbook. XLSX eligibility, text extraction, text replacement,
+formula preservation, and workbook serialization remain the XLSX adapter's
+responsibility.
+
+The DOCX adapter may read chart formula references solely to locate the
+corresponding displayed string caches. It shall not translate, modify, or
+otherwise reinterpret a formula expression, its calculation settings, or
+numeric chart data. After the embedded XLSX adapter has processed the
+workbook, the DOCX adapter shall update each relationship-reachable displayed
+string cache from the corresponding processed workbook value. This shall make
+the translated labels visible in Word without requiring an Excel refresh and
+ensure that **Edit Data in Excel** presents the same labels as the chart.
+
+The adapter shall retain the chart type, formulas, numerical caches, chart
+styles, embedded workbook relationship, external-data reference, and unrelated
+package parts. This requirement does not add bounded or fitted chart-text
+layout: chart text shall retain its source formatting in every
+document-text-layout mode.
+
+If a rich-text container, embedded-workbook relationship, formula reference,
+or string cache cannot be resolved and updated safely, the adapter shall leave
+that affected content unchanged, record a local diagnostic, and continue
+processing independently supported chart text and document content.
+
+Automated tests shall use synthetic DOCX packages containing native charts and
+embedded synthetic XLSX workbooks. They shall verify rich-text translation,
+in-memory XLSX delegation, translated displayed string caches, unchanged
+formula expressions and numerical data, preserved relationships and unrelated
+workbook content, safe unsupported-reference fallback, and repair-free opening
+in Word and Excel. Tests and fixtures shall not use confidential documents or
+derived artifacts.
+
+### Rationale
+
+A native Word chart has two representations of its editable label text: chart
+XML used for immediate display and, when present, an embedded workbook used by
+Excel's editing interface. Replacing only one makes the document internally
+inconsistent. Delegating the workbook as a whole keeps spreadsheet semantics in
+the XLSX adapter, while the DOCX adapter owns the chart-specific cache update
+needed for Word to display the resulting workbook labels immediately.
+
+---

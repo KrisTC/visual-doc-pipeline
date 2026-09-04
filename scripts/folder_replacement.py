@@ -21,6 +21,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import skia  # type: ignore[import-not-found]
 
 from pipeline.folder_replacement import parse_include_patterns, replace_input_folder
+from pipeline.folder_replacement.xlsx import XLSX_TRANSLATION_MODE_CHOICES
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr import OcrProvider, OcrProviderFactory
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
@@ -110,6 +111,12 @@ def _argument_parser() -> argparse.ArgumentParser:
         metavar="LAYOUT",
         default=DEFAULT_DOCUMENT_TEXT_LAYOUT,
         help="Layout mode; see below.",
+    )
+    command_options.add_argument(
+        "--xlsx-translation-mode",
+        choices=XLSX_TRANSLATION_MODE_CHOICES,
+        default="full",
+        help="XLSX translation mode (default: %(default)s).",
     )
     command_options.add_argument(
         "--include",
@@ -252,6 +259,7 @@ def main() -> int:
         target_language=arguments.target_language,
         typeface=_load_default_typeface(),
         document_text_layout=arguments.document_text_layout,
+        xlsx_translation_mode=arguments.xlsx_translation_mode,
         include_patterns=include_patterns,
         diagnostics_enabled=arguments.debug,
     )

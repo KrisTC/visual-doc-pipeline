@@ -38,7 +38,7 @@ from pipeline.folder_replacement import (
     replace_input_folder,
 )
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
-from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
+from pipeline.folder_replacement.docx import _docx_ocr_backgrounds, replace_docx_file
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
     _PdfPaintSpan,
@@ -77,6 +77,7 @@ from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvid
 
 
 from folder_replacement_test_support import (
+    FONT_PATH,
     FolderReplacementTestCase,
     _CountingOcrProvider,
     _EmptyOcrProvider,
@@ -90,6 +91,200 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementDocxTests(FolderReplacementTestCase):
+    # Verifies FR-2026-09-03-03 and FR-2026-09-04-01.
+    def test_replaces_reachable_chart_rich_text_and_embedded_workbook_caches(self) -> None:
+        class _PrefixReplacementProvider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return TextReplacementResult(
+                    request.text if request.is_filename else f"translated-{request.text}", 1.0
+                )
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            workbook = Workbook()
+            worksheet = workbook.active
+            assert worksheet is not None
+            worksheet.title = "Data"
+            worksheet["A1"] = "One"
+            worksheet["A2"] = "Two"
+            worksheet["B1"] = "Unrelated supporting text"
+            skipped_sheet = workbook.create_sheet("Skipped")
+            skipped_sheet["A1001"] = "Untranslated supporting text"
+            workbook_bytes = BytesIO()
+            workbook.save(workbook_bytes)
+            with ZipFile(BytesIO(workbook_bytes.getvalue())) as source_archive:
+                embedded_parts = {
+                    entry.filename: source_archive.read(entry.filename)
+                    for entry in source_archive.infolist()
+                }
+            embedded_output = BytesIO()
+            with ZipFile(embedded_output, "w", ZIP_DEFLATED) as embedded_archive:
+                for name, data in embedded_parts.items():
+                    embedded_archive.writestr(name, data)
+                embedded_archive.writestr("custom/unrelated.bin", b"retained")
+            source = input_root / "chart.docx"
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                archive.writestr(
+                    "[Content_Types].xml",
+                    b'''<?xml version="1.0"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/word/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/word/charts/chart2.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>
+  <Override PartName="/word/charts/userShapes/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml"/>
+  <Override PartName="/word/embeddings/chart.xlsx" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"/>
+</Types>''',
+                )
+                archive.writestr(
+                    "_rels/.rels",
+                    b'''<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>''',
+                )
+                archive.writestr(
+                    "word/document.xml",
+                    b'''<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p/></w:body></w:document>''',
+                )
+                archive.writestr(
+                    "word/_rels/document.xml.rels",
+                    b'''<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/>
+</Relationships>''',
+                )
+                archive.writestr(
+                    "word/charts/chart1.xml",
+                    b'''<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart><c:title><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b="1"/><a:t>Title</a:t></a:r></a:p></c:rich></c:tx></c:title>
+  <c:plotArea><c:barChart><c:ser><c:cat><c:strRef><c:f>Data!$A$1:$A$2</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>One</c:v></c:pt><c:pt idx="1"><c:v>Two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$1:$B$2</c:f><c:numCache><c:pt idx="0"><c:v>10</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:ser><c:cat><c:strRef><c:f>Data!$A$1+1</c:f><c:strCache><c:pt idx="0"><c:v>Unsupported</c:v></c:pt></c:strCache></c:strRef></c:cat></c:ser></c:barChart></c:plotArea></c:chart>
+  <c:externalData r:id="rIdWorkbook"/>
+</c:chartSpace>''',
+                )
+                archive.writestr(
+                    "word/charts/chart2.xml",
+                    b'''<?xml version="1.0"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Unreachable</a:t></a:r></a:p></c:rich></c:tx></c:title></c:chart></c:chartSpace>''',
+                )
+                archive.writestr(
+                    "word/charts/_rels/chart1.xml.rels",
+                    b'''<?xml version="1.0"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rIdWorkbook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/package" Target="../embeddings/chart.xlsx"/>
+  <Relationship Id="rIdUserShape" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartUserShapes" Target="userShapes/drawing1.xml"/>
+</Relationships>''',
+                )
+                archive.writestr(
+                    "word/charts/userShapes/drawing1.xml",
+                    b'''<?xml version="1.0"?>
+<cdr:userShapes xmlns:cdr="http://schemas.openxmlformats.org/drawingml/2006/chartDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><cdr:relSizeAnchor><cdr:sp><cdr:txBody><a:p><a:r><a:rPr i="1"/><a:t>Label</a:t></a:r></a:p></cdr:txBody></cdr:sp></cdr:relSizeAnchor></cdr:userShapes>''',
+                )
+                archive.writestr("word/embeddings/chart.xlsx", embedded_output.getvalue())
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), _PrefixReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(1, result.processed_files)
+            with ZipFile(source) as source_archive:
+                source_relationships = source_archive.read("word/_rels/document.xml.rels")
+            with ZipFile(output_root / "chart.docx") as archive:
+                chart = ElementTree.fromstring(archive.read("word/charts/chart1.xml"))
+                unreachable_chart = ElementTree.fromstring(archive.read("word/charts/chart2.xml"))
+                user_shape = ElementTree.fromstring(archive.read("word/charts/userShapes/drawing1.xml"))
+                translated_workbook = archive.read("word/embeddings/chart.xlsx")
+                self.assertEqual(archive.read("word/_rels/document.xml.rels"), source_relationships)
+            with ZipFile(BytesIO(translated_workbook)) as embedded_archive:
+                self.assertEqual(b"retained", embedded_archive.read("custom/unrelated.bin"))
+            chart_namespace = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+            drawing_namespace = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+            title = chart.find(f".//{drawing_namespace}t")
+            unreachable_title = unreachable_chart.find(f".//{drawing_namespace}t")
+            assert title is not None and unreachable_title is not None
+            self.assertEqual("translated-Title", title.text)
+            self.assertEqual("Unreachable", unreachable_title.text)
+            self.assertEqual(
+                ["translated-One", "translated-Two", "Unsupported"],
+                [value.text for value in chart.findall(f".//{chart_namespace}strCache/{chart_namespace}pt/{chart_namespace}v")],
+            )
+            self.assertEqual("Data!$A$1:$A$2", chart.findtext(f".//{chart_namespace}strRef/{chart_namespace}f"))
+            self.assertEqual("10", chart.findtext(f".//{chart_namespace}numCache/{chart_namespace}pt/{chart_namespace}v"))
+            user_shape_label = user_shape.find(f".//{drawing_namespace}t")
+            assert user_shape_label is not None
+            self.assertEqual("translated-Label", user_shape_label.text)
+            translated = load_workbook(BytesIO(translated_workbook))
+            self.assertEqual("translated-One", translated["Data"]["A1"].value)
+            self.assertEqual("translated-Two", translated["Data"]["A2"].value)
+            self.assertEqual("translated-Unrelated supporting text", translated["Data"]["B1"].value)
+            self.assertEqual("Untranslated supporting text", translated["Skipped"]["A1001"].value)
+            Document(str(output_root / "chart.docx"))
+            diagnostic = json.loads(
+                (output_root / "chart.docx.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertIn(
+                "docx_chart_string_cache_unresolved",
+                [entry["reason_code"] for entry in diagnostic["entries"]],
+            )
+            self.assertEqual(
+                ["Skipped"],
+                [
+                    entry["worksheet_name"]
+                    for entry in diagnostic["entries"]
+                    if entry["reason_code"] == "xlsx_fast_mode_worksheet_skipped"
+                ],
+            )
+
+            class _NestedProgress:
+                def __init__(self) -> None:
+                    self.started: list[tuple[str, int | None, str]] = []
+                    self.advanced: list[str] = []
+                    self.cleared = 0
+
+                def start_nested(self, name: str, total: int | None, unit: str = "stage") -> None:
+                    self.started.append((name, total, unit))
+
+                def advance_nested(self, label: str) -> None:
+                    self.advanced.append(label)
+
+                def clear_nested(self) -> None:
+                    self.cleared += 1
+
+            typeface = skia.Typeface.MakeFromFile(str(FONT_PATH))
+            assert typeface is not None
+            nested_progress = _NestedProgress()
+            replace_docx_file(
+                source,
+                root / "nested-progress.docx",
+                _EmptyOcrProvider(),
+                _PrefixReplacementProvider(),
+                "en",
+                "en",
+                typeface,
+                lambda _label: None,
+                nested_progress=nested_progress,
+            )
+            self.assertEqual(1, len(nested_progress.started))
+            self.assertTrue(nested_progress.started[0][0].startswith("chart1.xml: chart.xlsx"))
+            self.assertEqual(3, nested_progress.started[0][1])
+            self.assertEqual("replacement request", nested_progress.started[0][2])
+            self.assertEqual(
+                [
+                    "xl/worksheets/sheet1.xml replacement 1",
+                    "xl/worksheets/sheet1.xml replacement 2",
+                    "xl/worksheets/sheet1.xml replacement 3",
+                ],
+                nested_progress.advanced,
+            )
+            self.assertEqual(1, nested_progress.cleared)
+
     # Verifies FR-2026-08-27-01.
     def test_uses_a_direct_document_background_for_embedded_word_image_ocr(self) -> None:
         with TemporaryDirectory() as temporary_directory:

@@ -13,7 +13,6 @@ from rich.progress import (
     ProgressColumn,
     Task,
     TaskID,
-    TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
 )
@@ -29,6 +28,15 @@ class EtaColumn(ProgressColumn):
         if remaining is None:
             return Text("—")
         return Text(str(timedelta(seconds=ceil(remaining))))
+
+
+class CompletionColumn(ProgressColumn):
+    """Render no percentage for a task whose total is not known."""
+
+    def render(self, task: Task) -> Text:
+        if task.total is None:
+            return Text("—")
+        return Text(f"{task.percentage:>3.0f}%")
 
 
 @dataclass(slots=True)
@@ -60,7 +68,7 @@ class LiveProgress:
                 table_column=Column(max_width=40, overflow="ellipsis"),
             ),
             BarColumn(),
-            TaskProgressColumn(),
+            CompletionColumn(),
             TimeElapsedColumn(),
             TextColumn("ETA"),
             EtaColumn(),
@@ -133,13 +141,13 @@ class LiveProgress:
             self._progress.update(self._current, visible=False)
         self.clear_nested()
 
-    def start_nested(self, name: str) -> None:
-        """Show the three honest OCR-image stages inside a document."""
-        self._nested = self._reset_task(self._nested, f"Nested: {name}", 3, "stage")
+    def start_nested(self, name: str, total: int | None = 3, unit: str = "stage") -> None:
+        """Show one bounded nested-object operation inside a document."""
+        self._nested = self._reset_task(self._nested, f"{name}", total, unit)
 
     def advance_nested(self, label: str) -> None:
         if self._nested is not None:
-            self._progress.update(self._nested, description=f"Nested: {label}")
+            self._progress.update(self._nested, description=f"{label}")
             self._progress.advance(self._nested)
 
     def clear_nested(self) -> None:

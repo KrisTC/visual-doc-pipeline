@@ -43,6 +43,7 @@ from pipeline.folder_replacement.office_xml import (
     replace_office_xml_text,
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
+from pipeline.folder_replacement.common import NestedProgressReporter
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 
@@ -107,6 +108,7 @@ def replace_pptx_file(
     completed: Callable[[str], None],
     document_text_layout: str = "preserve-source-formatting",
     failure_context: FailureContext | None = None,
+    nested_progress: NestedProgressReporter | None = None,
 ) -> tuple[int, int, int]:
     """Replace PPTX content, optionally fitting bounded slide text frames."""
     from pipeline.folder_replacement.processor import _replace_office_file
@@ -132,6 +134,7 @@ def replace_pptx_file(
             skip_native_xml_part=smartart_parts.__contains__,
             ocr_backgrounds=ocr_backgrounds,
             failure_context=failure_context,
+            nested_progress=nested_progress,
         )
         native_items += _replace_smartart_data_parts(
             destination,
@@ -164,6 +167,7 @@ def replace_pptx_file(
         replace_native_xml=False,
         ocr_backgrounds=ocr_backgrounds,
         failure_context=failure_context,
+        nested_progress=nested_progress,
     )
     native_items += _replace_smartart_data_parts(
         destination,

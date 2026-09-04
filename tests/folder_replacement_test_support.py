@@ -511,6 +511,7 @@ class FolderReplacementTestCase(unittest.TestCase):
         show_progress: bool = False,
         progress_factory: ProgressFactory | None = None,
         document_text_layout: str = "preserve-source-formatting",
+        xlsx_translation_mode: str = "full",
         include_patterns: tuple[str, ...] = (),
         diagnostics_enabled: bool = False,
     ) -> FolderReplacementResult:
@@ -526,6 +527,7 @@ class FolderReplacementTestCase(unittest.TestCase):
             target_language="en",
             typeface=typeface,
             document_text_layout=document_text_layout,
+            xlsx_translation_mode=xlsx_translation_mode,
             include_patterns=include_patterns,
             diagnostics_enabled=diagnostics_enabled,
             show_progress=show_progress,

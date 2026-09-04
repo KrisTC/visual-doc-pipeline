@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from typing import Protocol, cast
 
-from pipeline.text_replacement.errors import TextReplacementProviderError
+from pipeline.text_replacement.errors import TextReplacementProviderError, TextReplacementProviderRequestError
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
 
@@ -49,7 +49,7 @@ class _TranslateTextResponse(Protocol):
 class _TranslationClient(Protocol):
     """The subset of the Google client used by this provider."""
 
-    def translate_text(self, *, request: Mapping[str, object]) -> _TranslateTextResponse:
+    def translate_text(self, *, request: Mapping[str, object], timeout: float) -> _TranslateTextResponse:
         """Translate the text described by the supplied request."""
 
 
@@ -113,13 +113,29 @@ class GoogleCloudTranslateProvider:
             "source_language_code": source_language,
             "target_language_code": target_language,
         }
-        try:
-            response = client.translate_text(request=request)
-        except TextReplacementProviderError:
-            raise
-        except Exception as error:
-            message = "Google Cloud Translation could not translate the requested text."
-            raise TextReplacementProviderError(message) from error
+        for attempt in range(1, _TRANSLATE_ATTEMPT_LIMIT + 1):
+            try:
+                response = client.translate_text(
+                    request=request, timeout=_TRANSLATE_ATTEMPT_DEADLINE_SECONDS
+                )
+                break
+            except TextReplacementProviderError:
+                raise
+            except Exception as error:
+                transient = _is_transient_translation_error(error)
+                if attempt < _TRANSLATE_ATTEMPT_LIMIT and transient:
+                    continue
+                message = "Google Cloud Translation could not translate the requested text."
+                raise TextReplacementProviderRequestError(
+                    message,
+                    {
+                        "provider": "google_cloud_translate",
+                        "failure_category": _translation_failure_category(error, transient),
+                        "attempted_call_count": attempt,
+                        "attempt_deadline_seconds": _TRANSLATE_ATTEMPT_DEADLINE_SECONDS,
+                        "configured_attempt_limit": _TRANSLATE_ATTEMPT_LIMIT,
+                    },
+                ) from error
 
         if not response.translations or not response.translations[0].translated_text:
             message = "Google Cloud Translation returned no translation."
@@ -141,6 +157,28 @@ class GoogleCloudTranslateProvider:
         self._configuration = configuration
         self._client = client
         return configuration, client
+
+
+_TRANSLATE_ATTEMPT_DEADLINE_SECONDS = 10.0
+_TRANSLATE_ATTEMPT_LIMIT = 3
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    return type(error).__name__ in {"DeadlineExceeded", "TimeoutError"}
+
+
+def _is_transient_translation_error(error: Exception) -> bool:
+    return _is_timeout_error(error) or type(error).__name__ in {
+        "ServiceUnavailable", "InternalServerError", "TooManyRequests",
+    }
+
+
+def _translation_failure_category(error: Exception, transient: bool) -> str:
+    if _is_timeout_error(error):
+        return "timeout"
+    if transient:
+        return "transient_transport_failure"
+    return "non_transient_api_failure"
 
 
 def create_provider() -> TextReplacementProvider:

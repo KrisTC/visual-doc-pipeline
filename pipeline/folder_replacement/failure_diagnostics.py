@@ -11,6 +11,7 @@ from pipeline.text_replacement import (
     TextReplacementRequest,
     TextReplacementResult,
 )
+from pipeline.text_replacement.errors import TextReplacementProviderRequestError
 
 
 @dataclass(slots=True)
@@ -52,6 +53,10 @@ class FailureContext:
             "input_character_count": len(request.text),
         }
 
+    def record_provider_failure(self, error: TextReplacementProviderRequestError) -> None:
+        if self.request is not None:
+            self.request.update(error.diagnostic)
+
     def record_ocr(self, request: OcrRequest) -> None:
         """Store only OCR request metadata, never image pixels or recognized text."""
         self.operation = "ocr"
@@ -91,7 +96,11 @@ class ContextualTextReplacementProvider:
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         self.context.record_text_replacement(request)
-        return self.wrapped_provider.replace(request)
+        try:
+            return self.wrapped_provider.replace(request)
+        except TextReplacementProviderRequestError as error:
+            self.context.record_provider_failure(error)
+            raise
 
 
 @dataclass(frozen=True, slots=True)

@@ -54,7 +54,11 @@ from pipeline.folder_replacement.pdf import (
     _pdf_is_candidate_bullet_error,
     _pdf_text_advance,
 )
-from pipeline.folder_replacement.xlsx import _replace_drawing
+from pipeline.folder_replacement.xlsx import (
+    _replace_drawing,
+    replace_xlsx_bytes,
+    xlsx_native_text_request_total,
+)
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
@@ -89,6 +93,129 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementXlsxTests(FolderReplacementTestCase):
+    # Verifies FR-2026-09-04-01.
+    def test_fast_mode_translates_all_cells_on_worksheets_with_at_most_1000_used_rows(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "workbook.xlsx"
+            workbook = Workbook()
+            small_sheet = workbook.active
+            assert small_sheet is not None
+            small_sheet.title = "Small"
+            small_sheet["A1"] = "Small first"
+            small_sheet["A500"] = "Small last"
+            large_sheet = workbook.create_sheet("Large")
+            large_sheet["A1"] = "Large first"
+            large_sheet["A1001"] = "Large last"
+            workbook.save(path)
+            with ZipFile(path) as archive:
+                source_large_sheet = archive.read("xl/worksheets/sheet2.xml")
+
+            request_total = xlsx_native_text_request_total(
+                path.read_bytes(), "preserve-source-formatting", xlsx_translation_mode="fast"
+            )
+            provider = _RecordingReplacementProvider(replacement_text="Translated")
+            translated, replacements = replace_xlsx_bytes(
+                path.read_bytes(),
+                provider,
+                "en",
+                "fr",
+                "preserve-source-formatting",
+                xlsx_translation_mode="fast",
+            )
+
+        self.assertEqual(2, request_total)
+        self.assertEqual(2, replacements)
+        self.assertEqual(["Small first", "Small last"], [request.text for request in provider.requests])
+        output = load_workbook(BytesIO(translated))
+        self.assertEqual("Translated", output["Small"]["A1"].value)
+        self.assertEqual("Translated", output["Small"]["A500"].value)
+        self.assertEqual("Large first", output["Large"]["A1"].value)
+        self.assertEqual("Large last", output["Large"]["A1001"].value)
+        with ZipFile(BytesIO(translated)) as archive:
+            self.assertEqual(source_large_sheet, archive.read("xl/worksheets/sheet2.xml"))
+
+    # Verifies FR-2026-09-04-01.
+    def test_fast_mode_reports_all_source_level_progress_stages(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            workbook = Workbook()
+            worksheet = workbook.active
+            assert worksheet is not None
+            worksheet["A1"] = "Visible label"
+            skipped_sheet = workbook.create_sheet("Skipped")
+            skipped_sheet["A1001"] = "Skipped label"
+            workbook.save(input_root / "workbook.xlsx")
+            progress_bars: list[_RecordedProgress] = []
+
+            def make_progress(total: int, label: str) -> ProgressReporter:
+                progress = _RecordedProgress(total, label)
+                progress_bars.append(progress)
+                return progress
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="Translated"),
+                xlsx_translation_mode="fast",
+                show_progress=True,
+                progress_factory=make_progress,
+                diagnostics_enabled=True,
+            )
+            diagnostic = json.loads(
+                (output_root / "workbook.xlsx.diagnostics.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(1, result.processed_files)
+        self.assertEqual(1, len(progress_bars))
+        self.assertEqual(3, progress_bars[0].total)
+        self.assertEqual(
+            [
+                "xl/worksheets/sheet1.xml replacement 1",
+                "chart cache synchronization",
+                "package write",
+            ],
+            progress_bars[0].postfixes,
+        )
+        self.assertEqual(3, progress_bars[0].updates)
+        self.assertTrue(progress_bars[0].closed)
+        skipped = [
+            entry for entry in diagnostic["entries"]
+            if entry["reason_code"] == "xlsx_fast_mode_worksheet_skipped"
+        ]
+        self.assertEqual(["Skipped"], [entry["worksheet_name"] for entry in skipped])
+
+    # Verifies FR-2026-09-03-01 and FR-2026-09-03-05.
+    def test_embedded_workbook_request_total_excludes_numeric_looking_text(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "workbook.xlsx"
+            workbook = Workbook()
+            worksheet = workbook.active
+            assert worksheet is not None
+            worksheet["A1"] = "Label"
+            worksheet["A2"] = 42
+            worksheet["A3"] = "123"
+            workbook.save(path)
+
+            request_total = xlsx_native_text_request_total(
+                path.read_bytes(), "preserve-basic-layout-source-font"
+            )
+            provider = _RecordingReplacementProvider(replacement_text="translated")
+            translated, _replacements = replace_xlsx_bytes(
+                path.read_bytes(), provider, "en", "fr", "preserve-basic-layout-source-font"
+            )
+
+        self.assertEqual(1, request_total)
+        self.assertEqual(["Label"], [request.text for request in provider.requests])
+        output = load_workbook(BytesIO(translated))
+        output_sheet = output.active
+        assert output_sheet is not None
+        self.assertEqual("translated", output_sheet["A1"].value)
+        self.assertEqual("123", output_sheet["A3"].value)
+
     # Verifies FR-2026-08-04-07.
     def test_xlsx_drawing_layout_writes_schema_ordered_run_properties(self) -> None:
         drawing = b'''<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:sp><xdr:spPr><a:xfrm><a:ext cx="914400" cy="457200"/></a:xfrm></xdr:spPr><xdr:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="2400"><a:latin typeface="Source Sans"/></a:rPr><a:t>Original</a:t></a:r><a:endParaRPr/></a:p></xdr:txBody></xdr:sp></xdr:wsDr>'''

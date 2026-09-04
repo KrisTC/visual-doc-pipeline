@@ -129,3 +129,49 @@ construction failure, and unchanged endpoint, error-sanitization, and request
 contents behaviour.
 
 ---
+
+## FR-2026-09-03-04
+
+| Property | Value |
+|----------|-------|
+| Title | Bound and diagnose transient Google Cloud Translation request waits |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following stalled embedded-workbook translation |
+| Date Added | 2026-09-03 |
+| Related Requirements | FR-2026-08-24-04, FR-2026-08-28-01, SR-2026-08-24-01, FR-2026-08-28-03 |
+
+### Description
+
+For each non-empty cross-language `translateText` operation, the Google Cloud
+Translation provider shall apply a 10-second RPC deadline. It shall make at
+most three total attempts: the initial attempt and at most two retries. A retry
+is permitted only after a deadline expiry or another transient transport
+failure; invalid requests, authentication and authorization failures, and other
+non-transient API failures shall fail immediately. The provider shall retain
+its initialized client across attempts.
+
+After the final unsuccessful attempt, the provider shall raise the existing
+normalized `TextReplacementProviderError`, so the folder processor's existing
+per-source failure isolation applies. Its safe failure diagnostic shall include
+the provider name, failure category, attempted-call count, per-attempt deadline
+seconds, total configured attempt limit, input character count, source and
+target language tags, and filename flag. It shall not include request text,
+translated text, source or output paths as values, credentials, project IDs,
+authorization headers, API response bodies, or chained provider messages.
+
+### Rationale
+
+An RPC without a deadline can block a document pipeline indefinitely. A small,
+bounded retry window tolerates transient transport failures while ensuring a
+single replacement request cannot silently stall an entire source document.
+
+### Notes
+
+Automated tests shall use mocked clients and synthetic inputs. They shall verify
+the 10-second deadline for each attempt, success after a transient failure,
+termination after three attempts, immediate non-transient failure, unchanged
+client reuse, and complete safe diagnostic metadata without request text or
+credentials.
+
+---

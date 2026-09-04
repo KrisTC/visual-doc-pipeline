@@ -5,14 +5,22 @@ from __future__ import annotations
 import json
 import os
 import unittest
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import Mock, patch
 
-from pipeline.text_replacement.errors import TextReplacementProviderError
+from pipeline.folder_replacement.failure_diagnostics import (
+    ContextualTextReplacementProvider,
+    FailureContext,
+)
+from pipeline.text_replacement.errors import (
+    TextReplacementProviderError,
+    TextReplacementProviderRequestError,
+)
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement_plugins.google_cloud_translate import (
     GoogleCloudTranslateProvider,
@@ -36,10 +44,27 @@ class _FakeClient:
     def __init__(self, response: _FakeResponse) -> None:
         self.response = response
         self.requests: list[Mapping[str, object]] = []
+        self.timeouts: list[float] = []
 
-    def translate_text(self, *, request: Mapping[str, object]) -> _FakeResponse:
+    def translate_text(self, *, request: Mapping[str, object], timeout: float) -> _FakeResponse:
         self.requests.append(request)
+        self.timeouts.append(timeout)
         return self.response
+
+
+class _SequenceClient:
+    def __init__(self, outcomes: list[_FakeResponse | Exception]) -> None:
+        self._outcomes = outcomes
+        self.requests: list[Mapping[str, object]] = []
+        self.timeouts: list[float] = []
+
+    def translate_text(self, *, request: Mapping[str, object], timeout: float) -> _FakeResponse:
+        self.requests.append(request)
+        self.timeouts.append(timeout)
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class _FakeClientFactory:
@@ -71,6 +96,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         self.assertEqual(["Hello"], client_factory.client.requests[0]["contents"])
         self.assertEqual("en-GB", client_factory.client.requests[0]["source_language_code"])
         self.assertEqual("es-MX", client_factory.client.requests[0]["target_language_code"])
+        self.assertEqual([10.0], client_factory.client.timeouts)
 
     # Verifies FR-2026-08-24-04.
     def test_translates_a_filename_stem_through_the_eu_endpoint(self) -> None:
@@ -137,6 +163,63 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         load_modules.assert_called_once_with()
         self.assertEqual(["translate.googleapis.com"], client_factory.endpoints)
         self.assertEqual(2, len(client_factory.client.requests))
+
+    # Verifies FR-2026-09-03-04.
+    def test_retries_a_timeout_and_applies_the_deadline_to_each_attempt(self) -> None:
+        client = _SequenceClient([
+            TimeoutError(),
+            _FakeResponse([_FakeTranslation("translated")]),
+        ])
+
+        result = self._replace_with_client(
+            TextReplacementRequest("synthetic", False, "en", "fr"),
+            cast(_TranslationClient, client),
+        )
+
+        self.assertEqual("translated", result.text)
+        self.assertEqual([10.0, 10.0], client.timeouts)
+
+    # Verifies FR-2026-09-03-04.
+    def test_stops_after_three_timeouts_and_records_safe_failure_metadata(self) -> None:
+        client = _SequenceClient([TimeoutError(), TimeoutError(), TimeoutError()])
+        provider = GoogleCloudTranslateProvider()
+        failure_context = FailureContext()
+        contextual_provider = ContextualTextReplacementProvider(provider, failure_context)
+
+        with self._patched_client(cast(_TranslationClient, client)):
+            with self.assertRaises(TextReplacementProviderRequestError) as raised:
+                contextual_provider.replace(TextReplacementRequest("synthetic text", False, "en", "fr"))
+
+        self.assertEqual([10.0, 10.0, 10.0], client.timeouts)
+        self.assertEqual(
+            {
+                "kind": "text_replacement",
+                "source_language": "en",
+                "target_language": "fr",
+                "is_filename": False,
+                "input_character_count": 14,
+                "provider": "google_cloud_translate",
+                "failure_category": "timeout",
+                "attempted_call_count": 3,
+                "attempt_deadline_seconds": 10.0,
+                "configured_attempt_limit": 3,
+            },
+            failure_context.as_diagnostic()["request"],
+        )
+        self.assertNotIn("synthetic text", str(raised.exception.diagnostic))
+
+    # Verifies FR-2026-09-03-04.
+    def test_does_not_retry_a_non_transient_api_failure(self) -> None:
+        client = _SequenceClient([ValueError("invalid request")])
+
+        with self.assertRaises(TextReplacementProviderRequestError) as raised:
+            self._replace_with_client(
+                TextReplacementRequest("synthetic", False, "en", "fr"),
+                cast(_TranslationClient, client),
+            )
+
+        self.assertEqual([10.0], client.timeouts)
+        self.assertEqual("non_transient_api_failure", raised.exception.diagnostic["failure_category"])
 
     # Verifies FR-2026-08-28-01.
     def test_retries_client_initialization_after_construction_failure(self) -> None:
@@ -256,6 +339,17 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
             ):
                 return GoogleCloudTranslateProvider().replace(request)
 
+    def _replace_with_client(
+        self, request: TextReplacementRequest, client: _TranslationClient
+    ) -> TextReplacementResult:
+        with self._patched_client(client):
+            return GoogleCloudTranslateProvider().replace(request)
+
+    def _patched_client(self, client: _TranslationClient) -> AbstractContextManager[None]:
+        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        modules = _GoogleModules(lambda _endpoint: client)
+        return _patch_client_configuration(configuration, modules)
+
 
 def _environment(credential_path: Path, **additional_values: str) -> dict[str, str]:
     """Return an isolated provider environment with one synthetic credential file."""
@@ -271,6 +365,23 @@ def _write_synthetic_credential(directory: Path) -> Path:
     credential_path = directory / "credential.json"
     credential_path.write_text(json.dumps({"type": "service_account"}), encoding="utf-8")
     return credential_path
+
+
+@contextmanager
+def _patch_client_configuration(
+    configuration: _Configuration, modules: _GoogleModules
+) -> Iterator[None]:
+    with (
+        patch(
+            "pipeline.text_replacement_plugins.google_cloud_translate._load_configuration",
+            return_value=configuration,
+        ),
+        patch(
+            "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules",
+            return_value=modules,
+        ),
+    ):
+        yield
 
 
 if __name__ == "__main__":

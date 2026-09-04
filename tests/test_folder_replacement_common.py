@@ -77,6 +77,7 @@ from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvid
 
 
 from folder_replacement_test_support import (
+    FONT_PATH,
     FolderReplacementTestCase,
     _CountingOcrProvider,
     _EmptyOcrProvider,
@@ -289,14 +290,94 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertEqual(1, result.processed_files)
             self.assertEqual("Processing: document.docx\n", standard_output.getvalue())
             self.assertEqual(1, len(progress_bars))
-            self.assertEqual(3, progress_bars[0].total)
+            self.assertEqual(5, progress_bars[0].total)
             self.assertEqual("document.docx", progress_bars[0].label)
             self.assertEqual(
-                ["embedded image 1", "native text", "native text layout"],
+                [
+                    "embedded image 1",
+                    "native text",
+                    "native text layout",
+                    "chart cache synchronization",
+                    "package write",
+                ],
                 progress_bars[0].postfixes,
             )
-            self.assertEqual(3, progress_bars[0].updates)
+            self.assertEqual(5, progress_bars[0].updates)
             self.assertTrue(progress_bars[0].closed)
+
+    # Verifies FR-2026-09-03-01.
+    def test_embedded_bitmap_ocr_uses_the_nested_progress_row(self) -> None:
+        class _RecordingLiveProgress:
+            def __init__(self) -> None:
+                self.started: list[tuple[str, int, str]] = []
+                self.advanced: list[str] = []
+                self.cleared = 0
+
+            def __enter__(self) -> "_RecordingLiveProgress":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def start_overall(self, _total: int, _unit: str) -> None:
+                return None
+
+            def start_current(self, _name: str, _total: int, _unit: str) -> "_RecordingLiveProgress":
+                return self
+
+            def set_postfix_str(self, _label: str) -> None:
+                return None
+
+            def update(self) -> None:
+                return None
+
+            def set_overall_from_current(self, _completed_sources: int) -> None:
+                return None
+
+            def complete_overall_source(self, _completed_sources: int) -> None:
+                return None
+
+            def clear_current(self) -> None:
+                return None
+
+            def start_nested(self, name: str, total: int, unit: str = "stage") -> None:
+                self.started.append((name, total, unit))
+
+            def advance_nested(self, label: str) -> None:
+                self.advanced.append(label)
+
+            def clear_nested(self) -> None:
+                self.cleared += 1
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            image_data = BytesIO()
+            Image.new("RGB", (20, 20), "white").save(image_data, "PNG")
+            with ZipFile(input_root / "document.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr("word/media/image1.png", image_data.getvalue())
+            display = _RecordingLiveProgress()
+            typeface = skia.Typeface.MakeFromFile(str(FONT_PATH))
+            assert typeface is not None
+            with patch("pipeline.folder_replacement.processor.LiveProgress", return_value=display):
+                replace_input_folder(
+                    input_root,
+                    output_root,
+                    ocr_provider=_CountingOcrProvider(),
+                    text_replacement_provider=_RecordingReplacementProvider(),
+                    source_language="en",
+                    target_language="en",
+                    typeface=typeface,
+                )
+
+            self.assertEqual([("word/media/image1.png", 3, "stage")], display.started)
+            self.assertEqual(
+                ["OCR recognition", "process OCR results", "render replacement image"],
+                display.advanced,
+            )
+            self.assertEqual(1, display.cleared)
 
     # Verifies FR-2026-08-03-03.
     def test_skips_low_confidence_ocr_text_and_continues_after_a_file_failure(self) -> None:

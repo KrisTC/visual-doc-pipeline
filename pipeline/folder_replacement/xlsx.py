@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from io import BytesIO
 from math import isfinite
 from pathlib import Path
 import posixpath
+import re
 from typing import cast
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 import xml.etree.ElementTree as ElementTree
 
 from openpyxl.utils.cell import (
@@ -33,16 +35,22 @@ from pipeline.pptx_theme_fonts import PptxThemeFonts, resolve_theme_typefaces, t
 from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
+    _is_visible_office_text_element,
+    replace_office_xml_text,
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
+from pipeline.folder_replacement.common import NestedProgressReporter, is_office_bitmap_part
+from pipeline.folder_replacement.bitmap import replace_bitmap_bytes
 from pipeline.ocr import OcrProvider
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND
 from pipeline.portable_fonts import static_noto_font
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest, TextReplacementResult
 
 
 _SPREADSHEET_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
 _DRAWING_MAIN_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_CHART_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 _OFFICE_RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relationships"
 _EMUS_PER_POINT = 12_700
@@ -53,6 +61,17 @@ _NS = {
     "a": _DRAWING_MAIN_NAMESPACE,
     "r": _OFFICE_RELATIONSHIPS_NAMESPACE,
 }
+_NUMERIC_LOOKING_TEXT = re.compile(
+    r"[+-]?(?:[0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?%?"
+)
+XLSX_TRANSLATION_MODE_CHOICES = ("full", "fast")
+_FAST_XLSX_MAX_WORKSHEET_ROWS = 1_000
+
+
+@dataclass(frozen=True, slots=True)
+class _FastXlsxCellSelection:
+    cells: dict[str, frozenset[str]]
+    skipped_worksheets: tuple[tuple[str, str], ...]
 
 
 def replace_xlsx_file(
@@ -65,15 +84,55 @@ def replace_xlsx_file(
     typeface: skia.Typeface,
     completed: Callable[[str], None],
     document_text_layout: str = "preserve-source-formatting",
+    xlsx_translation_mode: str = "full",
     failure_context: FailureContext | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int, int]:
     """Replace XLSX cells without rewriting unrelated workbook package parts."""
     from pipeline.folder_replacement.processor import _replace_office_file
 
+    if xlsx_translation_mode not in XLSX_TRANSLATION_MODE_CHOICES:
+        raise ValueError(f"Unsupported XLSX translation mode: {xlsx_translation_mode!r}")
+    if xlsx_translation_mode == "fast":
+        with ZipFile(source) as archive:
+            entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
+        source_parts = {entry.filename: payload for entry, payload in entries}
+        selection = _fast_xlsx_cell_selection(source_parts, ())
+        _record_fast_mode_skipped_worksheets(diagnostics, selection)
+        processing_provider: TextReplacementProvider = _XlsxTextSelectionProvider(
+            _CurrentXlsxReplacementProvider(replacement, completed)
+        )
+        image_changes, image_regions = _replace_xlsx_fast_images(
+            source_parts,
+            ocr,
+            replacement,
+            source_language,
+            target_language,
+            typeface,
+            completed,
+            nested_progress,
+        )
+        changed_parts, native_items = _replace_xlsx_fast_parts(
+            source_parts,
+            processing_provider,
+            source_language,
+            target_language,
+            measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+            selection=selection,
+            initial_changes=image_changes,
+            failure_context=failure_context,
+        )
+        completed("chart cache synchronization")
+        _write_xlsx_entries(destination, entries, changed_parts, failure_context)
+        completed("package write")
+        return native_items, image_regions, 0
+    processing_provider = _XlsxTextSelectionProvider(replacement)
     if document_text_layout == "preserve-source-formatting":
         return _replace_office_file(
-            source, destination, ocr, replacement, source_language, target_language, typeface, completed,
+            source, destination, ocr, processing_provider, source_language, target_language, typeface, completed,
             failure_context=failure_context,
+            nested_progress=nested_progress,
         )
     if document_text_layout not in {
         "preserve-basic-layout",
@@ -84,17 +143,18 @@ def replace_xlsx_file(
         source,
         destination,
         ocr,
-        replacement,
+        processing_provider,
         source_language,
         target_language,
         typeface,
         completed,
         skip_native_xml_part=_is_custom_xlsx_part,
         failure_context=failure_context,
+        nested_progress=nested_progress,
     )
     native_items += _replace_xlsx_cells(
         destination,
-        replacement,
+        processing_provider,
         source_language,
         target_language,
         # XLSX has no interoperable, package-level embedded-font path. Keep
@@ -125,6 +185,7 @@ def _replace_xlsx_cells(
     preserve_source_font_family: bool,
     measure_source_fonts: bool,
     failure_context: FailureContext | None = None,
+    selected_cells: dict[str, frozenset[str]] | None = None,
 ) -> int:
     """Fit explicitly bounded cells and retain all unknown package parts byte-for-byte."""
     if failure_context is not None:
@@ -136,55 +197,16 @@ def _replace_xlsx_cells(
     with ZipFile(path) as archive:
         entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
     parts = {entry.filename: data for entry, data in entries}
-    shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
-    theme = _workbook_theme(parts)
-    styles = _Styles(parts.get("xl/styles.xml"), theme)
-    typefaces = noto_typefaces()
-    table_headers = _table_header_cells(parts)
-    replacements = 0
-    changed_parts: dict[str, bytes] = {}
-    for name, data in parts.items():
-        if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
-            continue
-        if failure_context is not None:
-            failure_context.set_location(
-                stage="xlsx_fitted_layout",
-                container_kind="xlsx_worksheet",
-                operation="text_replacement",
-                package_part=name,
-            )
-        updated, count = _replace_worksheet(
-            data,
-            shared_strings,
-            styles,
-            replacement,
-            source_language,
-            target_language,
-            typefaces,
-            preserve_source_font_family,
-            measure_source_fonts,
-            table_headers.get(name, frozenset()),
-        )
-        changed_parts[name] = updated
-        replacements += count
-    for name, data in parts.items():
-        if not name.startswith("xl/drawings/") or not name.endswith(".xml"):
-            continue
-        if failure_context is not None:
-            failure_context.set_location(
-                stage="xlsx_fitted_layout",
-                container_kind="xlsx_drawing",
-                operation="text_replacement",
-                package_part=name,
-            )
-        updated, count = _replace_drawing(
-            data, replacement, source_language, target_language, typefaces,
-            preserve_source_font_family, measure_source_fonts, theme,
-        )
-        changed_parts[name] = updated
-        replacements += count
-    if styles.changed:
-        changed_parts["xl/styles.xml"] = styles.serialize()
+    changed_parts, replacements = _replace_xlsx_cell_parts(
+        parts,
+        replacement,
+        source_language,
+        target_language,
+        preserve_source_font_family=preserve_source_font_family,
+        measure_source_fonts=measure_source_fonts,
+        failure_context=failure_context,
+        selected_cells=selected_cells,
+    )
     if not changed_parts:
         return replacements
     output = BytesIO()
@@ -208,6 +230,854 @@ def _replace_xlsx_cells(
     return replacements
 
 
+def replace_xlsx_bytes(
+    data: bytes,
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    nested_completed: Callable[[str], None] | None = None,
+    xlsx_translation_mode: str = "full",
+    fast_chart_formulae: tuple[str, ...] = (),
+    ocr: OcrProvider | None = None,
+    typeface: skia.Typeface | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+) -> tuple[bytes, int]:
+    """Replace native XLSX text in memory for an enclosing OOXML package."""
+    with ZipFile(BytesIO(data)) as archive:
+        entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
+    parts = {entry.filename: payload for entry, payload in entries}
+    if xlsx_translation_mode not in XLSX_TRANSLATION_MODE_CHOICES:
+        raise ValueError(f"Unsupported XLSX translation mode: {xlsx_translation_mode!r}")
+    processing_provider: TextReplacementProvider = replacement
+    if nested_completed is not None:
+        processing_provider = _NestedXlsxReplacementProvider(replacement, nested_completed)
+    processing_provider = _XlsxTextSelectionProvider(processing_provider)
+    if xlsx_translation_mode == "fast":
+        image_changes: dict[str, bytes] = {}
+        if ocr is not None and typeface is not None:
+            for name, payload in tuple(parts.items()):
+                if is_office_bitmap_part(name):
+                    parts[name], _regions = replace_bitmap_bytes(
+                        payload,
+                        ocr,
+                        replacement,
+                        source_language,
+                        target_language,
+                        typeface,
+                        DEFAULT_OCR_BACKGROUND,
+                        nested_completed,
+                    )
+                    image_changes[name] = parts[name]
+        return _replace_xlsx_fast_bytes(
+            entries,
+            parts,
+            processing_provider,
+            source_language,
+            target_language,
+            document_text_layout,
+            fast_chart_formulae,
+            image_changes,
+            diagnostics,
+        )
+    if document_text_layout == "preserve-source-formatting":
+        changed_parts, replacements = _replace_xlsx_generic_xml_parts(
+            parts, processing_provider, source_language, target_language
+        )
+    elif document_text_layout in {
+        "preserve-basic-layout",
+        "preserve-basic-layout-source-font",
+    }:
+        generic_changes, replacements = _replace_xlsx_generic_xml_parts(
+            parts, processing_provider, source_language, target_language,
+            skip_native_xml_part=_is_custom_xlsx_part,
+        )
+        processed_parts = {**parts, **generic_changes}
+        changed_parts, cell_replacements = _replace_xlsx_cell_parts(
+            processed_parts,
+            processing_provider,
+            source_language,
+            target_language,
+            preserve_source_font_family=True,
+            measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+        )
+        changed_parts = {**generic_changes, **changed_parts}
+        replacements += cell_replacements
+    else:
+        raise ValueError(f"Unsupported document text layout mode: {document_text_layout!r}")
+    if not changed_parts:
+        return data, replacements
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            archive.writestr(entry, changed_parts.get(entry.filename, payload))
+    return output.getvalue(), replacements
+
+
+def xlsx_native_text_request_total(
+    data: bytes,
+    document_text_layout: str,
+    xlsx_translation_mode: str = "full",
+    fast_chart_formulae: tuple[str, ...] = (),
+) -> int:
+    """Return the exact number of replacement-provider calls an XLSX pass will make."""
+    with ZipFile(BytesIO(data)) as archive:
+        parts = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    if xlsx_translation_mode == "fast":
+        selection = _fast_xlsx_cell_selection(parts, fast_chart_formulae)
+        return (
+            _fast_generic_text_request_total(parts)
+            + _worksheet_text_request_count(parts, selection.cells)
+            + sum(
+                _drawing_text_request_count(payload)
+                for name, payload in parts.items()
+                if name.startswith("xl/drawings/") and name.endswith(".xml")
+            )
+            + 3 * sum(is_office_bitmap_part(name) for name in parts)
+        )
+    if document_text_layout == "preserve-source-formatting":
+        return sum(
+            _office_xml_text_request_count(payload)
+            for name, payload in parts.items()
+            if name.endswith(".xml")
+        )
+    if document_text_layout in {
+        "preserve-basic-layout",
+        "preserve-basic-layout-source-font",
+    }:
+        generic_requests = sum(
+            _office_xml_text_request_count(payload)
+            for name, payload in parts.items()
+            if name.endswith(".xml") and not _is_custom_xlsx_part(name)
+        )
+        return generic_requests + _worksheet_text_request_count(parts) + sum(
+            _drawing_text_request_count(payload)
+            for name, payload in parts.items()
+            if name.startswith("xl/drawings/") and name.endswith(".xml")
+        )
+    raise ValueError(f"Unsupported document text layout mode: {document_text_layout!r}")
+
+
+def _office_xml_text_request_count(data: bytes) -> int:
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return 0
+    return sum(
+        element.text is not None
+        and _is_visible_office_text_element(element.tag)
+        and _is_xlsx_translation_candidate(element.text)
+        for element in root.iter()
+    )
+
+
+def _worksheet_text_request_count(
+    parts: dict[str, bytes], selected_cells: dict[str, frozenset[str]] | None = None
+) -> int:
+    shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
+    table_headers = _table_header_cells(parts, selected_cells)
+    requests = 0
+    for name, data in parts.items():
+        if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+            continue
+        if selected_cells is not None and name not in selected_cells:
+            continue
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        for cell in root.findall(".//x:sheetData/x:row/x:c", _NS):
+            if selected_cells is not None and cell.get("r") not in selected_cells.get(name, frozenset()):
+                continue
+            if cell.get("r") in table_headers.get(name, frozenset()):
+                continue
+            text = _cell_text(cell, shared_strings)
+            if (
+                text is not None
+                and text.strip()
+                and cell.find("x:f", _NS) is None
+                and _is_xlsx_translation_candidate(text)
+            ):
+                requests += 1
+    return requests
+
+
+def _drawing_text_request_count(data: bytes) -> int:
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return 0
+    parents = {child: parent for parent in root.iter() for child in parent}
+    fitted_text: set[ElementTree.Element] = set()
+    requests = 0
+    for body in root.findall(".//xdr:sp/xdr:txBody", _NS):
+        shape = parents.get(body)
+        extent = None if shape is None else shape.find("xdr:spPr/a:xfrm/a:ext", _NS)
+        if extent is None:
+            continue
+        try:
+            width, height = int(extent.get("cx", "0")), int(extent.get("cy", "0"))
+        except ValueError:
+            continue
+        paragraph_text = tuple(
+            "".join(
+                "".join(text.text or "" for text in run.iter(_a_tag("t")))
+                for run in paragraph.findall("a:r", _NS)
+            )
+            for paragraph in body.findall("a:p", _NS)
+        )
+        if width <= 0 or height <= 0 or not any(text.strip() for text in paragraph_text):
+            continue
+        requests += sum(_is_xlsx_translation_candidate(text) for text in paragraph_text)
+        fitted_text.update(body.iter(_a_tag("t")))
+    return requests + sum(
+        element not in fitted_text
+        and element.text is not None
+        and _is_xlsx_translation_candidate(element.text)
+        for element in root.iter(_a_tag("t"))
+    )
+
+
+def _replace_xlsx_generic_xml_parts(
+    parts: dict[str, bytes],
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    *,
+    skip_native_xml_part: Callable[[str], bool] | None = None,
+    include_native_xml_part: Callable[[str], bool] | None = None,
+) -> tuple[dict[str, bytes], int]:
+    changed: dict[str, bytes] = {}
+    replacements = 0
+    for name, payload in parts.items():
+        if (
+            not name.endswith(".xml")
+            or (skip_native_xml_part is not None and skip_native_xml_part(name))
+            or (include_native_xml_part is not None and not include_native_xml_part(name))
+        ):
+            continue
+        _set_nested_xlsx_part(replacement, name)
+        updated, count = replace_office_xml_text(
+            payload, replacement, source_language, target_language
+        )
+        if count:
+            changed[name] = updated
+            replacements += count
+    return changed, replacements
+
+
+def _replace_xlsx_fast_bytes(
+    entries: Sequence[tuple[ZipInfo, bytes]],
+    parts: dict[str, bytes],
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    fast_chart_formulae: tuple[str, ...],
+    initial_changes: dict[str, bytes],
+    diagnostics: list[dict[str, object]] | None,
+) -> tuple[bytes, int]:
+    """Apply the bounded fast XLSX selection without touching unrelated sheets."""
+    selection = _fast_xlsx_cell_selection(parts, fast_chart_formulae)
+    _record_fast_mode_skipped_worksheets(diagnostics, selection)
+    changed_parts, replacements = _replace_xlsx_fast_parts(
+        parts,
+        replacement,
+        source_language,
+        target_language,
+        measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+        selection=selection,
+        initial_changes=initial_changes,
+    )
+    return _xlsx_entries_bytes(entries, changed_parts), replacements
+
+
+def _replace_xlsx_fast_parts(
+    parts: dict[str, bytes],
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    *,
+    measure_source_fonts: bool,
+    selection: _FastXlsxCellSelection,
+    initial_changes: dict[str, bytes],
+    failure_context: FailureContext | None = None,
+) -> tuple[dict[str, bytes], int]:
+    generic_changes, replacements = _replace_xlsx_generic_xml_parts(
+        parts,
+        replacement,
+        source_language,
+        target_language,
+        include_native_xml_part=_is_fast_xlsx_generic_part,
+    )
+    processed_parts = {**parts, **generic_changes}
+    cell_changes, cell_replacements = _replace_xlsx_cell_parts(
+        processed_parts,
+        replacement,
+        source_language,
+        target_language,
+        preserve_source_font_family=True,
+        measure_source_fonts=measure_source_fonts,
+        failure_context=failure_context,
+        selected_cells=selection.cells,
+    )
+    changed_parts = {**initial_changes, **generic_changes, **cell_changes}
+    replacements += cell_replacements
+    chart_cache_changes = _update_fast_xlsx_chart_caches({**parts, **changed_parts})
+    changed_parts.update(chart_cache_changes)
+    return changed_parts, replacements
+
+
+def _replace_xlsx_fast_images(
+    parts: dict[str, bytes],
+    ocr: OcrProvider,
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    typeface: skia.Typeface,
+    completed: Callable[[str], None],
+    nested_progress: NestedProgressReporter | None,
+) -> tuple[dict[str, bytes], int]:
+    changes: dict[str, bytes] = {}
+    image_regions = 0
+    for name, payload in parts.items():
+        if not is_office_bitmap_part(name):
+            continue
+        if nested_progress is not None:
+            nested_progress.start_nested(name, 3, "stage")
+
+        def image_stage_completed(label: str, *, image_name: str = name) -> None:
+            completed(f"{image_name} {label}")
+            if nested_progress is not None:
+                nested_progress.advance_nested(label)
+
+        try:
+            changed, regions = replace_bitmap_bytes(
+                payload,
+                ocr,
+                replacement,
+                source_language,
+                target_language,
+                typeface,
+                DEFAULT_OCR_BACKGROUND,
+                image_stage_completed,
+            )
+        finally:
+            if nested_progress is not None:
+                nested_progress.clear_nested()
+        changes[name] = changed
+        image_regions += regions
+    return changes, image_regions
+
+
+def _write_xlsx_entries(
+    destination: Path,
+    entries: Sequence[tuple[ZipInfo, bytes]],
+    changed_parts: dict[str, bytes],
+    failure_context: FailureContext | None,
+) -> None:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="xlsx_fast_package_write",
+                    container_kind="xlsx_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
+            archive.writestr(entry, changed_parts.get(entry.filename, payload))
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="xlsx_fast_package_write",
+            container_kind="xlsx_document",
+            operation="write",
+        )
+    destination.write_bytes(output.getvalue())
+
+
+def _xlsx_entries_bytes(
+    entries: Sequence[tuple[ZipInfo, bytes]], changed_parts: dict[str, bytes]
+) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            archive.writestr(entry, changed_parts.get(entry.filename, payload))
+    return output.getvalue()
+
+
+def _is_fast_xlsx_generic_part(name: str) -> bool:
+    return (
+        (name.startswith("xl/comments") and name.endswith(".xml"))
+        or (name.startswith("xl/charts/") and name.endswith(".xml"))
+    )
+
+
+def _fast_generic_text_request_total(parts: dict[str, bytes]) -> int:
+    return sum(
+        _office_xml_text_request_count(payload)
+        for name, payload in parts.items()
+        if _is_fast_xlsx_generic_part(name)
+    )
+
+
+def _fast_xlsx_cell_selection(
+    parts: dict[str, bytes], fast_chart_formulae: tuple[str, ...]
+) -> _FastXlsxCellSelection:
+    formulae = fast_chart_formulae or _xlsx_chart_formulae(parts)
+    ranges = tuple(
+        parsed for formula in formulae if (parsed := _xlsx_chart_formula_range(formula)) is not None
+    )
+    selected: dict[str, set[str]] = {}
+    for sheet, first_column, first_row, last_column, last_row in ranges:
+        selected.setdefault(sheet, set()).update(
+            f"{get_column_letter(column)}{row}"
+            for column in range(first_column, last_column + 1)
+            for row in range(first_row, last_row + 1)
+        )
+    sheet_parts = _xlsx_sheet_parts(parts)
+    shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
+    skipped_worksheets: list[tuple[str, str]] = []
+    for sheet_name, part_name in sheet_parts.items():
+        data = parts.get(part_name)
+        if data is None:
+            continue
+        if _worksheet_used_row_count(data) > _FAST_XLSX_MAX_WORKSHEET_ROWS:
+            if sheet_name not in selected:
+                skipped_worksheets.append((sheet_name, part_name))
+            continue
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        selected.setdefault(sheet_name, set()).update(
+            reference
+            for cell in root.findall(".//x:sheetData/x:row/x:c", _NS)
+            if (reference := cell.get("r")) is not None
+        )
+    for sheet, first_column, first_row, last_column, last_row in ranges:
+        referenced_part_name = sheet_parts.get(sheet)
+        data = None if referenced_part_name is None else parts.get(referenced_part_name)
+        if data is None:
+            continue
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        heading_row = _fast_heading_row(
+            root, shared_strings, first_column, first_row, last_column, last_row
+        )
+        if heading_row is not None:
+            selected.setdefault(sheet, set()).update(
+                f"{get_column_letter(column)}{heading_row}"
+                for column in range(first_column, last_column + 1)
+            )
+    return _FastXlsxCellSelection(
+        {
+            part_name: frozenset(selected.get(sheet_name, set()))
+            for sheet_name, part_name in sheet_parts.items()
+            if sheet_name in selected
+        },
+        tuple(skipped_worksheets),
+    )
+
+
+def _worksheet_used_row_count(data: bytes) -> int:
+    """Return the stored-cell high-water mark, stopping once fast mode rejects it."""
+    highest_row = 0
+    try:
+        for _event, row in ElementTree.iterparse(BytesIO(data), events=("end",)):
+            if row.tag != _tag("row"):
+                continue
+            if not row.findall("x:c", _NS):
+                row.clear()
+                continue
+            try:
+                row_number = int(row.get("r", "0"))
+            except ValueError:
+                row_number = 0
+            if row_number <= 0:
+                for cell in row.findall("x:c", _NS):
+                    reference = cell.get("r")
+                    if reference is None:
+                        continue
+                    try:
+                        _column, row_number = coordinate_from_string(reference)
+                    except ValueError:
+                        continue
+                    break
+            highest_row = max(highest_row, row_number)
+            if highest_row > _FAST_XLSX_MAX_WORKSHEET_ROWS:
+                return highest_row
+            row.clear()
+    except ElementTree.ParseError:
+        return _FAST_XLSX_MAX_WORKSHEET_ROWS + 1
+    return highest_row
+
+
+def _record_fast_mode_skipped_worksheets(
+    diagnostics: list[dict[str, object]] | None, selection: _FastXlsxCellSelection
+) -> None:
+    if diagnostics is None:
+        return
+    diagnostics.extend(
+        {
+            "kind": "skipped",
+            "reason_code": "xlsx_fast_mode_worksheet_skipped",
+            "container_kind": "xlsx_worksheet",
+            "worksheet_name": worksheet_name,
+            "location": {"package_part": part_name},
+        }
+        for worksheet_name, part_name in selection.skipped_worksheets
+    )
+
+
+def _xlsx_chart_formulae(parts: dict[str, bytes]) -> tuple[str, ...]:
+    formulae: list[str] = []
+    for name, data in parts.items():
+        if not name.startswith("xl/charts/") or not name.endswith(".xml"):
+            continue
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        for reference in (*root.findall(f".//{{{_CHART_NAMESPACE}}}strRef"), *root.findall(f".//{{{_CHART_NAMESPACE}}}multiLvlStrRef")):
+            formula = reference.findtext(f"{{{_CHART_NAMESPACE}}}f")
+            if formula is not None:
+                formulae.append(formula)
+    return tuple(formulae)
+
+
+def _xlsx_chart_formula_range(formula: str) -> tuple[str, int, int, int, int] | None:
+    match = re.fullmatch(
+        r"(?:(?P<quoted>'(?:[^']|'')+')|(?P<plain>[A-Za-z_][A-Za-z0-9_ ]*))!"
+        r"\$?(?P<first_column>[A-Z]{1,3})\$?(?P<first_row>[1-9][0-9]*)"
+        r"(?::\$?(?P<last_column>[A-Z]{1,3})\$?(?P<last_row>[1-9][0-9]*))?",
+        formula,
+    )
+    if match is None:
+        return None
+    sheet = match.group("plain") or match.group("quoted")[1:-1].replace("''", "'")
+    first_column = column_index_from_string(match.group("first_column"))
+    first_row = int(match.group("first_row"))
+    last_column = column_index_from_string(match.group("last_column") or match.group("first_column"))
+    last_row = int(match.group("last_row") or match.group("first_row"))
+    if last_column < first_column or last_row < first_row:
+        return None
+    return sheet, first_column, first_row, last_column, last_row
+
+
+def _xlsx_sheet_parts(parts: dict[str, bytes]) -> dict[str, str]:
+    try:
+        workbook = ElementTree.fromstring(parts["xl/workbook.xml"])
+        relationships = ElementTree.fromstring(parts["xl/_rels/workbook.xml.rels"])
+    except (KeyError, ElementTree.ParseError):
+        return {}
+    relationship_targets = {
+        relationship.get("Id"): _resolve_part_target("xl/workbook.xml", relationship.get("Target", ""))
+        for relationship in relationships.findall(f"{{{_PACKAGE_RELATIONSHIPS_NAMESPACE}}}Relationship")
+        if relationship.get("TargetMode") != "External" and relationship.get("Id") is not None
+    }
+    result: dict[str, str] = {}
+    for sheet in workbook.findall(".//x:sheet", _NS):
+        name = sheet.get("name")
+        relationship_id = sheet.get(f"{{{_OFFICE_RELATIONSHIPS_NAMESPACE}}}id")
+        part_name = None if relationship_id is None else relationship_targets.get(relationship_id)
+        if name is not None and part_name in parts:
+            result[name] = part_name
+    return result
+
+
+def _fast_heading_row(
+    worksheet: ElementTree.Element,
+    shared_strings: tuple[str, ...],
+    first_column: int,
+    first_row: int,
+    last_column: int,
+    last_row: int,
+) -> int | None:
+    rows = [first_row - 1] if first_row > 1 else []
+    rows.extend(range(first_row, last_row + 1))
+    for row_number in rows:
+        for column in range(first_column, last_column + 1):
+            reference = f"{get_column_letter(column)}{row_number}"
+            cell = next(
+                (item for item in worksheet.findall(".//x:sheetData/x:row/x:c", _NS) if item.get("r") == reference),
+                None,
+            )
+            if cell is not None and (_cell_text(cell, shared_strings) or "").strip():
+                return row_number
+    return None
+
+
+def _update_fast_xlsx_chart_caches(parts: dict[str, bytes]) -> dict[str, bytes]:
+    values = _xlsx_string_cell_values(parts, _chart_string_cell_references(parts))
+    if values is None:
+        return {}
+    changed: dict[str, bytes] = {}
+    for name, data in parts.items():
+        if not name.startswith("xl/charts/") or not name.endswith(".xml"):
+            continue
+        try:
+            root = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            continue
+        updated = False
+        for reference in root.findall(f".//{{{_CHART_NAMESPACE}}}strRef"):
+            cache = reference.find(f"{{{_CHART_NAMESPACE}}}strCache")
+            updated = _update_fast_string_cache(reference, cache, values) or updated
+        for reference in root.findall(f".//{{{_CHART_NAMESPACE}}}multiLvlStrRef"):
+            cache = reference.find(f"{{{_CHART_NAMESPACE}}}multiLvlStrCache")
+            updated = _update_fast_multi_level_cache(reference, cache, values) or updated
+        if updated:
+            changed[name] = _serialize_with_compatibility_bindings(root, _namespace_bindings(data))
+    return changed
+
+
+def _update_xlsx_fast_chart_caches_file(path: Path) -> None:
+    with ZipFile(path) as archive:
+        entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
+    parts = {entry.filename: payload for entry, payload in entries}
+    changes = _update_fast_xlsx_chart_caches(parts)
+    if not changes:
+        return
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            archive.writestr(entry, changes.get(entry.filename, payload))
+
+
+def _update_fast_string_cache(
+    reference: ElementTree.Element,
+    cache: ElementTree.Element | None,
+    values: dict[tuple[str, str], str],
+) -> bool:
+    formula = reference.findtext(f"{{{_CHART_NAMESPACE}}}f")
+    parsed = None if formula is None else _xlsx_chart_formula_range(formula)
+    if cache is None or parsed is None:
+        return False
+    sheet, first_column, first_row, last_column, last_row = parsed
+    cells = tuple(
+        (sheet, f"{get_column_letter(column)}{row}")
+        for row in range(first_row, last_row + 1)
+        for column in range(first_column, last_column + 1)
+    )
+    points = cache.findall(f"{{{_CHART_NAMESPACE}}}pt")
+    updates: list[tuple[ElementTree.Element, str]] = []
+    for point in points:
+        try:
+            index = int(point.get("idx", ""))
+        except ValueError:
+            return False
+        value = None if not 0 <= index < len(cells) else values.get(cells[index])
+        output = point.find(f"{{{_CHART_NAMESPACE}}}v")
+        if value is None or output is None:
+            return False
+        updates.append((output, value))
+    for output, value in updates:
+        output.text = value
+    return bool(updates)
+
+
+def _update_fast_multi_level_cache(
+    reference: ElementTree.Element,
+    cache: ElementTree.Element | None,
+    values: dict[tuple[str, str], str],
+) -> bool:
+    formula = reference.findtext(f"{{{_CHART_NAMESPACE}}}f")
+    parsed = None if formula is None else _xlsx_chart_formula_range(formula)
+    if cache is None or parsed is None:
+        return False
+    sheet, first_column, first_row, last_column, last_row = parsed
+    levels = cache.findall(f"{{{_CHART_NAMESPACE}}}lvl")
+    if len(levels) != last_column - first_column + 1:
+        return False
+    updates: list[tuple[ElementTree.Element, str]] = []
+    for offset, level in enumerate(levels):
+        for point in level.findall(f"{{{_CHART_NAMESPACE}}}pt"):
+            try:
+                row = first_row + int(point.get("idx", ""))
+            except ValueError:
+                return False
+            value = values.get((sheet, f"{get_column_letter(first_column + offset)}{row}"))
+            output = point.find(f"{{{_CHART_NAMESPACE}}}v")
+            if row > last_row or value is None or output is None:
+                return False
+            updates.append((output, value))
+    for output, value in updates:
+        output.text = value
+    return bool(updates)
+
+
+def _chart_string_cell_references(parts: dict[str, bytes]) -> dict[str, frozenset[str]]:
+    references: dict[str, set[str]] = {}
+    for formula in _xlsx_chart_formulae(parts):
+        parsed = _xlsx_chart_formula_range(formula)
+        if parsed is None:
+            continue
+        sheet, first_column, first_row, last_column, last_row = parsed
+        references.setdefault(sheet, set()).update(
+            f"{get_column_letter(column)}{row}"
+            for column in range(first_column, last_column + 1)
+            for row in range(first_row, last_row + 1)
+        )
+    return {sheet: frozenset(cells) for sheet, cells in references.items()}
+
+
+def _xlsx_string_cell_values(
+    parts: dict[str, bytes], requested_cells: dict[str, frozenset[str]] | None = None
+) -> dict[tuple[str, str], str] | None:
+    sheet_parts = _xlsx_sheet_parts(parts)
+    if not sheet_parts:
+        return None
+    shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
+    values: dict[tuple[str, str], str] = {}
+    for sheet_name, part_name in sheet_parts.items():
+        required = None if requested_cells is None else requested_cells.get(sheet_name)
+        if requested_cells is not None and not required:
+            continue
+        try:
+            root = ElementTree.fromstring(parts[part_name])
+        except ElementTree.ParseError:
+            return None
+        for cell in root.findall(".//x:sheetData/x:row/x:c", _NS):
+            reference = cell.get("r")
+            value = _cell_text(cell, shared_strings)
+            if reference is not None and value is not None and (required is None or reference in required):
+                values[sheet_name, reference] = value
+    return values
+
+
+def _replace_xlsx_cell_parts(
+    parts: dict[str, bytes],
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    *,
+    preserve_source_font_family: bool,
+    measure_source_fonts: bool,
+    failure_context: FailureContext | None = None,
+    selected_cells: dict[str, frozenset[str]] | None = None,
+) -> tuple[dict[str, bytes], int]:
+    shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
+    theme = _workbook_theme(parts)
+    styles = _Styles(parts.get("xl/styles.xml"), theme)
+    typefaces = noto_typefaces()
+    table_headers = _table_header_cells(parts, selected_cells)
+    replacements = 0
+    changed_parts: dict[str, bytes] = {}
+    for name, data in parts.items():
+        if not name.startswith("xl/worksheets/") or not name.endswith(".xml"):
+            continue
+        if selected_cells is not None and name not in selected_cells:
+            continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="xlsx_fitted_layout",
+                container_kind="xlsx_worksheet",
+                operation="text_replacement",
+                package_part=name,
+            )
+        _set_nested_xlsx_part(replacement, name)
+        updated, count = _replace_worksheet(
+            data,
+            shared_strings,
+            styles,
+            replacement,
+            source_language,
+            target_language,
+            typefaces,
+            preserve_source_font_family,
+            measure_source_fonts,
+            table_headers.get(name, frozenset()),
+            None if selected_cells is None else selected_cells.get(name, frozenset()),
+        )
+        changed_parts[name] = updated
+        replacements += count
+    for name, data in parts.items():
+        if not name.startswith("xl/drawings/") or not name.endswith(".xml"):
+            continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="xlsx_fitted_layout",
+                container_kind="xlsx_drawing",
+                operation="text_replacement",
+                package_part=name,
+            )
+        _set_nested_xlsx_part(replacement, name)
+        updated, count = _replace_drawing(
+            data, replacement, source_language, target_language, typefaces,
+            preserve_source_font_family, measure_source_fonts, theme,
+        )
+        changed_parts[name] = updated
+        replacements += count
+    if styles.changed:
+        changed_parts["xl/styles.xml"] = styles.serialize()
+    return changed_parts, replacements
+
+
+class _NestedXlsxReplacementProvider:
+    """Report the active XLSX replacement request without retaining its text."""
+
+    def __init__(self, provider: TextReplacementProvider, completed: Callable[[str], None]) -> None:
+        self._provider = provider
+        self._completed = completed
+        self._part = "embedded workbook"
+        self._count = 0
+
+    def set_part(self, part: str) -> None:
+        self._part = part
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        self._count += 1
+        self._completed(f"{self._part} replacement {self._count}")
+        return self._provider.replace(request)
+
+
+class _CurrentXlsxReplacementProvider:
+    """Advance standalone fast-mode progress after an eligible replacement."""
+
+    def __init__(self, provider: TextReplacementProvider, completed: Callable[[str], None]) -> None:
+        self._provider = provider
+        self._completed = completed
+        self._part = "workbook"
+        self._count = 0
+
+    def set_part(self, part: str) -> None:
+        self._part = part
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        result = self._provider.replace(request)
+        self._count += 1
+        self._completed(f"{self._part} replacement {self._count}")
+        return result
+
+
+class _XlsxTextSelectionProvider:
+    """Skip values whose textual form is defined as non-translatable in XLSX."""
+
+    def __init__(self, provider: TextReplacementProvider) -> None:
+        self._provider = provider
+
+    def set_part(self, part: str) -> None:
+        if isinstance(self._provider, (_CurrentXlsxReplacementProvider, _NestedXlsxReplacementProvider)):
+            self._provider.set_part(part)
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        if not request.is_filename and not _is_xlsx_translation_candidate(request.text):
+            return TextReplacementResult(request.text, 0.0)
+        return self._provider.replace(request)
+
+
+def _set_nested_xlsx_part(provider: TextReplacementProvider, part: str) -> None:
+    if isinstance(provider, (_CurrentXlsxReplacementProvider, _NestedXlsxReplacementProvider, _XlsxTextSelectionProvider)):
+        provider.set_part(part)
+
+
+def _is_xlsx_translation_candidate(text: str) -> bool:
+    """Return whether a visible XLSX string is outside the numeric-only exclusion."""
+    return _NUMERIC_LOOKING_TEXT.fullmatch(text) is None
+
+
 def _replace_worksheet(
     data: bytes,
     shared_strings: tuple[str, ...],
@@ -219,6 +1089,7 @@ def _replace_worksheet(
     preserve_source_font_family: bool,
     measure_source_fonts: bool,
     table_headers: frozenset[str],
+    selected_cells: frozenset[str] | None = None,
 ) -> tuple[bytes, int]:
     try:
         root = ElementTree.fromstring(data)
@@ -229,12 +1100,19 @@ def _replace_worksheet(
     merged_cells = _merged_cells(root)
     replaced = 0
     for cell in root.findall(".//x:sheetData/x:row/x:c", _NS):
+        if selected_cells is not None and cell.get("r") not in selected_cells:
+            continue
         if cell.get("r") in table_headers:
             # A structured-table header is an identifier referenced by table
             # formulas and metadata, rather than ordinary display text.
             continue
         text = _cell_text(cell, shared_strings)
-        if text is None or not text.strip() or cell.find("x:f", _NS) is not None:
+        if (
+            text is None
+            or not text.strip()
+            or cell.find("x:f", _NS) is not None
+            or not _is_xlsx_translation_candidate(text)
+        ):
             continue
         bounds = _cell_bounds(cell, column_widths, row_heights, merged_cells)
         if not styles.can_write_explicit_fit:
@@ -292,7 +1170,9 @@ def _replace_worksheet(
     return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), replaced
 
 
-def _table_header_cells(parts: dict[str, bytes]) -> dict[str, frozenset[str]]:
+def _table_header_cells(
+    parts: dict[str, bytes], selected_parts: dict[str, frozenset[str]] | None = None
+) -> dict[str, frozenset[str]]:
     """Return header-cell references that must agree with table metadata.
 
     A worksheet table's header row is duplicated in ``xl/tables/*.xml`` as
@@ -304,6 +1184,8 @@ def _table_header_cells(parts: dict[str, bytes]) -> dict[str, frozenset[str]]:
     headers_by_sheet: dict[str, frozenset[str]] = {}
     for sheet_name, sheet_data in parts.items():
         if not sheet_name.startswith("xl/worksheets/") or not sheet_name.endswith(".xml"):
+            continue
+        if selected_parts is not None and sheet_name not in selected_parts:
             continue
         try:
             sheet = ElementTree.fromstring(sheet_data)
@@ -803,4 +1685,4 @@ def _tag(local_name: str) -> str:
     return f"{{{_SPREADSHEET_NAMESPACE}}}{local_name}"
 
 
-__all__ = ["replace_xlsx_file"]
+__all__ = ["replace_xlsx_bytes", "replace_xlsx_file", "xlsx_native_text_request_total"]

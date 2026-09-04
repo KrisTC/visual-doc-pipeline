@@ -1375,12 +1375,19 @@ progress rows:
    name exceeds the width. Its active-operation label shall appear in the
    detail column, not replace the filename.
 3. A **Nested** row shall appear only while the active folder-replacement
-   source performs an OCR-backed embedded bitmap or PDF vector-analysis
-   operation. It shall identify that document part and advance through exactly
-   three stages: OCR recognition; processing the OCR results, including
-   confidence filtering, text replacement, and colour analysis; and rendering
-   the replacement image. It shall be cleared when that operation finishes or
-   fails.
+   source processes one nested object. For an OCR-backed embedded bitmap or PDF
+   vector-analysis operation, it shall identify that document part and advance
+   through exactly three stages: OCR recognition; processing the OCR results,
+   including confidence filtering, text replacement, and colour analysis; and
+   rendering the replacement image. For a relationship-reachable DOCX chart
+   with an embedded XLSX workbook, it shall identify the chart and workbook and
+   advance once for every native-text replacement request made by the embedded
+   XLSX adapter. Its detail label shall identify the active worksheet or drawing
+   part and its replacement-request count without exposing replacement text.
+   Before translation begins, the adapter shall calculate the exact number of
+   such requests using its normal selection rules, so the row shows a real
+   completion count and percentage. It shall be cleared when that nested-object
+   operation finishes or fails.
 
 The current row and nested row shall be reset for each next task rather than
 left as historical completed bars. The overall row shall remain visible until
@@ -1415,7 +1422,11 @@ stdout and stderr output while progress is live.
 The command-specific row mappings are:
 
 - Folder replacement: the overall row counts eligible selected source files;
-  the current row keeps the source work-item model of FR-2026-08-03-04.
+  the current row keeps the source work-item model of FR-2026-08-03-04. A DOCX
+  source shall additionally show distinct current-row work items for its
+  post-native-pass layout rewrite, chart-cache synchronization, and final
+  package write. These source-level steps shall remain on the Current row;
+  only embedded XLSX native-text processing belongs on the Nested row.
 - OCR evaluation: the overall row counts all non-cached provider/image
   evaluations; the current row counts those for the active progress folder.
 - Native text-replacement evaluation: the overall row counts all eligible
@@ -1428,9 +1439,10 @@ The command-specific row mappings are:
 
 Automated tests shall use synthetic inputs and mocked clocks or rendering
 boundaries. They shall verify the row totals and advancement rules, active
-labels, three nested image-operation stages, cleanup after a failure, bounded
-row count, and preservation of regular status/failure output. Tests shall
-verify determinate time columns and the unknown-length download case without a
+labels, three nested image-operation stages, DOCX embedded-workbook nested
+progress, current-row DOCX package stages, cleanup after a failure, bounded row
+count, and preservation of regular status/failure output. Tests shall verify
+determinate time columns and the unknown-length download case without a
 network request.
 
 ### Rationale

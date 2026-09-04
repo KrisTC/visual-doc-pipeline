@@ -31,13 +31,14 @@ from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
 from pipeline.folder_replacement.pptx import replace_pptx_file
-from pipeline.folder_replacement.xlsx import replace_xlsx_file
+from pipeline.folder_replacement.xlsx import replace_xlsx_file, xlsx_native_text_request_total
 from pipeline.folder_replacement.bitmap import (
     replace_bitmap_bytes as _process_bitmap_bytes,
     replace_bitmap_file as _process_bitmap_file,
     replace_image as _process_bitmap_image,
 )
 from pipeline.folder_replacement.filters import matches_include_patterns
+from pipeline.folder_replacement.common import NestedProgressReporter
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
 OFFICE_DOCUMENT_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
 DOCUMENT_EXTENSIONS = OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
@@ -85,6 +86,7 @@ def replace_input_folder(
     target_language: str,
     typeface: skia.Typeface,
     document_text_layout: str = "preserve-source-formatting",
+    xlsx_translation_mode: str = "full",
     include_patterns: tuple[str, ...] = (),
     diagnostics_enabled: bool = False,
     show_progress: bool = True,
@@ -110,6 +112,8 @@ def replace_input_folder(
             "Document text layout must be 'preserve-source-formatting', "
             "'preserve-basic-layout', or 'preserve-basic-layout-source-font'."
         )
+    if xlsx_translation_mode not in {"full", "fast"}:
+        raise ValueError("XLSX translation mode must be 'full' or 'fast'.")
     if not _provider_supports_language(ocr_provider, source_language):
         raise ValueError(
             f"The selected OCR provider does not support source language {source_language!r}."
@@ -179,13 +183,18 @@ def replace_input_folder(
         try:
             print(f"Processing: {relative_source_path}")
             if show_progress:
+                source_work_total = _source_work_total(
+                    source_path,
+                    document_text_layout=document_text_layout,
+                    xlsx_translation_mode=xlsx_translation_mode,
+                )
                 if display is not None:
                     progress = display.start_current(
-                        relative_source_path.name, _source_work_total(source_path), "work item"
+                        relative_source_path.name, source_work_total, "work item"
                     )
                 else:
                     make_progress = progress_factory or _make_progress_bar
-                    progress = make_progress(_source_work_total(source_path), relative_source_path.name)
+                    progress = make_progress(source_work_total, relative_source_path.name)
 
             def work_completed(label: str) -> None:
                 if progress is not None:
@@ -289,16 +298,25 @@ def replace_input_folder(
                         source_language, target_language, typeface, work_completed,
                         document_text_layout=document_text_layout, failure_context=failure_context,
                         diagnostics=document_diagnostics if diagnostics_enabled else None,
+                        nested_progress=display,
+                        xlsx_translation_mode=xlsx_translation_mode,
                     )
-                else:
-                    office_handler = {
-                        ".pptx": replace_pptx_file,
-                        ".xlsx": replace_xlsx_file,
-                    }[extension]
+                elif extension == ".xlsx":
+                    office_handler = replace_xlsx_file
                     native_items, image_regions, retained_vectors = office_handler(
                         source_path, temporary_destination, processing_ocr, processing_replacement,
                         source_language, target_language, typeface, work_completed,
                         document_text_layout=document_text_layout, failure_context=failure_context,
+                        nested_progress=display,
+                        xlsx_translation_mode=xlsx_translation_mode,
+                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                    )
+                else:
+                    native_items, image_regions, retained_vectors = replace_pptx_file(
+                        source_path, temporary_destination, processing_ocr, processing_replacement,
+                        source_language, target_language, typeface, work_completed,
+                        document_text_layout=document_text_layout, failure_context=failure_context,
+                        nested_progress=display,
                     )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -515,7 +533,12 @@ def _assert_path_inside_output(output_root: Path, path: Path) -> None:
         raise ValueError(f"Output path escapes output root: {path}")
 
 
-def _source_work_total(source_path: Path) -> int:
+def _source_work_total(
+    source_path: Path,
+    *,
+    document_text_layout: str = "preserve-source-formatting",
+    xlsx_translation_mode: str = "full",
+) -> int:
     """Return the native-text plus embedded-raster work units for one source file."""
     extension = source_path.suffix.lower()
     if extension in BITMAP_EXTENSIONS:
@@ -524,11 +547,15 @@ def _source_work_total(source_path: Path) -> int:
         return 1
     if extension == ".docx":
         with ZipFile(source_path) as archive:
-            return 2 + sum(
+            return 4 + sum(
                 _is_office_bitmap_part(name) or _is_office_vector_part(name)
                 for name in archive.namelist()
             )
     if extension in OFFICE_DOCUMENT_EXTENSIONS:
+        if extension == ".xlsx" and xlsx_translation_mode == "fast":
+            return xlsx_native_text_request_total(
+                source_path.read_bytes(), document_text_layout, xlsx_translation_mode
+            ) + 2
         with ZipFile(source_path) as archive:
             return 1 + sum(
                 _is_office_bitmap_part(name) or _is_office_vector_part(name)
@@ -579,6 +606,7 @@ def _replace_office_file(
     skip_native_xml_part: Callable[[str], bool] | None = None,
     ocr_backgrounds: Mapping[str, RgbColour] | None = None,
     failure_context: FailureContext | None = None,
+    nested_progress: NestedProgressReporter | None = None,
 ) -> tuple[int, int, int]:
     native_items = 0
     image_regions = 0
@@ -605,17 +633,24 @@ def _replace_office_file(
                         package_part=entry.filename,
                         item_index=embedded_image_index,
                     )
-                data, replaced = _replace_bitmap_bytes(
-                    data,
-                    ocr_provider,
-                    replacement_provider,
-                    source_language,
-                    target_language,
-                    typeface,
-                    DEFAULT_OCR_BACKGROUND
-                    if ocr_backgrounds is None
-                    else ocr_backgrounds.get(entry.filename, DEFAULT_OCR_BACKGROUND),
-                )
+                if nested_progress is not None:
+                    nested_progress.start_nested(entry.filename, 3, "stage")
+                try:
+                    data, replaced = _replace_bitmap_bytes(
+                        data,
+                        ocr_provider,
+                        replacement_provider,
+                        source_language,
+                        target_language,
+                        typeface,
+                        DEFAULT_OCR_BACKGROUND
+                        if ocr_backgrounds is None
+                        else ocr_backgrounds.get(entry.filename, DEFAULT_OCR_BACKGROUND),
+                        None if nested_progress is None else nested_progress.advance_nested,
+                    )
+                finally:
+                    if nested_progress is not None:
+                        nested_progress.clear_nested()
                 image_regions += replaced
                 work_completed(f"embedded image {embedded_image_index}")
             elif _is_office_vector_part(entry.filename):
@@ -695,6 +730,7 @@ def _replace_bitmap_bytes(
     target_language: str,
     typeface: skia.Typeface,
     ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND,
+    nested_completed: Callable[[str], None] | None = None,
 ) -> tuple[bytes, int]:
     return _process_bitmap_bytes(
         data,
@@ -704,6 +740,7 @@ def _replace_bitmap_bytes(
         target_language,
         typeface,
         ocr_background,
+        nested_completed,
     )
 
 

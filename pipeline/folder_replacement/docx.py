@@ -7,10 +7,11 @@ from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
 from dataclasses import dataclass
+import posixpath
 import re
 import unicodedata
 from uuid import NAMESPACE_URL, UUID, uuid5
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 import xml.etree.ElementTree as ElementTree
 
 import skia  # type: ignore[import-not-found]
@@ -29,20 +30,24 @@ from pipeline.folder_replacement.office_xml import (
     _serialize_with_compatibility_bindings,
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
+from pipeline.folder_replacement.common import NestedProgressReporter
+from pipeline.folder_replacement.xlsx import replace_xlsx_bytes, xlsx_native_text_request_total
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import RgbColour
 from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement.errors import TextReplacementProviderError
 
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 _WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
 _A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_C = "http://schemas.openxmlformats.org/drawingml/2006/chart"
 _R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PACKAGE_RELATIONSHIPS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _CONTENT_TYPES = "http://schemas.openxmlformats.org/package/2006/content-types"
-_NS = {"w": _W, "wp": _WP, "wps": _WPS, "a": _A}
+_NS = {"w": _W, "wp": _WP, "wps": _WPS, "a": _A, "c": _C, "r": _R}
 _SETTINGS_BEFORE_EMBED_TRUE_TYPE_FONTS = frozenset({
     "writeProtection", "view", "zoom", "removePersonalInformation",
     "removeDateAndTime", "doNotDisplayPageBoundaries", "displayBackgroundShape",
@@ -75,6 +80,8 @@ def replace_docx_file(
     completed: Callable[[str], None], document_text_layout: str = "preserve-source-formatting",
     failure_context: FailureContext | None = None,
     diagnostics: list[dict[str, object]] | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+    xlsx_translation_mode: str = "full",
 ) -> tuple[int, int, int]:
     """Fit Word DrawingML text boxes while retaining ordinary flow text behaviour."""
     from pipeline.folder_replacement.processor import _replace_office_file
@@ -92,13 +99,16 @@ def replace_docx_file(
             skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
             ocr_backgrounds=ocr_backgrounds,
             failure_context=failure_context,
+            nested_progress=nested_progress,
         )
         native += _replace_docx_parts(
             destination, replacement, source_language, target_language, False, failure_context,
             source_formatting=True, fit_textboxes=False,
             diagnostics=diagnostics, document_text_layout=document_text_layout,
+            completed=completed, nested_progress=nested_progress,
+            xlsx_translation_mode=xlsx_translation_mode, ocr=ocr, typeface=typeface,
         )
-        completed("native text layout")
+        completed("package write")
         return native, images, vectors
     native, images, vectors = _replace_office_file(
         source, destination, ocr, replacement, source_language, target_language, typeface,
@@ -106,10 +116,13 @@ def replace_docx_file(
         skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
         ocr_backgrounds=ocr_backgrounds,
         failure_context=failure_context,
+        nested_progress=nested_progress,
     )
     native += _replace_docx_parts(destination, replacement, source_language, target_language,
         document_text_layout == "preserve-basic-layout-source-font", failure_context,
-        diagnostics=diagnostics, document_text_layout=document_text_layout)
+        diagnostics=diagnostics, document_text_layout=document_text_layout,
+        completed=completed, nested_progress=nested_progress,
+        xlsx_translation_mode=xlsx_translation_mode, ocr=ocr, typeface=typeface)
     if document_text_layout == "preserve-basic-layout":
         if failure_context is not None:
             failure_context.set_location(
@@ -118,7 +131,7 @@ def replace_docx_file(
                 operation="write",
             )
         _embed_docx_static_fonts(destination)
-    completed("native text layout")
+    completed("package write")
     return native, images, vectors
 
 
@@ -161,6 +174,11 @@ def _replace_docx_parts(
     fit_textboxes: bool = True,
     diagnostics: list[dict[str, object]] | None = None,
     document_text_layout: str = "preserve-source-formatting",
+    completed: Callable[[str], None] | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+    xlsx_translation_mode: str = "full",
+    ocr: OcrProvider | None = None,
+    typeface: skia.Typeface | None = None,
 ) -> int:
     if failure_context is not None:
         failure_context.set_location(
@@ -177,7 +195,11 @@ def _replace_docx_parts(
     font_resolver = _DocxFontResolver.from_parts(parts)
     emphasis_resolver = _DocxEmphasisResolver.from_parts(parts)
     for entry, data in entries:
-        if not entry.filename.startswith("word/") or not entry.filename.endswith(".xml"):
+        if (
+            not entry.filename.startswith("word/")
+            or not entry.filename.endswith(".xml")
+            or entry.filename.startswith("word/charts/")
+        ):
             continue
         if failure_context is not None:
             failure_context.set_location(
@@ -193,6 +215,16 @@ def _replace_docx_parts(
         )
         changed[entry.filename] = updated
         count += changed_count
+    if completed is not None:
+        completed("native text layout")
+    chart_changes, chart_count = _replace_docx_charts(
+        parts, provider, source, target, document_text_layout, diagnostics, nested_progress,
+        xlsx_translation_mode, ocr, typeface,
+    )
+    changed.update(chart_changes)
+    count += chart_count
+    if completed is not None:
+        completed("chart cache synchronization")
     output = BytesIO()
     with ZipFile(output, "w", ZIP_DEFLATED) as archive:
         for entry, data in entries:
@@ -312,6 +344,457 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
         text.text = _replace(text.text, provider, source, target)
         count += 1
     return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), count
+
+
+def _replace_docx_charts(
+    parts: dict[str, bytes],
+    provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    diagnostics: list[dict[str, object]] | None,
+    nested_progress: NestedProgressReporter | None,
+    xlsx_translation_mode: str,
+    ocr: OcrProvider | None,
+    typeface: skia.Typeface | None,
+) -> tuple[dict[str, bytes], int]:
+    """Replace only chart content reachable through Word package relationships."""
+    changed: dict[str, bytes] = {}
+    count = 0
+    processed_workbooks: dict[str, bytes] = {}
+    for chart_part in _reachable_docx_chart_parts(parts):
+        chart_data = parts[chart_part]
+        updated, replaced, chart_root = _replace_chart_rich_text(
+            chart_data, provider, source_language, target_language
+        )
+        if chart_root is None:
+            _chart_fallback(diagnostics, chart_part, "chart_xml_malformed")
+            continue
+        count += replaced
+        relationships = _part_relationships(parts, chart_part)
+        workbook_part = _chart_external_workbook_part(chart_root, relationships)
+        if workbook_part is not None:
+            workbook_data = processed_workbooks.get(workbook_part)
+            if workbook_data is None:
+                try:
+                    chart_formulae = _chart_displayed_string_formulae(chart_root)
+                    request_total = xlsx_native_text_request_total(
+                        parts[workbook_part], document_text_layout, "fast", chart_formulae
+                    )
+                    if nested_progress is not None:
+                        if request_total:
+                            nested_progress.start_nested(
+                                f"{Path(chart_part).name}: {Path(workbook_part).name}",
+                                request_total,
+                                "replacement request",
+                            )
+                    workbook_data, workbook_count = replace_xlsx_bytes(
+                        parts[workbook_part], provider, source_language, target_language,
+                        document_text_layout,
+                        nested_completed=(
+                            None
+                            if nested_progress is None or not request_total
+                            else nested_progress.advance_nested
+                        ),
+                        xlsx_translation_mode="fast",
+                        fast_chart_formulae=chart_formulae,
+                        ocr=ocr,
+                        typeface=typeface,
+                        diagnostics=diagnostics,
+                    )
+                except TextReplacementProviderError:
+                    raise
+                except (BadZipFile, ElementTree.ParseError, ValueError, RuntimeError):
+                    _chart_fallback(diagnostics, chart_part, "embedded_workbook_processing_failed")
+                else:
+                    processed_workbooks[workbook_part] = workbook_data
+                    changed[workbook_part] = workbook_data
+                    count += workbook_count
+                finally:
+                    if nested_progress is not None and request_total:
+                        nested_progress.clear_nested()
+            if workbook_data is not None:
+                if not _update_chart_string_caches(chart_root, workbook_data):
+                    _chart_fallback(diagnostics, chart_part, "chart_string_cache_unresolved")
+                updated = _serialize_with_compatibility_bindings(
+                    chart_root, _namespace_bindings(chart_data)
+                )
+        elif chart_root.find("c:externalData", _NS) is not None:
+            _chart_fallback(diagnostics, chart_part, "embedded_workbook_relationship_unresolved")
+        if updated != chart_data:
+            changed[chart_part] = updated
+        for relationship_type, user_shape_part in relationships.values():
+            if not relationship_type.endswith("/chartUserShapes"):
+                continue
+            user_shape_data = parts.get(user_shape_part)
+            if user_shape_data is None:
+                _chart_fallback(diagnostics, chart_part, "chart_user_shape_unresolved")
+                continue
+            user_shape_updated, user_shape_count = _replace_chart_user_shape_text(
+                user_shape_data, provider, source_language, target_language
+            )
+            if user_shape_updated == user_shape_data and user_shape_count == 0:
+                try:
+                    ElementTree.fromstring(user_shape_data)
+                except ElementTree.ParseError:
+                    _chart_fallback(diagnostics, user_shape_part, "chart_user_shape_xml_malformed")
+            else:
+                changed[user_shape_part] = user_shape_updated
+                count += user_shape_count
+    return changed, count
+
+
+def _reachable_docx_chart_parts(parts: dict[str, bytes]) -> tuple[str, ...]:
+    chart_parts: set[str] = set()
+    pending = ["word/document.xml"]
+    visited: set[str] = set()
+    while pending:
+        owner = pending.pop()
+        if owner in visited or owner not in parts:
+            continue
+        visited.add(owner)
+        for relationship_type, target in _part_relationships(parts, owner).values():
+            if relationship_type.endswith("/chart") and target.startswith("word/charts/") and target in parts:
+                chart_parts.add(target)
+            elif target.startswith("word/") and target.endswith(".xml") and not target.startswith("word/charts/"):
+                pending.append(target)
+    return tuple(sorted(chart_parts))
+
+
+def _part_relationships(parts: dict[str, bytes], owner: str) -> dict[str, tuple[str, str]]:
+    relationships_part = posixpath.join(
+        posixpath.dirname(owner), "_rels", f"{posixpath.basename(owner)}.rels"
+    )
+    data = parts.get(relationships_part)
+    if data is None:
+        return {}
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return {}
+    relationships: dict[str, tuple[str, str]] = {}
+    for relationship in root.findall(f"{{{_PACKAGE_RELATIONSHIPS}}}Relationship"):
+        identifier = relationship.get("Id")
+        relationship_type = relationship.get("Type")
+        target = relationship.get("Target")
+        if (
+            identifier is None
+            or relationship_type is None
+            or target is None
+            or relationship.get("TargetMode") == "External"
+        ):
+            continue
+        resolved = _resolve_docx_relationship_target(owner, target)
+        if resolved is not None and resolved in parts:
+            relationships[identifier] = relationship_type, resolved
+    return relationships
+
+
+def _resolve_docx_relationship_target(owner: str, target: str) -> str | None:
+    if not target or "\\" in target:
+        return None
+    candidate = target.lstrip("/") if target.startswith("/") else posixpath.join(posixpath.dirname(owner), target)
+    resolved = posixpath.normpath(candidate)
+    return resolved if resolved.startswith("word/") and not resolved.startswith("../") else None
+
+
+def _replace_chart_rich_text(
+    data: bytes,
+    provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> tuple[bytes, int, ElementTree.Element | None]:
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return data, 0, None
+    parents = {child: parent for parent in root.iter() for child in parent}
+    count = 0
+    for text in root.iter(_tag(_A, "t")):
+        if text.text and _has_ancestor(text, parents, _tag(_C, "rich")):
+            text.text = _replace(text.text, provider, source_language, target_language)
+            count += 1
+    if not count:
+        return data, 0, root
+    return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), count, root
+
+
+def _replace_chart_user_shape_text(
+    data: bytes,
+    provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+) -> tuple[bytes, int]:
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return data, 0
+    count = 0
+    for text in root.iter(_tag(_A, "t")):
+        if text.text:
+            text.text = _replace(text.text, provider, source_language, target_language)
+            count += 1
+    return (
+        _serialize_with_compatibility_bindings(root, _namespace_bindings(data)) if count else data,
+        count,
+    )
+
+
+def _has_ancestor(
+    element: ElementTree.Element,
+    parents: dict[ElementTree.Element, ElementTree.Element],
+    tag: str,
+) -> bool:
+    current = parents.get(element)
+    while current is not None:
+        if current.tag == tag:
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _chart_external_workbook_part(
+    root: ElementTree.Element,
+    relationships: dict[str, tuple[str, str]],
+) -> str | None:
+    external_data = root.find("c:externalData", _NS)
+    if external_data is None:
+        return None
+    relationship = relationships.get(external_data.get(_tag(_R, "id"), ""))
+    if relationship is None:
+        return None
+    relationship_type, target = relationship
+    return target if relationship_type.endswith("/package") and target.endswith(".xlsx") else None
+
+
+def _chart_displayed_string_formulae(chart: ElementTree.Element) -> tuple[str, ...]:
+    """Return supported workbook formulae that feed visible chart string caches."""
+    return tuple(
+        formula
+        for reference in (
+            *chart.findall(".//c:strRef", _NS),
+            *chart.findall(".//c:multiLvlStrRef", _NS),
+        )
+        if (formula := reference.findtext("c:f", namespaces=_NS)) is not None
+    )
+
+
+def _update_chart_string_caches(chart: ElementTree.Element, workbook: bytes) -> bool:
+    values = _xlsx_cell_values(workbook)
+    if values is None:
+        return False
+    success = True
+    for reference in chart.findall(".//c:strRef", _NS):
+        cache = reference.find("c:strCache", _NS)
+        if cache is not None:
+            success = _update_chart_string_cache(reference, cache, values) and success
+    for reference in chart.findall(".//c:multiLvlStrRef", _NS):
+        cache = reference.find("c:multiLvlStrCache", _NS)
+        if cache is not None:
+            success = _update_chart_multi_level_string_cache(reference, cache, values) and success
+    return success
+
+
+def _update_chart_string_cache(
+    reference: ElementTree.Element,
+    cache: ElementTree.Element,
+    values: dict[tuple[str, str], str],
+) -> bool:
+    cells = _chart_formula_cells(reference.findtext("c:f", namespaces=_NS))
+    if cells is None:
+        return False
+    updates: list[tuple[ElementTree.Element, str]] = []
+    for point in cache.findall("c:pt", _NS):
+        try:
+            index = int(point.get("idx", ""))
+        except ValueError:
+            return False
+        if not 0 <= index < len(cells) or (value := values.get(cells[index])) is None:
+            return False
+        output = point.find("c:v", _NS)
+        if output is None:
+            return False
+        updates.append((output, value))
+    for output, value in updates:
+        output.text = value
+    return True
+
+
+def _update_chart_multi_level_string_cache(
+    reference: ElementTree.Element,
+    cache: ElementTree.Element,
+    values: dict[tuple[str, str], str],
+) -> bool:
+    formula = _chart_formula_range(reference.findtext("c:f", namespaces=_NS))
+    if formula is None:
+        return False
+    sheet, first_column, first_row, last_column, last_row = formula
+    levels = cache.findall("c:lvl", _NS)
+    if len(levels) != last_column - first_column + 1:
+        return False
+    updates: list[tuple[ElementTree.Element, str]] = []
+    for column_offset, level in enumerate(levels):
+        column = first_column + column_offset
+        for point in level.findall("c:pt", _NS):
+            try:
+                index = int(point.get("idx", ""))
+            except ValueError:
+                return False
+            row = first_row + index
+            if row > last_row or (value := values.get((sheet, _cell_reference(column, row)))) is None:
+                return False
+            output = point.find("c:v", _NS)
+            if output is None:
+                return False
+            updates.append((output, value))
+    for output, value in updates:
+        output.text = value
+    return True
+
+
+def _chart_formula_cells(formula: str | None) -> tuple[tuple[str, str], ...] | None:
+    formula_range = _chart_formula_range(formula)
+    if formula_range is None:
+        return None
+    sheet, first_column, first_row, last_column, last_row = formula_range
+    cells = tuple(
+        (sheet, _cell_reference(column, row))
+        for row in range(first_row, last_row + 1)
+        for column in range(first_column, last_column + 1)
+    )
+    return cells if len(cells) <= 10_000 else None
+
+
+def _chart_formula_range(formula: str | None) -> tuple[str, int, int, int, int] | None:
+    if formula is None:
+        return None
+    match = re.fullmatch(
+        r"(?:(?P<quoted>'(?:[^']|'')+')|(?P<plain>[A-Za-z_][A-Za-z0-9_ ]*))!"
+        r"\$?(?P<first_column>[A-Z]{1,3})\$?(?P<first_row>[1-9][0-9]*)"
+        r"(?::\$?(?P<last_column>[A-Z]{1,3})\$?(?P<last_row>[1-9][0-9]*))?",
+        formula,
+    )
+    if match is None:
+        return None
+    sheet = match.group("plain") or match.group("quoted")[1:-1].replace("''", "'")
+    first_column = _column_number(match.group("first_column"))
+    first_row = int(match.group("first_row"))
+    last_column = _column_number(match.group("last_column") or match.group("first_column"))
+    last_row = int(match.group("last_row") or match.group("first_row"))
+    if last_column < first_column or last_row < first_row:
+        return None
+    return sheet, first_column, first_row, last_column, last_row
+
+
+def _column_number(name: str) -> int:
+    value = 0
+    for character in name:
+        value = value * 26 + ord(character) - ord("A") + 1
+    return value
+
+
+def _cell_reference(column: int, row: int) -> str:
+    letters: list[str] = []
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        letters.append(chr(ord("A") + remainder))
+    return f"{''.join(reversed(letters))}{row}"
+
+
+def _xlsx_cell_values(workbook: bytes) -> dict[tuple[str, str], str] | None:
+    try:
+        with ZipFile(BytesIO(workbook)) as archive:
+            parts = {entry.filename: archive.read(entry.filename) for entry in archive.infolist()}
+    except (BadZipFile, KeyError, ElementTree.ParseError):
+        return None
+    try:
+        workbook_root = ElementTree.fromstring(parts["xl/workbook.xml"])
+        relationships_root = ElementTree.fromstring(parts["xl/_rels/workbook.xml.rels"])
+    except (KeyError, ElementTree.ParseError):
+        return None
+    namespace = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    package_namespace = _PACKAGE_RELATIONSHIPS
+    relationship_targets = {
+        relationship.get("Id"): _resolve_xlsx_relationship_target(
+            relationship.get("Target", "")
+        )
+        for relationship in relationships_root.findall(f"{{{package_namespace}}}Relationship")
+        if relationship.get("TargetMode") != "External" and relationship.get("Id") is not None
+    }
+    shared_strings = _xlsx_shared_strings(parts.get("xl/sharedStrings.xml"), namespace)
+    values: dict[tuple[str, str], str] = {}
+    for sheet in workbook_root.findall(f".//{{{namespace}}}sheet"):
+        name = sheet.get("name")
+        target = relationship_targets.get(sheet.get(_tag(_R, "id")))
+        if name is None or target is None or target not in parts:
+            return None
+        try:
+            worksheet = ElementTree.fromstring(parts[target])
+        except ElementTree.ParseError:
+            return None
+        for cell in worksheet.findall(f".//{{{namespace}}}c"):
+            reference = cell.get("r")
+            value = _xlsx_cell_value(cell, shared_strings, namespace)
+            if reference is not None and value is not None:
+                values[name, reference] = value
+    return values
+
+
+def _resolve_xlsx_relationship_target(target: str) -> str | None:
+    if not target or "\\" in target:
+        return None
+    resolved = posixpath.normpath(
+        target.lstrip("/") if target.startswith("/") else posixpath.join("xl", target)
+    )
+    return resolved if resolved.startswith("xl/") and not resolved.startswith("../") else None
+
+
+def _xlsx_shared_strings(data: bytes | None, namespace: str) -> tuple[str, ...]:
+    if data is None:
+        return ()
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return ()
+    return tuple(
+        "".join(text.text or "" for text in item.iter(f"{{{namespace}}}t"))
+        for item in root.findall(f"{{{namespace}}}si")
+    )
+
+
+def _xlsx_cell_value(
+    cell: ElementTree.Element, shared_strings: tuple[str, ...], namespace: str
+) -> str | None:
+    cell_type = cell.get("t")
+    if cell_type == "s":
+        value = cell.find(f"{{{namespace}}}v")
+        if value is None or value.text is None:
+            return None
+        try:
+            return shared_strings[int(value.text)]
+        except (IndexError, ValueError):
+            return None
+    if cell_type == "inlineStr":
+        inline = cell.find(f"{{{namespace}}}is")
+        return None if inline is None else "".join(
+            text.text or "" for text in inline.iter(f"{{{namespace}}}t")
+        )
+    if cell_type == "str":
+        value = cell.find(f"{{{namespace}}}v")
+        return None if value is None else value.text
+    return None
+
+
+def _chart_fallback(
+    diagnostics: list[dict[str, object]] | None, package_part: str, reason_code: str
+) -> None:
+    if diagnostics is not None:
+        diagnostics.append({
+            "kind": "fallback",
+            "reason_code": f"docx_{reason_code}",
+            "container_kind": "docx_chart",
+            "location": {"package_part": package_part},
+        })
 
 
 def _textbox_bounds(textbox: ElementTree.Element, parents: dict[ElementTree.Element, ElementTree.Element]) -> tuple[int, int] | None:
