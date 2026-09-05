@@ -8,7 +8,7 @@ SVG, EMF, WMF, and editable vector-graphic processing.
 |----------|-------|
 | Title | Replace editable text in embedded vector graphics directly |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | Implementation diagnosis |
 | Date Added | 2026-08-03 |
 | Related Requirements | FR-2026-08-03-03 |
@@ -68,7 +68,7 @@ Before implementation, define which conditions create a comment (for example, a 
 |----------|-------|
 | Title | Replace raster DIBs embedded in EMF graphics |
 | Owner | KrisTC |
-| Status | Implemented |
+| Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-03 |
 | Related Requirements | FR-2026-08-03-03, FR-2026-08-03-05, TR-2026-08-03-01 |
@@ -271,7 +271,7 @@ external reference is opened.
 | Status | Implemented |
 | Source | User request following EMF table-label diagnosis |
 | Date Added | 2026-09-04 |
-| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-09-05-02 |
 
 ### Description
 
@@ -280,7 +280,9 @@ This requirement extends fitted-layout eligibility for editable EMF
 rectangle.  It supersedes the EMF-specific explicit-clipping-only rule in
 FR-2026-08-04-07, but only for the eligible records below.  It does not change
 `preserve-source-formatting`, which shall retain its existing direct native
-text replacement behaviour.
+text replacement behaviour. FR-2026-09-05-02 supersedes this requirement's
+per-record fitting and expansion behaviour for an eligible contiguous text
+record group.
 
 In either fitted layout mode, the EMF adapter shall first reconstruct the
 selected source GDI font and original horizontal text placement.  It shall
@@ -297,16 +299,20 @@ selection and fitting shall follow FR-2026-08-27-02.  As ordinary EMF has no
 safe portable font-embedding path, the output shall retain its source font
 reference while applying the selected fitting scale.
 
-The measured source rectangle shall be the default replacement fitting bound.
-For a source record and returned replacement that each contain one horizontal
-line, the adapter may expand that bound along the baseline only into verified
-empty space.  It shall not expand vertically or introduce a new line.  It
-shall stop before the nearest intersecting source-text rectangle or a
-recognised vector line segment.  The complete fitted replacement glyph bounds
-shall remain within the resulting rectangle and shall not intersect another
-source-text rectangle or recognised vector line segment.  A left-aligned
-record may expand rightward, a right-aligned record may expand leftward, and a
-centred record may expand symmetrically.
+For a record not selected for a group by FR-2026-09-05-02, the measured source
+rectangle shall be the default replacement fitting bound. For a source record
+and returned replacement that each contain one horizontal line, the adapter
+may expand that bound along the baseline only into verified empty space. It
+shall not expand vertically or introduce a new line. It shall stop before the
+nearest intersecting source-text rectangle or a recognised vector line segment.
+The complete fitted replacement glyph bounds shall remain within the resulting
+rectangle and shall not intersect another source-text rectangle or recognised
+vector line segment. A left-aligned record may expand rightward, a
+right-aligned record may expand leftward, and a centred record may expand
+symmetrically. Expansion shall also stop at the finite, non-degenerate EMF
+header `rclBounds` rectangle. When that outer bound cannot be reconciled with
+the record's coordinate system, the adapter shall retain the measured source
+rectangle and shall not infer outer free space.
 
 The initial eligible geometry is ordinary, axis-aligned horizontal text and
 axis-aligned `EMR_MOVETOEX`/`EMR_LINETO` line segments in a safely resolved EMF
@@ -327,8 +333,9 @@ neighbouring values as hard layout boundaries.
 ### Notes
 
 The adapter may use the shared bounded-text layout core for face selection and
-fitting, but it must retain one-line EMF output semantics.  It must not use OCR
-or rasterize the EMF graphic for this feature.
+fitting, but it must retain one-line EMF output semantics. It must not use OCR
+or rasterize the EMF graphic for this feature. FR-2026-09-05-02 defines the
+limited exception that treats multiple source records as one one-line output.
 
 Automated tests shall use synthetic EMF inputs only.  They shall verify
 Noto-only source measurement in `preserve-basic-layout`; source-face
@@ -338,5 +345,293 @@ both an adjacent text rectangle and a vertical line segment; alignment-aware
 expansion; and unchanged direct replacement for multi-line, rotated,
 transformed, ambiguous, or otherwise ineligible records.  Tests shall verify
 that generated EMF files remain structurally valid.
+
+---
+
+## FR-2026-09-05-01
+
+| Property | Value |
+|----------|-------|
+| Title | Fit EMF text through resolvable affine transforms |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following transformed-EMF PowerPoint diagnosis |
+| Date Added | 2026-09-05 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-09-04-01, FR-2026-09-05-02 |
+
+### Description
+
+This requirement extends the EMF fitted-layout eligibility of
+FR-2026-09-04-01 to editable `EMR_EXTTEXTOUTA` and `EMR_EXTTEXTOUTW` records
+whose effective affine coordinate transform is finite and invertible.  It
+includes translation, uniform or non-uniform scale, reflection, rotation at
+any angle, shear, and compositions of those operations.  It supersedes
+FR-2026-09-04-01's transformed-record fallback only for records that meet
+this requirement. `preserve-source-formatting` shall retain its existing
+direct native-text replacement behaviour. FR-2026-09-05-02 supersedes this
+requirement's per-record fitting and expansion behaviour for an eligible
+contiguous text record group.
+
+For every eligible record, the adapter shall reconstruct the effective
+logical-to-rendered coordinate transform from the EMF device-context state.
+It shall process `EMR_SETWORLDTRANSFORM` and every
+`EMR_MODIFYWORLDTRANSFORM` operation according to its declared composition
+mode, along with `EMR_SETWINDOWORGEX`, `EMR_SETWINDOWEXTEX`,
+`EMR_SETVIEWPORTORGEX`, `EMR_SETVIEWPORTEXTEX`,
+`EMR_SCALEWINDOWEXTEX`, `EMR_SCALEVIEWPORTEXTEX`, and the active map and
+graphics modes.  It shall preserve and restore that state through EMF
+save/restore-device-context operations.  A pure translation shall not make a
+record ineligible.
+
+The adapter shall use the effective transform and the applicable GDI text
+semantics to express source text rectangles, source baselines, and explicit
+clip rectangles in one rendered coordinate space.  It shall then apply the
+existing source measurement and replacement-face selection rules.  Existing
+explicit-clip fitting shall use the transformed clip geometry.
+
+For every eligible transform not selected for a group by FR-2026-09-05-02, the
+transformed measured source rectangle shall be the replacement fitting bound.
+The adapter shall apply at most a uniform downscale to the replacement and
+shall retain the source text position and effective transform. The complete
+transformed replacement glyph bounds shall remain inside that source bound.
+This source-bound-only fitting rule applies to rotated, reflected, sheared,
+and otherwise non-axis-aligned transforms. It shall not expand the bound,
+infer free space, or attempt neighbour or line-obstacle avoidance for those
+transforms.
+
+For an orientation-preserving, axis-aligned transform consisting only of
+translation and positive horizontal and vertical scale, the adapter shall
+also apply the existing un-clipped free-space expansion rule from
+FR-2026-09-04-01 to an individual record not selected for a group by
+FR-2026-09-05-02. It may expand only along the horizontal source baseline into
+verified empty space, stopping before transformed source-text rectangles and
+recognised `EMR_MOVETOEX`/`EMR_LINETO` line segments. The complete fitted
+replacement glyph bounds shall remain within the expanded bound and shall not
+intersect those obstacles or the finite, non-degenerate EMF header `rclBounds`
+rectangle. When the header bounds cannot be reconciled with the record's
+rendered coordinate system, the adapter shall retain the transformed measured
+source rectangle and shall not infer outer free space.
+
+The output shall retain the source text position, orientation, reflection,
+and effective transform.  It may add or select a cloned GDI font only to
+apply the uniform fitted scale required by the shared bounded-text layout
+result.  It shall not rasterize the EMF, convert text to outlines, reorder
+painting operations, alter unrelated graphics state, or replace a text record
+more than once.  A replacement that cannot fit at the one-pixel minimum shall
+remain visible as overflow according to the shared fitted-layout rule, rather
+than silently clipping or retaining source-language text.
+
+The adapter shall retain the direct `preserve-source-formatting` replacement
+fallback for a singular or non-finite matrix, an unresolvable map or graphics
+state, unsupported device-context restoration, an unsupported
+text-orientation semantic, or geometry that cannot be safely reconciled with
+the EMF record's rendered bounds.  It shall not approximate such a case
+through rasterization, OCR, or a guessed transform.
+
+### Rationale
+
+PowerPoint commonly carries EMF graphics that use repeated coordinate
+translations and scales for ordinary diagram labels.  Other sources may use
+rotation, reflection, or shear.  Treating every world transform as unsafe
+leaves translated labels at their source size and makes adjacent-label overlap
+likely.  Fitting every resolvable transform to its original visible bound
+maximizes translation coverage and visibility; limiting expansion to the
+simple axis-aligned case preserves the existing obstacle-safety guarantee
+without delaying rotated, mirrored, or sheared text support.
+
+### Notes
+
+The requirement is EMF-specific; it does not change PPTX-native text-frame
+fitting or the OCR bitmap path.  "Orientation-preserving, axis-aligned" means
+that the effective transform has no rotation, reflection, or shear and has
+strictly positive horizontal and vertical scale.  This is deliberately
+narrower than source-bound-only eligibility.
+
+Automated tests shall use synthetic EMFs only.  They shall verify fitted
+replacement for direct and composed translations, uniform and unequal scale,
+reflection, arbitrary-angle rotation, and shear; `EMR_SETWORLDTRANSFORM`; each
+`EMR_MODIFYWORLDTRANSFORM` composition mode; window/viewport origins and
+extents; scale-window and scale-viewport records; applicable map and graphics
+modes; and save/restore-device-context nesting.  They shall verify
+transform-aware source measurement, explicit clips, source-bound-only fitting
+for rotated, reflected, and sheared text, baseline-only expansion and text and
+line obstacles for the orientation-preserving axis-aligned case, source-font
+and Noto measurement modes, output orientation, and structural validity.  They
+shall also verify unchanged direct replacement fallback for singular or
+non-finite transforms, unsupported state restoration, and unreconcilable
+source bounds.
+
+---
+
+## FR-2026-09-05-02
+
+| Property | Value |
+|----------|-------|
+| Title | Fit coherent EMF text fragments as one visual block |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following adjacent EMF-label layout review |
+| Date Added | 2026-09-05 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-09-04-01, FR-2026-09-05-01 |
+
+### Description
+
+In `preserve-basic-layout` and `preserve-basic-layout-source-font`, the EMF
+adapter shall identify an eligible visual text run of two or more editable
+`EMR_EXTTEXTOUTA` or `EMR_EXTTEXTOUTW` records before requesting replacement
+text. It shall translate and fit the run once as one horizontal visual line,
+rather than independently translating and fitting each member.
+`preserve-source-formatting` shall retain its existing direct per-record
+replacement behaviour.
+
+The fit region for an eligible run shall be the union of its source text
+fragments' measured areas. It shall not infer or expand to a surrounding table
+cell, shape, or other semantic container. The complete replacement shall be
+one coherent text block within that original union region. The adapter shall
+select the largest uniform output size that fits, but shall never increase
+above the largest source-fragment font size. If it cannot reliably determine
+that maximum size, it shall use the existing source-region fitting result
+without enlargement.
+
+The implementation shall group records only when all of the following
+evidence is present:
+
+- the records form one left-to-right visual text line in source paint order.
+  They may be separated by non-painting GDI device-context records, including
+  font selection, text colour, text alignment, character spacing,
+  justification, coordinate transforms, device-context save/restore,
+  clip-region changes, object lifecycle, and non-drawing comments. A failed
+  state restoration or an unrecognised comment is ineligible. An intervening
+  drawing, bitmap, or other record that paints pixels remains a hard boundary;
+- every member is a non-empty, single-line record of the same EMF text-record
+  encoding and supplies a finite source text area. The adapter shall derive
+  that area from, in priority order, a non-degenerate explicit clip rectangle,
+  a non-degenerate record bounds rectangle, or source-text measurement at the
+  record's text origin. Members may freely mix those three evidence forms; in
+  particular, a member without an explicit bounds or clip rectangle shall not
+  prevent grouping. A clipped run's finite clip rectangles must be compatible
+  when more than one is present: they must be identical or mutually overlap;
+- every member has an orientation-preserving, axis-aligned effective transform
+  with the same linear scale components; pure translation between members is
+  permitted;
+- the leftmost member, which will be the output anchor, is left-aligned;
+- the rendered source baselines match within one rendered logical unit, the
+  member rectangles are in strictly increasing left-to-right order, and each
+  adjacent pair touches, overlaps, or has a horizontal gap no greater than four
+  rendered source-line heights; and
+- the source-area geometry reconciliation rules from FR-2026-09-04-01 and
+  FR-2026-09-05-01 succeed for every member. Source-glyph measurement is
+  required only when the record has neither an explicit clip nor a
+  non-degenerate bounds rectangle.
+
+The adapter shall not require members to use the same declared GDI face, font
+size, weight, italic state, colour, character spacing, or text alignment after
+the anchor. Instead, it shall determine the run's dominant typography from the member with
+the greatest number of non-whitespace source characters, resolving ties to the
+leftmost member. The translated run shall use that dominant typography and one
+uniform fitted scale. This intentionally replaces source inline emphasis with
+one coherent output style.
+
+The adapter shall concatenate the member source strings in visual order for
+the one provider request. It shall preserve a touching or overlapping boundary
+without an inserted character, and represent a positive source gap with one
+space. A replacement containing a line break, a bidi control, or an unsupported
+portable-font segment shall make the entire candidate group ineligible. The
+adapter shall then use the existing safe per-record behaviour for its members.
+
+The fitting bound shall begin as the union of the run's measured source areas,
+including areas derived for members without an explicit bounds or clip
+rectangle. It shall then apply the existing horizontal verified-empty-space
+expansion rule as one whole line, stopping at external text, recognised line
+segments, the EMF header bounds, or an active rectangular EMF device-context
+clip region. It shall not infer a semantic container.
+Before selecting the uniform output size for a left-aligned group, the adapter
+shall reserve a renderer-safety margin at the right edge of that expanded
+bound. The margin shall be the greater of two rendered EMF logical units and
+three percent of the bound width, rounded up, while retaining at least one
+logical unit of usable width. It shall use the reduced width for fitting but
+retain the full expanded bound as the rewritten record bounds and all obstacle
+and clip caps. This margin accounts for a retained or substituted GDI font
+rendering wider in PowerPoint than the deterministic layout measurement.
+The adapter shall select the leftmost member as the anchor, write the complete
+one-line replacement to that record, and make every later member non-painting
+by replacing its text with an empty string. It shall retain source record order,
+the anchor's position and effective transform, and all non-text EMF records.
+The source union and any expanded bound are fitting and measurement bounds, not
+a new rendering clip. The adapter shall remove `ETO_CLIPPED` from the rewritten
+anchor, including when the source anchor was clipped, and write the resulting
+bound as the anchor record bounds. A later clipped fragment that is made
+non-painting need not retain its former clip rectangle.
+It may add and select one cloned GDI font based on the dominant typography only
+to apply the run's one uniform fitted scale. It shall clear any explicit
+character-advance array on each
+rewritten member, since it no longer describes that member's replacement text.
+It shall not reflow, reposition, or resize individual group members
+independently.
+
+Run members shall not be obstacles to one another. The complete replacement
+glyph bounds shall remain within the expanded fitting bound and shall not
+intersect an external text rectangle, recognised line segment, or the finite,
+non-degenerate EMF header `rclBounds` rectangle. The adapter shall track a
+rectangular `EMR_EXTSELECTCLIPRGN` clip through device-context save/restore
+and use the intersection of compatible active member clips as an additional
+hard cap. An unsupported, degenerate, empty, or unreconcilable active clip
+shall retain the source union without free-space expansion. The run shall not expand
+vertically, cross another group or text record, infer cells or paragraph
+blocks, or group a rotated, reflected, sheared, incompatible-clipped, or
+ambiguous record.
+
+FR-2026-09-04-01 and FR-2026-09-05-01 remain the applicable fitting and
+expansion rules for every record that is not selected into a group by this
+requirement. A group that cannot be safely formed, translated, measured,
+encoded, or fitted shall use those existing individual-record rules; it shall
+not rasterize the EMF, use OCR, or guess semantic boundaries.
+
+### Rationale
+
+Some PowerPoint EMFs encode one visually continuous label as several GDI text
+records separated by non-painting state changes, even when the displayed text
+has one apparent size. Independent replacement gives each fragment a separate
+translation scope and fitting scale, causing visible overlap or inconsistent
+typography. Shared container, baseline, ordering, and obstacle evidence allows
+a coherent replacement without treating nearby diagram labels as a paragraph.
+
+### Notes
+
+Automated tests shall use synthetic EMFs only. They shall verify one provider
+request, dominant-typography selection, and one uniform fitted scale for an
+eligible two- and three-record run; mixed explicit-bound, explicit-clip, and
+measurement-derived source areas; union-bound fitting without enlargement;
+the maximum-source-font-size cap; anchor output and non-painting successor
+records; and stopping at an external text rectangle and a vertical line
+segment. They shall verify grouping across non-painting text-state changes,
+including differing source faces, sizes, weights, colours, alignment, character
+spacing, and justification. They shall verify that each remaining grouping
+precondition independently rejects a candidate and retains the existing
+individual-record behaviour, including intervening drawing, bitmap, clipping
+path, save/restore, encoding, baseline, transform, gap, incompatible clip,
+rotation, reflection, or shear differences. They shall verify that explicit
+character-advance arrays are cleared on rewritten run members; compatible
+mixed-clip run anchor bounds and clip rewriting; and fallback for degenerate or
+unreconcilable clips. Tests shall verify the fixed and percentage renderer-safety
+margin used for group fitting while retaining the full rewritten render bound.
+Tests shall verify active rectangular device-context clip
+tracking, save/restore, and expansion caps. Tests shall verify that individual and
+run expansion stop at valid EMF header bounds and do not expand when those
+bounds are invalid or unreconcilable. Tests shall verify valid generated EMFs and unchanged
+`preserve-source-formatting` output.
+
+When an otherwise eligible member selects a stock or otherwise unresolved GDI
+font rather than a directly-created `LOGFONTW` record, both fitted modes shall
+derive a normal, non-italic Noto Sans JP fallback font from that member's
+source-line height. They shall use the fallback for source measurement,
+dominant-typography selection, and output. The adapter shall emit a directly
+created fallback `LOGFONTW` only for the fitted output record and select it
+for that record, retaining the unresolved source selection before and after
+the record. This intentionally does not preserve an unresolved stock face, but
+lets an eligible run use one explicit output font and uniform scale.
+
+Automated tests shall verify grouping and uniformly fitted output for eligible
+stock-font records without a directly-created source font.
 
 ---
