@@ -635,3 +635,52 @@ Automated tests shall verify grouping and uniformly fitted output for eligible
 stock-font records without a directly-created source font.
 
 ---
+
+## FR-2026-09-06-01
+
+| Property | Value |
+|----------|-------|
+| Title | Record vector fitted-layout fallbacks in output diagnostic sidecars |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PowerPoint EMF diagnosis |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-10, FR-2026-08-27-06, FR-2026-09-04-01, FR-2026-09-05-01, FR-2026-09-05-02 |
+
+### Description
+
+When a fitted-layout mode is requested and an editable EMF text record is
+replaced through the existing direct source-formatting path because fitted
+layout cannot be used, the output sidecar shall add one `layout_fallback`
+entry. It shall identify `vector_format` as `emf`, `container_kind` as
+`emf_text_record`, the EMF text-record index and byte offset, and the
+embedded package part when applicable. It shall contain a stable reason code
+that distinguishes an unresolved coordinate state, an invalid transform,
+unavailable source geometry, an unsuccessful bounded fit, and an unavailable
+rotated or sheared transform. A successful fitted replacement and an ordinary
+`preserve-source-formatting` replacement shall not add a fallback entry.
+When available, the entry shall begin with the record's `source_text` and the
+`replacement_text` returned by the selected provider so a reviewer can compare
+the direct fallback with its source.
+
+The vector adapter shall return structured diagnostic decisions to the folder
+processor without writing sidecars itself. The folder processor remains solely
+responsible for writing the source document's sidecar beside its output.
+
+### Rationale
+
+PowerPoint frequently embeds EMFs whose GDI coordinate state makes a fitted
+replacement unsafe. Recording the local EMF record and exact fallback status
+makes this visible without modifying the presentation or requiring manual
+package inspection.
+
+### Notes
+
+Automated tests shall use synthetic standalone and PPTX-embedded vector data.
+They shall verify an embedded EMF fitted-layout fallback with source and
+replacement text, package-part and record location, including the distinct
+rotated and sheared transform statuses. They shall verify sidecar omission
+when debug is disabled, when fitted EMF replacement succeeds, and for a vector
+retained solely because it has no editable text.
+
+---

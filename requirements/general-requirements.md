@@ -735,7 +735,9 @@ extensions. A document with no reportable issue need not have a sidecar. The
 final terminal summary shall state how many diagnostic sidecars were written
 and their output root.
 
-Each sidecar shall contain the run options, per-document totals, and entries
+Each sidecar shall contain the resolved absolute source path in
+`source_absolute_path`, the existing input-root-relative source path in
+`source_path`, the run options, per-document totals, and entries
 for every reportable ignored, failed, or unsupported item in that document. Entries shall
 provide a stable reason code, useful exception or fallback detail, and relevant
 location and font-selection information. For an unsupported portable-font

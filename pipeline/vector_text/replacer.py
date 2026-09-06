@@ -394,6 +394,8 @@ def _replace_emf_text(
     replaced_image_regions = 0
     has_editable_text = False
     has_embedded_bitmaps = False
+    diagnostics: list[dict[str, object]] = []
+    text_record_index = 0
     while offset < len(data):
         if offset + 8 > len(data):
             raise ValueError("Invalid EMF record header.")
@@ -402,8 +404,17 @@ def _replace_emf_text(
             raise ValueError("Invalid EMF record size.")
         record = data[offset : offset + record_size]
         if record_type in {_EMR_EXTTEXTOUTA, _EMR_EXTTEXTOUTW}:
+            text_record_index += 1
             context = fitted_contexts.get(offset)
-            record, changed, editable, fitted_scale = _replace_emf_exttext_record(
+            (
+                record,
+                changed,
+                editable,
+                fitted_scale,
+                used_fitted_layout,
+                source_text,
+                replacement_text,
+            ) = _replace_emf_exttext_record(
                 record, record_type, replace_text,
                 document_text_layout=document_text_layout,
                 replacement_provider=replacement_provider,
@@ -418,6 +429,20 @@ def _replace_emf_text(
             )
             replaced_items += changed
             has_editable_text = has_editable_text or editable
+            if (
+                document_text_layout in {"preserve-basic-layout", "preserve-basic-layout-source-font"}
+                and editable
+                and not used_fitted_layout
+                and offset not in suppressed_group_members
+            ):
+                diagnostics.append(_emf_layout_fallback_diagnostic(
+                    text_record_index,
+                    offset,
+                    text_coordinate_states.get(offset),
+                    context,
+                    source_text,
+                    replacement_text,
+                ))
             use_fitted_font = (
                 context is not None
                 and 0.0 < fitted_scale <= 1.0
@@ -471,7 +496,52 @@ def _replace_emf_text(
         has_editable_text,
         replaced_image_regions,
         has_embedded_bitmaps,
+        tuple(diagnostics),
     )
+
+
+def _emf_layout_fallback_diagnostic(
+    record_index: int,
+    record_offset: int,
+    coordinate_state: _EmfCoordinateState | None,
+    fit_context: _EmfTextFitContext | None,
+    source_text: str | None,
+    replacement_text: str | None,
+) -> dict[str, object]:
+    """Describe one safe direct-replacement fallback."""
+    if fit_context is not None:
+        reason_code = "emf_fitted_layout_fit_unsuccessful"
+    elif coordinate_state is None or not coordinate_state.valid:
+        reason_code = "emf_fitted_layout_coordinate_state_unresolved"
+    elif not coordinate_state.world.is_finite_and_invertible:
+        reason_code = "emf_fitted_layout_transform_invalid"
+    elif not coordinate_state.world.permits_axis_aligned_expansion:
+        x_axis = (coordinate_state.world.m11, coordinate_state.world.m12)
+        y_axis = (coordinate_state.world.m21, coordinate_state.world.m22)
+        dot_product = (x_axis[0] * y_axis[0]) + (x_axis[1] * y_axis[1])
+        reason_code = (
+            "emf_fitted_layout_rotated_transform_unavailable"
+            if math.isclose(dot_product, 0.0, abs_tol=1e-9)
+            else "emf_fitted_layout_sheared_transform_unavailable"
+        )
+    else:
+        reason_code = "emf_fitted_layout_geometry_unavailable"
+    result: dict[str, object] = {}
+    if source_text is not None:
+        result["source_text"] = source_text
+    if replacement_text is not None:
+        result["replacement_text"] = replacement_text
+    result.update({
+        "kind": "layout_fallback",
+        "reason_code": reason_code,
+        "container_kind": "emf_text_record",
+        "vector_format": "emf",
+        "location": {
+            "record_index": record_index,
+            "record_offset": record_offset,
+        },
+    })
+    return result
 
 
 def _emf_text_coordinate_states(data: bytes) -> dict[int, _EmfCoordinateState]:
@@ -1717,7 +1787,7 @@ def _replace_emf_exttext_record(
     clear_explicit_advances: bool = False,
     bounds_override: _EmfRectangle | None = None,
     remove_explicit_clip: bool = False,
-) -> tuple[bytes, int, bool, float]:
+) -> tuple[bytes, int, bool, float, bool, str | None, str | None]:
     emr_text_offset = 36
     string_length_offset = emr_text_offset + 8
     string_offset_offset = emr_text_offset + 12
@@ -1733,7 +1803,7 @@ def _replace_emf_exttext_record(
     if string_offset < dx_offset_offset + 4 or string_end > len(record):
         raise ValueError("Invalid EMF text string offset.")
     if character_count == 0:
-        return record, 0, False, 1.0
+        return record, 0, False, 1.0, False, None, None
     try:
         source_text = record[string_offset:string_end].decode(encoding)
     except UnicodeDecodeError as error:
@@ -1768,6 +1838,7 @@ def _replace_emf_exttext_record(
                 target_language,
                 document_text_layout == "preserve-basic-layout-source-font",
             )
+    used_fitted_layout = fitted_replacement is not None
     if fitted_replacement is None:
         replacement = replace_text(source_text)
         fitted_scale = 1.0
@@ -1810,7 +1881,15 @@ def _replace_emf_exttext_record(
     if padding:
         updated.extend(b"\0" * padding)
     struct.pack_into("<I", updated, 4, len(updated))
-    return bytes(updated), 1, True, fitted_scale
+    return (
+        bytes(updated),
+        1,
+        True,
+        fitted_scale,
+        used_fitted_layout,
+        source_text,
+        replacement,
+    )
 
 
 def _fit_clipped_emf_text(

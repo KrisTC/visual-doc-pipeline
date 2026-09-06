@@ -101,6 +101,7 @@ def replace_docx_file(
             ocr_backgrounds=ocr_backgrounds,
             failure_context=failure_context,
             nested_progress=nested_progress,
+            diagnostics=diagnostics,
         )
         native += _replace_docx_parts(
             destination, replacement, source_language, target_language, False, failure_context,
@@ -119,6 +120,7 @@ def replace_docx_file(
         ocr_backgrounds=ocr_backgrounds,
         failure_context=failure_context,
         nested_progress=nested_progress,
+        diagnostics=diagnostics,
     )
     native += _replace_docx_parts(destination, replacement, source_language, target_language,
         document_text_layout == "preserve-basic-layout-source-font", failure_context,

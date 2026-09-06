@@ -26,7 +26,7 @@ from pipeline.folder_replacement.failure_diagnostics import (
 from pipeline.provider_cache import is_cache_sidecar, provider_diagnostic_name, source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
-from pipeline.vector_text import replace_vector_text
+from pipeline.vector_text import VectorReplacementResult, replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
@@ -146,6 +146,7 @@ def replace_input_folder(
             if diagnostics_enabled:
                 _write_document_diagnostic(
                     output_root,
+                    source_path,
                     relative_source_path,
                     None,
                     _diagnostic_options(
@@ -267,6 +268,8 @@ def replace_input_folder(
                 temporary_destination.write_bytes(vector_result.data)
                 result.replaced_native_text_items += vector_result.replaced_text_items
                 result.replaced_image_regions += vector_result.replaced_image_regions
+                if diagnostics_enabled:
+                    _append_vector_diagnostics(document_diagnostics, vector_result, None)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     result.retained_vector_graphics += 1
                 work_completed("vector graphic")
@@ -317,6 +320,7 @@ def replace_input_folder(
                         source_language, target_language, typeface, work_completed,
                         document_text_layout=document_text_layout, failure_context=failure_context,
                         nested_progress=display,
+                        diagnostics=document_diagnostics if diagnostics_enabled else None,
                     )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
@@ -347,6 +351,7 @@ def replace_input_folder(
             if diagnostics_enabled:
                 _write_document_diagnostic(
                     output_root,
+                    source_path,
                     relative_source_path,
                     destination,
                     _diagnostic_options(
@@ -368,6 +373,7 @@ def replace_input_folder(
             if diagnostics_enabled and document_diagnostics:
                 _write_document_diagnostic(
                     output_root,
+                    source_path,
                     relative_source_path,
                     destination,
                     _diagnostic_options(
@@ -443,6 +449,7 @@ def _document_totals_since(
 
 def _write_document_diagnostic(
     output_root: Path,
+    source_path: Path,
     relative_source_path: Path,
     destination: Path | None,
     options: Mapping[str, object],
@@ -460,6 +467,7 @@ def _write_document_diagnostic(
             {
                 "schema_version": 1,
                 "source_path": relative_source_path.as_posix(),
+                "source_absolute_path": source_path.resolve().as_posix(),
                 "output_path": output_path,
                 "options": dict(options),
                 "totals": dict(totals),
@@ -472,6 +480,27 @@ def _write_document_diagnostic(
         encoding="utf-8",
     )
     result.diagnostic_sidecars.append(sidecar)
+
+
+def _append_vector_diagnostics(
+    diagnostics: list[dict[str, object]],
+    vector_result: VectorReplacementResult,
+    package_part: str | None,
+) -> None:
+    """Attach vector-local diagnostic locations to their source-document report."""
+    for entry in vector_result.diagnostics:
+        diagnostic = dict(entry)
+        location: dict[str, object] = {}
+        location_value = diagnostic.get("location")
+        if isinstance(location_value, dict):
+            location = {
+                key: value for key, value in location_value.items() if isinstance(key, str)
+            }
+        if package_part is not None:
+            location["package_part"] = package_part
+        if location:
+            diagnostic["location"] = location
+        diagnostics.append(diagnostic)
 
 
 def _validate_roots(input_root: Path, output_root: Path) -> None:
@@ -608,6 +637,7 @@ def _replace_office_file(
     ocr_backgrounds: Mapping[str, RgbColour] | None = None,
     failure_context: FailureContext | None = None,
     nested_progress: NestedProgressReporter | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int, int]:
     native_items = 0
     image_regions = 0
@@ -686,6 +716,8 @@ def _replace_office_file(
                 data = vector_result.data
                 native_items += vector_result.replaced_text_items
                 image_regions += vector_result.replaced_image_regions
+                if diagnostics is not None:
+                    _append_vector_diagnostics(diagnostics, vector_result, entry.filename)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     retained_vectors += 1
                     print(f"Retained vector without editable text: {source}", file=sys.stderr)

@@ -109,6 +109,7 @@ def replace_pptx_file(
     document_text_layout: str = "preserve-source-formatting",
     failure_context: FailureContext | None = None,
     nested_progress: NestedProgressReporter | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[int, int, int]:
     """Replace PPTX content, optionally fitting bounded slide text frames."""
     from pipeline.folder_replacement.processor import _replace_office_file
@@ -136,6 +137,7 @@ def replace_pptx_file(
             ocr_backgrounds=ocr_backgrounds,
             failure_context=failure_context,
             nested_progress=nested_progress,
+            diagnostics=diagnostics,
         )
         native_items += _replace_smartart_data_parts(
             destination,
@@ -170,6 +172,7 @@ def replace_pptx_file(
         ocr_backgrounds=ocr_backgrounds,
         failure_context=failure_context,
         nested_progress=nested_progress,
+        diagnostics=diagnostics,
     )
     native_items += _replace_smartart_data_parts(
         destination,

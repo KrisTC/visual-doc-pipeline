@@ -134,6 +134,7 @@ def replace_xlsx_file(
             document_text_layout=document_text_layout,
             failure_context=failure_context,
             nested_progress=nested_progress,
+            diagnostics=diagnostics,
         )
     if document_text_layout not in {
         "preserve-basic-layout",
@@ -153,6 +154,7 @@ def replace_xlsx_file(
         skip_native_xml_part=_is_custom_xlsx_part,
         failure_context=failure_context,
         nested_progress=nested_progress,
+        diagnostics=diagnostics,
     )
     native_items += _replace_xlsx_cells(
         destination,

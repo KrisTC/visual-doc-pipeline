@@ -141,6 +141,27 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
             with ZipFile(output_root / "document.docx") as archive:
                 self.assertEqual(vector_data, archive.read("word/media/vector.svg"))
 
+    # Verifies FR-2026-09-06-01.
+    def test_standalone_retained_vector_does_not_write_debug_sidecar(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "outlined.svg"
+            source.write_bytes(b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0"/></svg>')
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual([], result.failures)
+            self.assertFalse((output_root / "outlined.svg.diagnostics.json").exists())
+
     # Verifies FR-2026-09-04-01.
     def test_embedded_emf_receives_requested_basic_layout_mode(self) -> None:
         """The office-package route must preserve EMF fitting options."""
@@ -172,11 +193,69 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
 
             output_files = list(output_root.glob("*.pptx"))
             self.assertEqual(1, len(output_files))
+            self.assertFalse((output_root / "document.pptx.diagnostics.json").exists())
             with ZipFile(output_files[0]) as archive:
                 emf_data = archive.read("ppt/media/vector.emf")
             self.assertEqual((0.0, 0.0), _emf_text_scales(emf_data)[0])
             font_heights = _emf_font_heights(emf_data)
             self.assertLess(abs(font_heights[0]), abs(font_heights[1]))
+
+    # Verifies FR-2026-09-06-01.
+    def test_pptx_emf_fallbacks_write_local_record_diagnostics(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "document.pptx"
+            presentation = Presentation()
+            presentation.slides.add_slide(presentation.slide_layouts[6])
+            presentation.save(str(source))
+            with ZipFile(source) as archive:
+                parts = {entry.filename: archive.read(entry) for entry in archive.infolist()}
+            parts["ppt/media/rotated.emf"] = _emf_with_transformed_degenerate_bounds(
+                0.0, 1.0, -1.0, 0.0
+            )
+            parts["ppt/media/sheared.emf"] = _emf_with_transformed_degenerate_bounds(
+                1.0, 0.0, 0.5, 1.0
+            )
+            _add_pptx_emf_relationship(parts)
+            with ZipFile(source, "w", ZIP_DEFLATED) as archive:
+                for name, data in parts.items():
+                    archive.writestr(name, data)
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual([], result.failures)
+            sidecar = json.loads(
+                (output_root / "document.pptx.diagnostics.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(source.resolve().as_posix(), sidecar["source_absolute_path"])
+            fallbacks = {
+                entry["reason_code"]: entry
+                for entry in sidecar["entries"]
+                if entry["kind"] == "layout_fallback"
+            }
+            rotated = fallbacks["emf_fitted_layout_rotated_transform_unavailable"]
+            self.assertEqual(["source_text", "replacement_text"], list(rotated)[:2])
+            self.assertEqual("Old", rotated["source_text"])
+            self.assertEqual("###", rotated["replacement_text"])
+            self.assertEqual(
+                "ppt/media/rotated.emf",
+                rotated["location"]["package_part"],
+            )
+            self.assertEqual(1, rotated["location"]["record_index"])
+            self.assertEqual(
+                "ppt/media/sheared.emf",
+                fallbacks["emf_fitted_layout_sheared_transform_unavailable"]["location"]["package_part"],
+            )
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
@@ -190,6 +269,25 @@ def _unclipped_emf_with_vertical_rule() -> bytes:
         struct.pack("<IIii", 27, 16, 60, -10),
         struct.pack("<IIii", 54, 16, 60, 30),
         _emf_exttextout_record("Old", 0, 0, 40, 20),
+    )
+    header = bytearray(88)
+    struct.pack_into("<II", header, 0, 1, len(header))
+    eof = struct.pack("<IIIII", 14, 20, 0, 0, 0)
+    result = bytearray(header + b"".join(records) + eof)
+    struct.pack_into("<I", result, 48, len(result))
+    struct.pack_into("<I", result, 52, len(records) + 2)
+    return bytes(result)
+
+
+def _emf_with_transformed_degenerate_bounds(
+    m11: float, m12: float, m21: float, m22: float
+) -> bytes:
+    transform = struct.pack("<IIffffff", 35, 32, m11, m12, m21, m22, 0.0, 0.0)
+    records = (
+        _emf_font_record("Noto Sans JP"),
+        struct.pack("<III", 37, 12, 1),
+        transform,
+        _emf_exttextout_record("Old", 0, 0, 0, 0),
     )
     header = bytearray(88)
     struct.pack_into("<II", header, 0, 1, len(header))

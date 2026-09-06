@@ -12,6 +12,7 @@ class VectorReplacementResult:
     has_editable_text: bool
     replaced_image_regions: int = 0
     has_embedded_bitmaps: bool = False
+    diagnostics: tuple[dict[str, object], ...] = ()
 
 def bitmap_file_from_dib(info: bytes, bits: bytes) -> bytes:
     offset = 14 + len(info)
