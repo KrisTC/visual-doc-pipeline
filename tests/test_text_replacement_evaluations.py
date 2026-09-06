@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20,11 +21,20 @@ from pptx.shapes.autoshape import Shape
 from pptx.shapes.base import BaseShape
 from pptx.util import Inches, Pt
 
+from pipeline.bounded_text_layout import (
+    BoundedTextBox,
+    BoundedTextParagraph,
+    BoundedTextRun,
+    EMU_PER_PIXEL,
+    fit_explicit_noto_text_box,
+)
 from scripts.text_replacement_evaluations import (
     ParagraphProperties,
     TextRunProperties,
     _dominant_run,
     _draw_style,
+    _first_line_text_indent_pixels,
+    _fit_layout,
     _line_advance,
     _load_typefaces,
     _layout_lines,
@@ -151,6 +161,123 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
 
         self.assertGreater(len(lines), 1)
         self.assertTrue(all(line.width <= 30.0 for line in lines))
+
+    # Verifies FR-2026-09-06-04.
+    def test_first_line_indent_changes_non_bullet_wrapping_and_matches_the_shared_fitter(self) -> None:
+        typefaces = _load_typefaces()
+        text = "one two three four five six seven eight nine ten"
+        positive_indent = ParagraphProperties(
+            alignment="left",
+            space_before_points=None,
+            space_after_points=None,
+            line_spacing=None,
+            line_spacing_kind=None,
+            level=0,
+            margin_left_emu=20 * EMU_PER_PIXEL,
+            indent_emu=40 * EMU_PER_PIXEL,
+            bullet_kind=None,
+            bullet_marker=None,
+            empty_line_font_size_points=None,
+            runs=(
+                TextRunProperties(
+                    text=text,
+                    font_family=None,
+                    font_classification="sans-serif",
+                    font_size_points=18.0,
+                    bold=None,
+                    italic=None,
+                    underline=None,
+                    baseline=None,
+                ),
+            ),
+        )
+        negative_indent = replace(positive_indent, indent_emu=-30 * EMU_PER_PIXEL)
+
+        positive_lines = _layout_lines((positive_indent,), 180.0, typefaces)
+        negative_lines = _layout_lines((negative_indent,), 180.0, typefaces)
+
+        self.assertEqual(120.0, positive_lines[0].available_width)
+        self.assertEqual(160.0, positive_lines[1].available_width)
+        self.assertEqual(190.0, negative_lines[0].available_width)
+        self.assertEqual(160.0, negative_lines[1].available_width)
+        self.assertEqual("one two ", "".join(segment.text for segment in positive_lines[0].segments))
+        self.assertEqual("one two three ", "".join(segment.text for segment in negative_lines[0].segments))
+
+        bounded = BoundedTextBox(
+            width_emu=180 * EMU_PER_PIXEL,
+            height_emu=90 * EMU_PER_PIXEL,
+            margin_left_emu=0,
+            margin_top_emu=0,
+            margin_right_emu=0,
+            margin_bottom_emu=0,
+            text_direction=None,
+            paragraphs=(
+                BoundedTextParagraph(
+                    alignment="left",
+                    space_before_points=None,
+                    space_after_points=None,
+                    line_spacing=None,
+                    line_spacing_kind=None,
+                    level=0,
+                    margin_left_emu=positive_indent.margin_left_emu,
+                    indent_emu=positive_indent.indent_emu,
+                    bullet_kind=None,
+                    bullet_marker=None,
+                    empty_line_font_size_points=None,
+                    runs=(
+                        BoundedTextRun(
+                            text=text,
+                            font_family=None,
+                            font_classification="sans-serif",
+                            font_size_points=18.0,
+                            bold=None,
+                            italic=None,
+                            underline=None,
+                            baseline=None,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        shared_fit = fit_explicit_noto_text_box(bounded, typefaces)
+        evaluator_fit = _fit_layout((positive_indent,), 180.0, 90.0, typefaces)
+
+        self.assertEqual("fit", shared_fit.fit_status)
+        self.assertEqual("fit", evaluator_fit.fit_status)
+        self.assertEqual(shared_fit.font_scale, evaluator_fit.font_scale)
+
+    # Verifies FR-2026-09-06-04.
+    def test_character_bullet_does_not_reduce_its_text_width_for_its_hanging_indent(self) -> None:
+        paragraph = ParagraphProperties(
+            alignment="left",
+            space_before_points=None,
+            space_after_points=None,
+            line_spacing=None,
+            line_spacing_kind=None,
+            level=0,
+            margin_left_emu=20 * EMU_PER_PIXEL,
+            indent_emu=-40 * EMU_PER_PIXEL,
+            bullet_kind="character",
+            bullet_marker="•",
+            empty_line_font_size_points=None,
+            runs=(
+                TextRunProperties(
+                    text="one two three four five six",
+                    font_family=None,
+                    font_classification="sans-serif",
+                    font_size_points=18.0,
+                    bold=None,
+                    italic=None,
+                    underline=None,
+                    baseline=None,
+                ),
+            ),
+        )
+
+        lines = _layout_lines((paragraph,), 180.0, _load_typefaces())
+
+        self.assertTrue(all(line.available_width == 160.0 for line in lines))
+        self.assertEqual(0.0, _first_line_text_indent_pixels(lines[0]))
 
     # Verifies FR-2026-08-03-13.
     def test_point_line_spacing_does_not_reduce_advance_below_glyph_height(self) -> None:
@@ -333,6 +460,11 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             )
             self.assertTrue(no_autofit["fitting"]["derived_from_source"])
             self.assertFalse(text_to_fit_shape["fitting"]["derived_from_source"])
+            self.assertEqual(0.90, no_autofit["fitting"]["source_content_height_safety_factor"])
+            self.assertTrue(no_autofit["fitting"]["safety_margin_applied"])
+            self.assertGreater(no_autofit["fitting"]["raw_natural_content_height_emu"], 0)
+            self.assertIsNone(text_to_fit_shape["fitting"]["source_content_height_safety_factor"])
+            self.assertFalse(text_to_fit_shape["fitting"]["safety_margin_applied"])
             self.assertEqual(
                 no_autofit["width_emu"],
                 no_autofit["fitting"]["rectangle"]["width_emu"],
@@ -377,6 +509,8 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             self.assertIsNone(source_properties["paragraphs"][0]["bullet_kind"])
             self.assertEqual("character", explicit_properties["paragraphs"][0]["bullet_kind"])
             self.assertIsNotNone(explicit_properties["paragraphs"][0]["bullet_marker"])
+            self.assertEqual(342_900, explicit_properties["paragraphs"][0]["margin_left_emu"])
+            self.assertEqual(-285_750, explicit_properties["paragraphs"][0]["indent_emu"])
 
     # Verifies FR-2026-08-03-13 and FR-2026-09-06-03.
     def test_reports_and_renders_presentation_text_boxes_without_ocr(self) -> None:
@@ -621,6 +755,8 @@ def _write_inherited_bullet_presentation(source_path: Path) -> None:
     bullet = OxmlElement("a:buChar")
     bullet.set("char", "•")
     level_properties.append(bullet)
+    level_properties.set("marL", "342900")
+    level_properties.set("indent", "-285750")
     slide = presentation.slides.add_slide(layout)
     body_placeholder = next(
         shape

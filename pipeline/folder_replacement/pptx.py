@@ -53,6 +53,7 @@ from pipeline.text_replacement import TextReplacementProvider, TextReplacementRe
 
 
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR = 0.90
 _PARAGRAPH_PROPERTY_CHILD_ORDER = (
     "lnSpc",
     "spcBef",
@@ -554,11 +555,12 @@ def _replace_slide_text_frames(
         )
         text_box = trim_trailing_empty_paragraphs(raw_text_box)
         _trim_trailing_empty_text_frame(text_shape.text_frame)
+        explicit_no_autofit = _has_explicit_no_autofit(text_shape.text_frame)
         fit_box = (
             source_occupied_text_box(
                 text_box, typefaces, measure_source_fonts=preserve_source_font_family
             )
-            if _has_explicit_no_autofit(text_shape.text_frame)
+            if explicit_no_autofit
             else text_box
         )
         fitted = replace_and_fit_text_box(
@@ -569,6 +571,9 @@ def _replace_slide_text_frames(
             typefaces,
             preserve_source_font_family=preserve_source_font_family,
             measure_source_fonts=preserve_source_font_family,
+            source_content_height_safety_factor=(
+                _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR if explicit_no_autofit else None
+            ),
         )
         _write_explicit_text_frame(text_shape.text_frame, fitted.text_box)
         replaced += sum(

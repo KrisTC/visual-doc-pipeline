@@ -47,6 +47,7 @@ from pipeline.bounded_text_layout import (
     fit_explicit_noto_text_box,
     source_font_measurement,
     source_occupied_text_box,
+    with_source_content_height_safety_margin,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.provider_cache import source_cache_scope
@@ -60,6 +61,7 @@ from pipeline.text_replacement.provider import TextReplacementProvider
 
 DEFAULT_INPUT_ROOT = Path("sample-data")
 DEFAULT_OUTPUT_ROOT = Path("outputs/evaluations/text-replacement")
+_NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR = 0.90
 FONT_DIRECTORY = PROJECT_ROOT / "tests" / "assets" / "fonts"
 SANS_FONT_PATH = FONT_DIRECTORY / "NotoSansJP[wght].ttf"
 SERIF_FONT_PATH = FONT_DIRECTORY / "NotoSerifJP[wght].ttf"
@@ -154,6 +156,8 @@ class _DrawLine:
     height: float
     paragraph: ParagraphProperties
     is_first_line: bool
+    available_width: float
+    first_line_indent_applied: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +175,9 @@ class _ReplacementFitting:
 
     layout_fit: _LayoutFit
     fitting_box: BoundedTextBox
+    raw_fitting_box: BoundedTextBox
     derived_from_source: bool
+    safety_margin_applied: bool
 
     @property
     def canvas_height_emu(self) -> int:
@@ -908,6 +914,7 @@ def _render_text_boxes(
                     text_box_evaluation.effective_properties,
                     replacement_properties,
                     replacement_typefaces,
+                    replacement_selections,
                 )
             else:
                 replacement_properties = replacement_text_box
@@ -957,6 +964,18 @@ def _render_text_boxes(
             }
             replacement_explicit_properties["fitting"] = {
                 "derived_from_source": replacement_fitting.derived_from_source,
+                "raw_natural_content_height_emu": max(
+                    0,
+                    replacement_fitting.raw_fitting_box.height_emu
+                    - replacement_fitting.raw_fitting_box.margin_top_emu
+                    - replacement_fitting.raw_fitting_box.margin_bottom_emu,
+                ),
+                "source_content_height_safety_factor": (
+                    _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR
+                    if replacement_fitting.derived_from_source
+                    else None
+                ),
+                "safety_margin_applied": replacement_fitting.safety_margin_applied,
                 "rectangle": _fitting_rectangle(replacement_fitting.fitting_box),
             }
             if source_font:
@@ -1001,15 +1020,28 @@ def _replacement_fitting(
         width_emu=fitting_box.width_emu,
         height_emu=fitting_box.height_emu,
     )
-    fitted = fit_explicit_noto_text_box(replacement_bounded, typefaces)
+    fitted = fit_explicit_noto_text_box(
+        replacement_bounded,
+        typefaces,
+        source_content_height_safety_factor=(
+            _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR if derived_from_source else None
+        ),
+    )
+    effective_fitting_box = replace(fitting_box, height_emu=fitted.text_box.height_emu)
     full_width, _ = _content_dimensions(replacement_text_box)
     lines = _layout_lines(
-        replacement_text_box.paragraphs, full_width, typefaces, fitted.font_scale
+        replacement_text_box.paragraphs,
+        full_width,
+        typefaces,
+        fitted.font_scale,
+        apply_first_line_indent=_uses_first_line_indent(replacement_text_box),
     )
     return _ReplacementFitting(
         _LayoutFit(lines, fitted.font_scale, fitted.fit_status),
+        effective_fitting_box,
         fitting_box,
         derived_from_source,
+        derived_from_source and effective_fitting_box.height_emu < fitting_box.height_emu,
         source_text_box.height_emu,
     )
 
@@ -1018,6 +1050,7 @@ def _source_replacement_fitting(
     source_text_box: TextBoxProperties,
     replacement_text_box: TextBoxProperties,
     typefaces: dict[str, skia.Typeface],
+    source_selections: tuple[SourceFontSelection, ...],
 ) -> _ReplacementFitting:
     """Fit the source-font preview using its already-selected measurement faces."""
     source_bounded = _bounded_text_box(source_text_box)
@@ -1032,6 +1065,13 @@ def _source_replacement_fitting(
         width_emu=fitting_box.width_emu,
         height_emu=fitting_box.height_emu,
     )
+    safety_margin_applied = derived_from_source and any(
+        selection.source == "noto-fallback" for selection in source_selections
+    )
+    if safety_margin_applied:
+        replacement_bounded = with_source_content_height_safety_margin(
+            replacement_bounded, _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR
+        )
     fitted = fit_explicit_noto_text_box(
         replacement_bounded,
         typefaces,
@@ -1041,13 +1081,19 @@ def _source_replacement_fitting(
     return _ReplacementFitting(
         _LayoutFit(
             _layout_lines(
-                replacement_text_box.paragraphs, full_width, typefaces, fitted.font_scale
+                replacement_text_box.paragraphs,
+                full_width,
+                typefaces,
+                fitted.font_scale,
+                apply_first_line_indent=_uses_first_line_indent(replacement_text_box),
             ),
             fitted.font_scale,
             fitted.fit_status,
         ),
+        replacement_bounded,
         fitting_box,
         derived_from_source,
+        safety_margin_applied,
         source_text_box.height_emu,
     )
 
@@ -1090,8 +1136,16 @@ def _source_preview_fitting(
     if not text_box.explicit_no_autofit:
         width, height = _content_dimensions(text_box)
         return _ReplacementFitting(
-            _fit_layout(text_box.paragraphs, width, height, typefaces),
+            _fit_layout(
+                text_box.paragraphs,
+                width,
+                height,
+                typefaces,
+                apply_first_line_indent=_uses_first_line_indent(text_box),
+            ),
             source_bounded,
+            source_bounded,
+            False,
             False,
             text_box.height_emu,
         )
@@ -1099,14 +1153,31 @@ def _source_preview_fitting(
     full_width, _ = _content_dimensions(text_box)
     return _ReplacementFitting(
         _LayoutFit(
-            _layout_lines(text_box.paragraphs, full_width, typefaces),
+            _layout_lines(
+                text_box.paragraphs,
+                full_width,
+                typefaces,
+                apply_first_line_indent=_uses_first_line_indent(text_box),
+            ),
             1.0,
             "source-no-autofit",
         ),
         fitting_box,
+        fitting_box,
         True,
+        False,
         text_box.height_emu,
     )
+
+
+def _uses_first_line_indent(text_box: TextBoxProperties) -> bool:
+    return text_box.text_direction not in {
+        "vert",
+        "vert270",
+        "eaVert",
+        "wordArtVert",
+        "wordArtVertRtl",
+    }
 
 
 def _bounded_text_box(text_box: TextBoxProperties) -> BoundedTextBox:
@@ -1261,6 +1332,7 @@ def _render_text_box(
             max(0.0, content_right - content_left),
             max(0.0, content_bottom - content_top),
             typefaces,
+            apply_first_line_indent=_uses_first_line_indent(text_box),
         )
     canvas.save()
     canvas.clipRect(skia.Rect.MakeLTRB(content_left, content_top, content_right, content_bottom))
@@ -1345,16 +1417,26 @@ def _fit_layout(
     width: float,
     height: float,
     typefaces: dict[str, skia.Typeface],
+    *,
+    apply_first_line_indent: bool = True,
 ) -> _LayoutFit:
     """Find the largest uniform scale that fits while testing down to one pixel."""
-    full_size_lines = _layout_lines(paragraphs, width, typefaces)
-    if _layout_fits(full_size_lines, width, height):
+    full_size_lines = _layout_lines(
+        paragraphs, width, typefaces, apply_first_line_indent=apply_first_line_indent
+    )
+    if _layout_fits(full_size_lines, height):
         return _LayoutFit(full_size_lines, 1.0, "fit")
 
     maximum_font_size = _maximum_font_size_pixels(paragraphs)
     minimum_scale = 1.0 / maximum_font_size
-    minimum_lines = _layout_lines(paragraphs, width, typefaces, minimum_scale)
-    if not _layout_fits(minimum_lines, width, height):
+    minimum_lines = _layout_lines(
+        paragraphs,
+        width,
+        typefaces,
+        minimum_scale,
+        apply_first_line_indent=apply_first_line_indent,
+    )
+    if not _layout_fits(minimum_lines, height):
         return _LayoutFit(minimum_lines, minimum_scale, "overflow")
 
     fitting_scale = minimum_scale
@@ -1362,8 +1444,14 @@ def _fit_layout(
     non_fitting_scale = 1.0
     for _ in range(16):
         candidate_scale = (fitting_scale + non_fitting_scale) / 2.0
-        candidate_lines = _layout_lines(paragraphs, width, typefaces, candidate_scale)
-        if _layout_fits(candidate_lines, width, height):
+        candidate_lines = _layout_lines(
+            paragraphs,
+            width,
+            typefaces,
+            candidate_scale,
+            apply_first_line_indent=apply_first_line_indent,
+        )
+        if _layout_fits(candidate_lines, height):
             fitting_scale = candidate_scale
             fitting_lines = candidate_lines
         else:
@@ -1386,13 +1474,10 @@ def _maximum_font_size_pixels(paragraphs: tuple[ParagraphProperties, ...]) -> fl
     return max(sizes, default=DEFAULT_FONT_SIZE_POINTS * PIXELS_PER_POINT)
 
 
-def _layout_fits(lines: tuple[_DrawLine, ...], width: float, height: float) -> bool:
+def _layout_fits(lines: tuple[_DrawLine, ...], height: float) -> bool:
     if _layout_height(lines) > height:
         return False
-    return all(
-        line.width <= max(0.0, width - _paragraph_margin_pixels(line.paragraph))
-        for line in lines
-    )
+    return all(line.width <= line.available_width for line in lines)
 
 
 def _layout_lines(
@@ -1400,29 +1485,45 @@ def _layout_lines(
     width: float,
     typefaces: dict[str, skia.Typeface],
     font_scale: float = 1.0,
+    *,
+    apply_first_line_indent: bool = True,
 ) -> tuple[_DrawLine, ...]:
     lines: list[_DrawLine] = []
     for paragraph in paragraphs:
         current_segments: list[_DrawSegment] = []
         current_width = 0.0
-        paragraph_width = max(0.0, width - _paragraph_margin_pixels(paragraph))
         is_first_line = True
+        paragraph_width = _line_available_width(
+            paragraph, width, is_first_line, apply_first_line_indent
+        )
         for run in paragraph.runs:
             style = _draw_style(run, font_scale)
             for token in _layout_tokens(run.text):
                 if token in {"\n", "\v"}:
                     lines.append(
                         _draw_line_info(
-                            current_segments, current_width, paragraph, is_first_line, font_scale
+                            current_segments,
+                            current_width,
+                            paragraph,
+                            is_first_line,
+                            font_scale,
+                            paragraph_width,
+                            apply_first_line_indent,
                         )
                     )
                     current_segments = []
                     current_width = 0.0
                     is_first_line = False
+                    paragraph_width = _line_available_width(
+                        paragraph, width, is_first_line, apply_first_line_indent
+                    )
                     continue
-                for layout_token in _emergency_wrap_tokens(
-                    token, style, paragraph_width, typefaces
-                ):
+                layout_tokens = list(
+                    _emergency_wrap_tokens(token, style, paragraph_width, typefaces)
+                )
+                token_index = 0
+                while token_index < len(layout_tokens):
+                    layout_token = layout_tokens[token_index]
                     token_width = _measure(layout_token, style, typefaces)
                     if (
                         current_segments
@@ -1431,16 +1532,39 @@ def _layout_lines(
                     ):
                         lines.append(
                             _draw_line_info(
-                                current_segments, current_width, paragraph, is_first_line, font_scale
+                                current_segments,
+                                current_width,
+                                paragraph,
+                                is_first_line,
+                                font_scale,
+                                paragraph_width,
+                                apply_first_line_indent,
                             )
                         )
                         current_segments = []
                         current_width = 0.0
                         is_first_line = False
+                        paragraph_width = _line_available_width(
+                            paragraph, width, is_first_line, apply_first_line_indent
+                        )
+                        if token_width > paragraph_width:
+                            layout_tokens[token_index : token_index + 1] = _emergency_wrap_tokens(
+                                layout_token, style, paragraph_width, typefaces
+                            )
+                            continue
                     current_segments.append(_DrawSegment(layout_token, style))
                     current_width += token_width
+                    token_index += 1
         lines.append(
-            _draw_line_info(current_segments, current_width, paragraph, is_first_line, font_scale)
+            _draw_line_info(
+                current_segments,
+                current_width,
+                paragraph,
+                is_first_line,
+                font_scale,
+                paragraph_width,
+                apply_first_line_indent,
+            )
         )
     return tuple(lines)
 
@@ -1489,12 +1613,22 @@ def _draw_line_info(
     paragraph: ParagraphProperties,
     is_first_line: bool,
     font_scale: float,
+    available_width: float,
+    apply_first_line_indent: bool,
 ) -> _DrawLine:
     default_height = (
         paragraph.empty_line_font_size_points or DEFAULT_FONT_SIZE_POINTS
     ) * PIXELS_PER_POINT * 1.2 * font_scale
     height = max((segment.style.size_pixels * 1.2 for segment in segments), default=default_height)
-    return _DrawLine(tuple(segments), width, height, paragraph, is_first_line)
+    return _DrawLine(
+        tuple(segments),
+        width,
+        height,
+        paragraph,
+        is_first_line,
+        available_width,
+        apply_first_line_indent,
+    )
 
 
 def _measure(text: str, style: _DrawStyle, typefaces: dict[str, skia.Typeface]) -> float:
@@ -1538,6 +1672,30 @@ def _paragraph_margin_pixels(paragraph: ParagraphProperties) -> float:
     return (paragraph.margin_left_emu or 0) / EMU_PER_PIXEL
 
 
+def _line_available_width(
+    paragraph: ParagraphProperties,
+    width: float,
+    is_first_line: bool,
+    apply_first_line_indent: bool = True,
+) -> float:
+    first_line_indent = (
+        (paragraph.indent_emu or 0) / EMU_PER_PIXEL
+        if apply_first_line_indent and is_first_line and paragraph.bullet_kind != "character"
+        else 0.0
+    )
+    return max(0.0, width - _paragraph_margin_pixels(paragraph) - first_line_indent)
+
+
+def _first_line_text_indent_pixels(line: _DrawLine) -> float:
+    if (
+        not line.first_line_indent_applied
+        or not line.is_first_line
+        or line.paragraph.bullet_kind == "character"
+    ):
+        return 0.0
+    return (line.paragraph.indent_emu or 0) / EMU_PER_PIXEL
+
+
 def _vertical_start(alignment: str | None, top: float, bottom: float, total_height: float) -> float:
     if alignment == "middle":
         return top + max(0.0, (bottom - top - total_height) / 2.0)
@@ -1555,7 +1713,8 @@ def _draw_line(
     typefaces: dict[str, skia.Typeface],
 ) -> None:
     paragraph_left = content_left + _paragraph_margin_pixels(line.paragraph)
-    x = _horizontal_start(line.paragraph.alignment, paragraph_left, content_right, line.width)
+    text_left = paragraph_left + _first_line_text_indent_pixels(line)
+    x = _horizontal_start(line.paragraph.alignment, text_left, content_right, line.width)
     paint = skia.Paint(Color=skia.ColorBLACK, AntiAlias=True)
     if line.is_first_line and line.segments and line.paragraph.bullet_kind == "character":
         bullet_style = line.segments[0].style if line.segments else _DrawStyle(

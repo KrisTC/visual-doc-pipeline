@@ -650,3 +650,149 @@ ordinary, placeholder, and grouped text frames; they shall not use confidential
 presentations or derived artifacts.
 
 ---
+
+## FR-2026-09-06-04
+
+| Property | Value |
+|----------|-------|
+| Title | Apply first-line indentation to PowerPoint fitted-text layout |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PPTX layout review |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-27-02 |
+
+### Description
+
+For PowerPoint text frames, the shared bounded-text layout core shall
+distinguish a paragraph's first-line text width from its continuation-line text
+width when the PPTX adapter supplies a resolved left margin and first-line
+indent.
+
+For a horizontal, non-bulleted paragraph, the first-line text origin shall be
+the padded text-frame origin plus the resolved left margin and first-line
+indent. Continuation lines shall begin at the resolved left margin. The core
+shall use those respective origins to calculate each line's available width
+when wrapping, character-wrapping an otherwise unbreakable token, checking
+horizontal fit, and selecting the uniform fitted font scale. A negative indent
+may make the first line wider than continuation lines; a positive indent may
+make it narrower. A line following an explicit line-break character is a
+continuation line for this purpose.
+
+For a paragraph with an explicit character bullet, the text origin for every
+line shall remain the resolved left margin. Its bullet marker shall be placed
+at the first-line position, calculated from the left margin plus the resolved
+indent. The marker shall not be considered replacement text or consume an
+additional inferred text width. This preserves PowerPoint's separate bullet
+and text positions for hanging bullet paragraphs.
+
+The PPTX adapter shall resolve the margin and indent through its master, layout,
+text-frame, paragraph, and list-level precedence chain before source
+measurement and replacement fitting. Both fitted document-text-layout modes
+shall apply the same first-line and continuation-line widths to source
+measurement and replacement fitting.
+
+The native PowerPoint text-layout evaluator shall use the same widths and
+origins for source and replacement rendering. Its explicit-properties
+artifacts shall continue to report the resolved margin and indent values.
+Paragraphs with no resolved margin or indent shall retain their existing
+layout result. This requirement does not change line spacing, paragraph
+spacing, bullet selection, tab layout, automatic-number bullets, picture
+bullets, or vertical-writing layout.
+
+### Rationale
+
+Paragraph indentation changes the width available to text and can therefore
+change wrapping, natural height, and the selected fitted font size. Treating
+every line as though it began at the left margin can slightly overestimate or
+underestimate the available width, particularly for translated text close to a
+wrapping threshold.
+
+### Verification
+
+Automated tests shall use synthetic PPTX documents and repository-owned fonts
+only. They shall verify a non-bulleted paragraph with a positive indent whose
+first line wraps at a narrower width than its continuation lines, and a
+negative indent whose first line has the corresponding wider width. They shall
+verify that an explicit character-bullet paragraph keeps text at its left
+margin while placing the marker at its first-line position without reducing the
+measured text width a second time. Tests shall verify inherited list-level
+indentation, identical fitted scales in production output and evaluator
+preview, and unchanged wrapping and scale for paragraphs with no indent.
+
+---
+
+## FR-2026-09-06-05
+
+| Property | Value |
+|----------|-------|
+| Title | Reserve a no-autofit source-height fitting margin |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following PPTX layout review |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-04-01, FR-2026-08-04-04, FR-2026-08-04-05, FR-2026-09-06-04 |
+
+### Description
+
+For an explicit `noAutofit` PowerPoint slide-shape text frame processed in
+either fitted document-text-layout mode, the replacement fitting height shall
+reserve a ten-percent source-layout safety margin only when the selected
+replacement output uses a committed Noto face.
+
+The adapter shall first measure the source text's natural content height using
+the existing resolved source typography, padded width, paragraph settings, and
+list settings. It shall multiply that content height by `0.90`, round to the
+nearest EMU, and then add the unchanged top and bottom text-frame margins. The
+result is the replacement fitting height. It shall not reduce the text-frame
+margins, source shape geometry, or source fitting width, and it shall not clamp
+the resulting fitting height to the source shape height. An empty source layout
+shall retain the existing margin-only height.
+
+In `preserve-basic-layout`, the selected output is Noto and the margin shall
+therefore apply. In `preserve-basic-layout-source-font`, the adapter shall
+apply the margin when any replacement run falls back to a committed Noto face;
+it shall retain the unreduced natural source height when every replacement run
+uses a selected embedded or installed source face. The selection shall use the
+existing source-font output selection rules; this requirement shall not change
+which face is selected.
+
+The margin applies only to the derived replacement fitting height for explicit
+`noAutofit` slide-shape text frames. It does not change source rendering,
+`text-to-fit-shape`, `shape-to-fit-text`, inherited or unspecified autofit,
+PowerPoint table cells, or any non-PPTX adapter. Existing one-point minimum and
+visible-overflow behaviour remain unchanged.
+
+The native PowerPoint text-layout evaluator shall render the source at its
+unreduced natural height, but shall fit each replacement against the reduced
+height. Its replacement preview guide and explicit-properties artifact shall
+record the raw natural content height, the `0.90` safety factor, and the
+effective fitting rectangle.
+
+This requirement supersedes only the replacement-fitting-height rule in
+FR-2026-08-04-05. Its source-width preservation, unclamped geometry, and
+source-preview behaviour remain in force except where this requirement
+expressly differs.
+
+### Rationale
+
+The measured source height is an approximation of PowerPoint's rendered
+layout. Reserving a small, deterministic portion of the source content height
+gives translated text a little additional reduction when it is close to a
+wrapping threshold, reducing the likelihood that it expands into nearby slide
+content while preserving the source frame's intended width and margins.
+
+### Verification
+
+Automated tests shall use synthetic PPTX files only. They shall verify that an
+explicit `noAutofit` text frame whose selected output is Noto has a replacement
+fitting height equal to its source top and bottom margins plus 90 percent of
+its measured natural content height, and that its selected scale is smaller
+than the same fixture without the safety margin. They shall verify that a
+source-font-mode replacement whose every run selects an embedded or installed
+source face retains the unreduced natural height, while a replacement that
+falls back to Noto receives the safety margin. They shall verify unchanged
+source shape geometry, width, margins, and source preview height; matching
+production and evaluator fitting rectangles and scales; recorded raw height,
+factor, and effective rectangle; and unchanged fitting for every excluded
+autofit and table case.

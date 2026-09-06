@@ -116,6 +116,40 @@ class SourceFontMeasurementTests(unittest.TestCase):
         self.assertEqual(FONT_FAMILY, output_run.font_family)
         self.assertEqual((SourceTypefaceReference("latin", FONT_FAMILY),), output_run.source_typefaces)
 
+    # Verifies FR-2026-09-06-05.
+    def test_applies_the_height_safety_margin_only_when_the_output_uses_noto(self) -> None:
+        assert self.typeface is not None
+        noto_fitted = fit_explicit_noto_text_box(
+            self._box(), source_content_height_safety_factor=0.90
+        )
+        source_fitted = fit_explicit_noto_text_box(
+            self._box(),
+            embedded_faces=(
+                EmbeddedTypefaceCandidate(FONT_FAMILY, self.typeface.fontStyle(), self.typeface),
+            ),
+            font_manager=_FontManager(None),
+            preserve_source_font_family=True,
+            measure_source_fonts=True,
+            source_content_height_safety_factor=0.90,
+        )
+        fallback_fitted = fit_explicit_noto_text_box(
+            self._box(),
+            font_manager=_FontManager(None),
+            preserve_source_font_family=True,
+            measure_source_fonts=True,
+            source_content_height_safety_factor=0.90,
+        )
+        dense_box = replace(self._box("Replacement " * 20), height_emu=400_000)
+        dense_without_margin = fit_explicit_noto_text_box(dense_box)
+        dense_with_margin = fit_explicit_noto_text_box(
+            dense_box, source_content_height_safety_factor=0.90
+        )
+
+        self.assertEqual(450_000, noto_fitted.text_box.height_emu)
+        self.assertEqual(500_000, source_fitted.text_box.height_emu)
+        self.assertEqual(450_000, fallback_fitted.text_box.height_emu)
+        self.assertLess(dense_with_margin.font_scale, dense_without_margin.font_scale)
+
     # Verifies FR-2026-08-22-04 and FR-2026-08-22-10.
     def test_selects_each_resolved_script_slot_and_reports_the_original_alias(self) -> None:
         assert self.typeface is not None
