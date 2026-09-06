@@ -116,7 +116,8 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
 
             self.assertEqual({"ppt/media/image1.png": (16, 32, 48)}, _pptx_ocr_backgrounds(presentation))
 
-    # Verifies FR-2026-08-03-14, FR-2026-08-03-15, and FR-2026-08-03-16.
+    # Verifies FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-03-16,
+    # and FR-2026-09-06-03.
     def test_pptx_basic_layout_replaces_and_explicitly_fits_text_frames(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -128,6 +129,7 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             slide = presentation.slides.add_slide(presentation.slide_layouts[1])
             slide.shapes.title.text = "Placeholder text"
             text_box = slide.shapes.add_textbox(Inches(1), Inches(2), Inches(2), Inches(0.5))
+            text_box.name = "trailing-empty-text"
             text_frame = text_box.text_frame
             text_frame.paragraphs[0].text = "Short text"
             text_frame.paragraphs[0].runs[0].font.size = Pt(36)
@@ -171,12 +173,12 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             self.assertEqual(6, result.replaced_native_text_items)
             output = output_root / "deck.pptx"
             output_presentation = Presentation(str(output))
-            preserved_blank_paragraph_shape = next(
+            normalized_text_shape = next(
                 shape
                 for shape in output_presentation.slides[0].shapes
-                if shape.has_text_frame and len(shape.text_frame.paragraphs) == 2
+                if shape.name == "trailing-empty-text"
             )
-            self.assertEqual("", preserved_blank_paragraph_shape.text_frame.paragraphs[1].text)
+            self.assertEqual(1, len(normalized_text_shape.text_frame.paragraphs))
             output_table = next(
                 shape.table for shape in output_presentation.slides[0].shapes if shape.has_table
             )
@@ -210,6 +212,68 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             self.assertIn(b'sz="100"', slide_xml)
             self._assert_valid_drawingml_font_sizes(slide_xml)
             self._assert_drawingml_paragraph_property_order(slide_xml)
+
+    # Verifies FR-2026-09-06-03.
+    def test_pptx_normalizes_only_trailing_empty_paragraphs(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "deck.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+            with_trailing = slide.shapes.add_textbox(
+                Inches(1), Inches(1), Inches(3), Inches(0.3)
+            )
+            with_trailing.name = "with-trailing"
+            with_trailing.text = "Source text " * 12
+            with_trailing.text_frame.paragraphs[0].runs[0].font.size = Pt(24)
+            with_trailing.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+            with_trailing.text_frame.add_paragraph()
+            without_trailing = slide.shapes.add_textbox(
+                Inches(1), Inches(2), Inches(3), Inches(0.3)
+            )
+            without_trailing.name = "without-trailing"
+            without_trailing.text = "Source text " * 12
+            without_trailing.text_frame.paragraphs[0].runs[0].font.size = Pt(24)
+            without_trailing.text_frame.auto_size = MSO_AUTO_SIZE.NONE
+
+            positioned_blanks = slide.shapes.add_textbox(
+                Inches(1), Inches(3), Inches(3), Inches(1)
+            )
+            positioned_blanks.name = "positioned-blanks"
+            positioned_blanks.text_frame.paragraphs[0].text = ""
+            positioned_blanks.text_frame.add_paragraph().text = "First visible"
+            positioned_blanks.text_frame.add_paragraph()
+            positioned_blanks.text_frame.add_paragraph().text = "Second visible"
+            positioned_blanks.text_frame.add_paragraph()
+
+            presentation.save(str(source))
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="Replacement text " * 10),
+                document_text_layout="preserve-basic-layout",
+            )
+
+            output_shapes = {
+                shape.name: shape for shape in Presentation(str(output_root / "deck.pptx")).slides[0].shapes
+            }
+            trailing_shape = output_shapes["with-trailing"]
+            no_trailing_shape = output_shapes["without-trailing"]
+            self.assertEqual(1, len(trailing_shape.text_frame.paragraphs))
+            self.assertEqual(1, len(no_trailing_shape.text_frame.paragraphs))
+            self.assertEqual(
+                trailing_shape.text_frame.paragraphs[0].runs[0].font.size.pt,
+                no_trailing_shape.text_frame.paragraphs[0].runs[0].font.size.pt,
+            )
+            positioned = output_shapes["positioned-blanks"].text_frame.paragraphs
+            self.assertEqual(4, len(positioned))
+            self.assertEqual("", positioned[0].text)
+            self.assertEqual("", positioned[2].text)
 
     # Verifies FR-2026-09-06-02.
     def test_pptx_table_uses_a_common_scale_and_writes_safe_fit_diagnostics(self) -> None:

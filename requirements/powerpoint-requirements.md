@@ -593,3 +593,60 @@ provider responses, font-family names, credentials, cache keys, and raw
 exception details. Tests and fixtures shall use synthetic data only.
 
 ---
+
+## FR-2026-09-06-03
+
+| Property | Value |
+|----------|-------|
+| Title | Normalize trailing empty paragraphs in PowerPoint text frames |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User clarification following local output diagnosis |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-03-13, FR-2026-08-04-05 |
+
+### Description
+
+For a PPTX slide-shape text frame processed in either fitted
+document-text-layout mode, the PPTX adapter shall remove the maximal trailing
+sequence of empty paragraphs from the source text frame before replacement,
+fitting, and output serialization. An empty paragraph is a paragraph with no
+non-whitespace run text. This applies to source-derived fitting measurements,
+including an explicit `noAutofit` natural-height measurement.
+
+The adapter shall retain all non-trailing empty paragraphs. In particular,
+leading empty paragraphs and empty paragraphs between paragraphs containing
+non-whitespace text shall remain in the source, output, and fitting layout.
+This requirement applies to placeholders and text frames in group shapes as
+defined by FR-2026-08-03-15. PowerPoint table cells remain governed by
+FR-2026-09-06-02.
+
+The native PowerPoint text-layout evaluator shall apply the same normalization
+before source and replacement rendering, fitting, and property reporting.
+
+This requirement is a PPTX-specific exception to the shared core's ordinary
+empty-paragraph retention behaviour. It does not change handling of trailing
+line-break characters inside a nonempty paragraph, or measurement and
+serialization rules for DOCX, XLSX, PDF, and vector adapters.
+
+### Rationale
+
+Trailing empty paragraphs are editing artefacts rather than visible text
+content. Normalizing them away makes the PPTX input, fitted result, and
+PowerPoint-visible layout agree. Empty paragraphs within or before visible
+content can express deliberate spacing and therefore remain part of the layout.
+
+### Notes
+
+Automated tests shall use synthetic PPTX files only. They shall verify that a
+text frame with trailing empty paragraphs receives the same fitted font scale
+as an otherwise identical frame without them, and that the written output and
+evaluator artifacts contain no trailing empty paragraphs. They shall verify the
+same result for an explicit `noAutofit` text frame's derived fitting height and
+evaluator preview. They shall also verify that an empty paragraph between
+visible paragraphs, and one before visible content, continues to contribute its
+line advance and can change the selected fitted scale. Tests shall cover
+ordinary, placeholder, and grouped text frames; they shall not use confidential
+presentations or derived artifacts.
+
+---

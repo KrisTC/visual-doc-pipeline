@@ -38,6 +38,7 @@ from pipeline.bounded_text_layout import (
     noto_typefaces,
     replace_and_fit_text_box,
     source_occupied_text_box,
+    trim_trailing_empty_paragraphs,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.ocr import OcrProvider
@@ -548,7 +549,11 @@ def _replace_slide_text_frames(
         text_shape = cast(_TextShape, shape)
         if not _has_text(text_shape):
             continue
-        text_box = _text_box(text_shape, slide_layout, theme if preserve_source_font_family else None)
+        raw_text_box = _text_box(
+            text_shape, slide_layout, theme if preserve_source_font_family else None
+        )
+        text_box = trim_trailing_empty_paragraphs(raw_text_box)
+        _trim_trailing_empty_text_frame(text_shape.text_frame)
         fit_box = (
             source_occupied_text_box(
                 text_box, typefaces, measure_source_fonts=preserve_source_font_family
@@ -1209,6 +1214,16 @@ def _has_text(shape: "_TextShape") -> bool:
         for paragraph in shape.text_frame.paragraphs
         for run in paragraph.runs
     )
+
+
+def _trim_trailing_empty_text_frame(text_frame: TextFrame) -> None:
+    """Apply PPTX trailing-paragraph normalization to the source XML."""
+    paragraphs = list(text_frame.paragraphs)
+    while len(paragraphs) > 1 and not any(
+        run.text.strip() for run in paragraphs[-1].runs
+    ):
+        paragraph = paragraphs.pop()
+        text_frame._element.remove(paragraph._p)
 
 
 def _has_explicit_no_autofit(text_frame: TextFrame) -> bool:

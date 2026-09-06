@@ -399,6 +399,14 @@ def replace_paragraphs(
     )
 
 
+def trim_trailing_empty_paragraphs(text_box: BoundedTextBox) -> BoundedTextBox:
+    """Remove only the terminal paragraphs that contain no visible text."""
+    end = len(text_box.paragraphs)
+    while end and not any(run.text.strip() for run in text_box.paragraphs[end - 1].runs):
+        end -= 1
+    return replace(text_box, paragraphs=text_box.paragraphs[:end])
+
+
 def fit_explicit_noto_text_box(
     text_box: BoundedTextBox,
     typefaces: dict[str, skia.Typeface] | None = None,

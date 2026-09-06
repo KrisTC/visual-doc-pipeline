@@ -364,18 +364,32 @@ def _slide_text_boxes(
         text_shape = cast(Shape, shape)
         if not _has_non_whitespace_run_text(text_shape.text_frame):
             continue
-        source_properties = _text_box_properties(
+        raw_source_properties = _text_box_properties(
             text_shape, f"slide {slide_number}, shape {'/'.join(map(str, path))}"
+        )
+        source_properties = _trim_trailing_empty_text_box_paragraphs(raw_source_properties)
+        effective_properties = _trim_trailing_empty_text_box_paragraphs(
+            _effective_text_box_properties(text_shape, raw_source_properties, slide_layout, theme)
         )
         yield _TextBoxEvaluation(
             source_properties,
-            _effective_text_box_properties(text_shape, source_properties, slide_layout, theme),
+            effective_properties,
         )
 
 
 def _has_non_whitespace_run_text(text_frame: TextFrame) -> bool:
     """Exclude empty PowerPoint placeholders but preserve blank content within a box."""
     return any(run.text.strip() for paragraph in text_frame.paragraphs for run in paragraph.runs)
+
+
+def _trim_trailing_empty_text_box_paragraphs(
+    text_box: TextBoxProperties,
+) -> TextBoxProperties:
+    """Apply PPTX trailing-paragraph normalization to evaluator properties."""
+    end = len(text_box.paragraphs)
+    while end and not any(run.text.strip() for run in text_box.paragraphs[end - 1].runs):
+        end -= 1
+    return replace(text_box, paragraphs=text_box.paragraphs[:end])
 
 
 def _text_box_properties(shape: Shape, source: str) -> TextBoxProperties:

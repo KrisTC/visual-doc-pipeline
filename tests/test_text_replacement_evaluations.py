@@ -378,7 +378,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             self.assertEqual("character", explicit_properties["paragraphs"][0]["bullet_kind"])
             self.assertIsNotNone(explicit_properties["paragraphs"][0]["bullet_marker"])
 
-    # Verifies FR-2026-08-03-13.
+    # Verifies FR-2026-08-03-13 and FR-2026-09-06-03.
     def test_reports_and_renders_presentation_text_boxes_without_ocr(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -446,9 +446,7 @@ class NativeTextLayoutEvaluationTests(unittest.TestCase):
             self.assertEqual("character", properties["paragraphs"][0]["bullet_kind"])
             self.assertEqual("•", properties["paragraphs"][0]["bullet_marker"])
             self.assertEqual("true", properties["paragraphs"][0]["runs"][0]["underline"])
-            self.assertEqual(
-                24.0, properties["paragraphs"][-1]["empty_line_font_size_points"]
-            )
+            self.assertEqual(1, len(properties["paragraphs"]))
             self.assertEqual("fit", properties["rendering"]["fit_status"])
             self.assertEqual(1.0, properties["rendering"]["font_scale"])
             explicit_properties = json.loads(first_explicit_properties.read_text(encoding="utf-8"))
