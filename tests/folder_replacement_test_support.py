@@ -169,6 +169,18 @@ class _RecordingReplacementProvider:
         return TextReplacementResult(self.replacement_text or "#" * len(request.text), 1.0)
 
 
+class _MappedReplacementProvider:
+    def __init__(self, replacements: dict[str, str]) -> None:
+        self.replacements = replacements
+        self.requests: list[TextReplacementRequest] = []
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        self.requests.append(request)
+        if request.is_filename:
+            return TextReplacementResult(request.text, 1.0)
+        return TextReplacementResult(self.replacements.get(request.text, request.text), 1.0)
+
+
 def _synthetic_pdf_visual_region(text: str, font_resource_name: str) -> _PdfVisualRegion:
     """Construct a minimal fitted PDF region without a document-specific fixture."""
     identity = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -287,7 +299,7 @@ class FolderReplacementTestCase(unittest.TestCase):
             )
 
     @staticmethod
-    def _add_reachable_smartart_data_part(path: Path) -> None:
+    def _add_reachable_smartart_data_part(path: Path, data_xml: bytes | None = None) -> None:
         """Add synthetic canonical SmartArt labels linked from the first slide."""
         content_types_namespace = "http://schemas.openxmlformats.org/package/2006/content-types"
         relationships_namespace = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -324,7 +336,7 @@ class FolderReplacementTestCase(unittest.TestCase):
         payloads["[Content_Types].xml"] = ElementTree.tostring(
             content_types, encoding="utf-8", xml_declaration=True
         )
-        payloads["ppt/diagrams/data1.xml"] = b"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+        payloads["ppt/diagrams/data1.xml"] = data_xml or b"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
 <dgm:dataModel xmlns:dgm=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">
   <dgm:ptLst>
     <dgm:pt modelId=\"node-1\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>SmartArt first</a:t></a:r></a:p></dgm:t></dgm:pt>
@@ -511,6 +523,7 @@ class FolderReplacementTestCase(unittest.TestCase):
         show_progress: bool = False,
         progress_factory: ProgressFactory | None = None,
         document_text_layout: str = "preserve-source-formatting",
+        target_language: str = "en",
         xlsx_translation_mode: str = "full",
         include_patterns: tuple[str, ...] = (),
         diagnostics_enabled: bool = False,
@@ -524,7 +537,7 @@ class FolderReplacementTestCase(unittest.TestCase):
             ocr_provider=ocr_provider,
             text_replacement_provider=replacement_provider,
             source_language="en",
-            target_language="en",
+            target_language=target_language,
             typeface=typeface,
             document_text_layout=document_text_layout,
             xlsx_translation_mode=xlsx_translation_mode,

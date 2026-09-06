@@ -82,6 +82,7 @@ from folder_replacement_test_support import (
     _EmptyOcrProvider,
     _FailingOcrProvider,
     _LowConfidenceOcrProvider,
+    _MappedReplacementProvider,
     _RecordedProgress,
     _RecordingReplacementProvider,
     _VectorOutlineOcrProvider,
@@ -618,6 +619,134 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
                     b"hlinkClick",
                 ):
                     self.assertIn(expected_markup, slide_xml)
+
+    # Verifies FR-2026-09-06-06.
+    def test_pptx_smartart_infers_english_separators_between_formatted_runs(self) -> None:
+        smartart_data = b"""<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>
+<dgm:dataModel xmlns:dgm=\"http://schemas.openxmlformats.org/drawingml/2006/diagram\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">
+  <dgm:ptLst>
+    <dgm:pt modelId=\"join\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr b=\"1\"/><a:t>join-left</a:t></a:r><a:r><a:rPr i=\"1\"/><a:t>join-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"source-space\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>source-space </a:t></a:r><a:r><a:t>source-space-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"punctuation\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>punctuation-left</a:t></a:r><a:r><a:t>punctuation-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"colon\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>colon-left</a:t></a:r><a:r><a:t>colon-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"closing\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>closing-left</a:t></a:r><a:r><a:t>closing-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"opening\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>opening-left</a:t></a:r><a:r><a:t>opening-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"non-latin\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>non-latin-left</a:t></a:r><a:r><a:t>non-latin-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"line-break\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>line-left</a:t></a:r><a:br/><a:r><a:t>line-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"returned-space\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>returned-space-left</a:t></a:r><a:r><a:t>returned-space-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"decimal\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>decimal-left</a:t></a:r><a:r><a:t>decimal-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"slash\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>slash-left</a:t></a:r><a:r><a:t>slash-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+    <dgm:pt modelId=\"inside-delimiter\"><dgm:t><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>inside-left</a:t></a:r><a:r><a:t>inside-right</a:t></a:r></a:p></dgm:t></dgm:pt>
+  </dgm:ptLst>
+  <dgm:cxnLst/><dgm:bg/><dgm:whole/>
+</dgm:dataModel>"""
+        replacements = {
+            "join-left": "Alpha",
+            "join-right": "Beta",
+            "source-space ": "Source",
+            "source-space-right": "Space",
+            "punctuation-left": "Punctuation,",
+            "punctuation-right": "Following",
+            "colon-left": "Label:",
+            "colon-right": "Value",
+            "closing-left": "Gambit)",
+            "closing-right": "of",
+            "opening-left": "Point",
+            "opening-right": "(Workload",
+            "non-latin-left": "\u6f22",
+            "non-latin-right": "Word",
+            "line-left": "Line",
+            "line-right": "Break",
+            "returned-space-left": "Has ",
+            "returned-space-right": "Output",
+            "decimal-left": "Version 1.",
+            "decimal-right": "25",
+            "slash-left": "A/",
+            "slash-right": "B",
+            "inside-left": "Open(",
+            "inside-right": "Inside",
+        }
+        namespace = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+        expected_english_texts = [
+            "Alpha ", "Beta", "Source", "Space", "Punctuation, ", "Following",
+            "Label: ", "Value", "Gambit) ", "of", "Point ", "(Workload",
+            "\u6f22", "Word", "Line", "Break", "Has ", "Output", "Version 1.",
+            "25", "A/", "B", "Open(", "Inside",
+        ]
+        for layout_mode in (
+            "preserve-source-formatting",
+            "preserve-basic-layout",
+            "preserve-basic-layout-source-font",
+        ):
+            with self.subTest(layout_mode=layout_mode), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                input_root = root / "input"
+                output_root = root / "output"
+                input_root.mkdir()
+                source = input_root / "deck.pptx"
+                presentation = Presentation()
+                presentation.slides.add_slide(presentation.slide_layouts[6])
+                presentation.save(str(source))
+                self._add_reachable_smartart_data_part(source, smartart_data)
+
+                provider = _MappedReplacementProvider(replacements)
+                self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    provider,
+                    document_text_layout=layout_mode,
+                )
+
+                with ZipFile(output_root / "deck.pptx") as archive:
+                    output_data = ElementTree.fromstring(archive.read("ppt/diagrams/data1.xml"))
+                self.assertEqual(
+                    expected_english_texts,
+                    [element.text for element in output_data.findall(".//a:t", namespace)],
+                )
+                first_runs = output_data.findall(".//a:p", namespace)[0].findall("a:r", namespace)
+                first_properties = first_runs[0].find("a:rPr", namespace)
+                second_properties = first_runs[1].find("a:rPr", namespace)
+                self.assertIsNotNone(first_properties)
+                self.assertIsNotNone(second_properties)
+                assert first_properties is not None
+                assert second_properties is not None
+                self.assertEqual("1", first_properties.get("b"))
+                self.assertEqual("1", second_properties.get("i"))
+                first_text = first_runs[0].find("a:t", namespace)
+                self.assertIsNotNone(first_text)
+                assert first_text is not None
+                self.assertEqual(
+                    "preserve",
+                    first_text.get(
+                        "{%s}space" % "http://www.w3.org/XML/1998/namespace"
+                    ),
+                )
+                self.assertCountEqual(
+                    replacements,
+                    [
+                        request.text
+                        for request in provider.requests
+                        if not request.is_filename and request.text in replacements
+                    ],
+                )
+
+                french_output_root = root / "french-output"
+                french_provider = _MappedReplacementProvider(replacements)
+                self._run(
+                    input_root,
+                    french_output_root,
+                    _EmptyOcrProvider(),
+                    french_provider,
+                    document_text_layout=layout_mode,
+                    target_language="fr",
+                )
+                with ZipFile(french_output_root / "deck.pptx") as archive:
+                    french_data = ElementTree.fromstring(archive.read("ppt/diagrams/data1.xml"))
+                self.assertEqual(
+                    "Alpha",
+                    french_data.findall(".//a:t", namespace)[0].text,
+                )
 
     # Verifies FR-2026-08-04-05.
     def test_pptx_no_autofit_uses_source_width_and_natural_height(self) -> None:

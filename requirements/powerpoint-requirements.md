@@ -796,3 +796,83 @@ source shape geometry, width, margins, and source preview height; matching
 production and evaluator fitting rectangles and scales; recorded raw height,
 factor, and effective rectangle; and unchanged fitting for every excluded
 autofit and table case.
+
+---
+
+## FR-2026-09-06-06
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve inferred word separators across SmartArt formatting runs |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request and local confidential-output diagnosis |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-04-11, FR-2026-09-01-01, FR-2026-09-02-05 |
+
+### Description
+
+For each canonical SmartArt `dgm:t` paragraph, the PPTX handler shall retain
+the existing one-request-per-eligible-`a:t` replacement behaviour and its
+source-run formatting. After replacement, it shall inspect each pair of
+consecutive eligible text nodes in reading order that has no intervening
+visible non-text content.
+
+When the target language's primary subtag is `en`, the source boundary contains
+no Unicode whitespace, neither returned replacement supplies boundary
+whitespace, and the touching returned fragments form one of the following safe
+English joins, the handler shall append one U+0020 space to the preceding
+replacement text node:
+
+- both touching characters are Unicode Latin letters or decimal numbers;
+- the preceding character is `,`, `.`, `;`, `:`, `!`, or `?`, except when it
+  separates two decimal digits, and the following character is not a closing
+  delimiter;
+- the preceding character is a closing bracket or parenthesis (`)`, `]`, or
+  `}`), and the following character is not a delimiter; or
+- the following character is an opening bracket or parenthesis (`(`, `[`, or
+  `{`) and the preceding character is a word character or one of the safe
+  punctuation characters above.
+
+The inserted space shall retain the preceding node's existing run formatting
+and shall be serialized with XML whitespace preservation when it is at the
+edge of an `a:t` value (equivalent to an XML `&#x20;` joiner). It shall not
+insert a space for another target language; when the source or either
+replacement already supplies boundary whitespace; inside a delimiter pair;
+around unsupported punctuation such as `/` or `-`; or when a visible non-text
+element separates the nodes. It shall otherwise preserve the provider-returned
+text and SmartArt XML unchanged, and shall not attempt word- or character-level
+correspondence between independently translated text nodes.
+
+This behaviour shall apply in every `--document-text-layout` mode because
+SmartArt remains on its canonical diagram-data source-formatting path. It
+shall not rewrite generated SmartArt drawing shapes, alter the diagram nodes,
+connections, layout, styles, colours, or non-text content, or change text
+replacement behaviour for WordArt or ordinary PowerPoint text frames.
+
+### Rationale
+
+SmartArt commonly splits a logical label into adjacent DrawingML runs to
+express formatting changes. Languages such as Japanese may have no source
+space at that boundary, while independently translated English fragments
+require one to remain readable. The existing per-node replacement path writes
+the fragments directly adjacent, causing visible word collisions. The bounded
+output-only rule extends the established flowing-Word and PDF colour-emphasis
+joiner rules with the conservative punctuation cases needed by English prose.
+Limiting it to an English target avoids inventing spacing for CJK text or other
+target-language layouts.
+
+### Verification
+
+Automated tests shall use synthetic PPTX SmartArt diagram-data parts only.
+They shall verify in every document-text-layout mode that adjacent,
+differently formatted source runs with no source whitespace receive exactly
+one XML-preserved U+0020 separator for Latin words, comma/period/colon
+boundaries, and opening or closing brackets; both source run-property elements
+remain unchanged; and the data part remains PowerPoint-loadable. They shall
+also verify decimal punctuation, delimiter-internal text, slash and hyphen
+punctuation, existing source or returned whitespace, a non-`en` target, a
+non-Latin output, and a visible non-text element do not receive an inferred
+space. Tests shall retain the existing one request per eligible SmartArt text
+node, replace-each-logical-value-once behaviour, generated-diagram-shape
+exclusion, and synthetic-data-only constraint.

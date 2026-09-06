@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from io import BytesIO
+import unicodedata
 import xml.etree.ElementTree as ElementTree
 
 from pipeline.folder_replacement.common import replace_native_text
@@ -13,6 +14,7 @@ from pipeline.text_replacement import TextReplacementProvider
 _WORDPROCESSING_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _DRAWING_DIAGRAM_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+_XML_NAMESPACE = "http://www.w3.org/XML/1998/namespace"
 _SPREADSHEET_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _HTML_NAMESPACE = "http://www.w3.org/1999/xhtml"
 _MARKUP_COMPATIBILITY_NAMESPACE = "http://schemas.openxmlformats.org/markup-compatibility/2006"
@@ -55,13 +57,124 @@ def replace_drawing_diagram_xml_text(
     target_language: str,
 ) -> tuple[bytes, int]:
     """Replace canonical editable text in a DrawingML diagram data part."""
-    return _replace_xml_text(
-        data,
-        replacement_provider,
-        source_language,
-        target_language,
-        _is_drawing_diagram_text_element,
-    )
+    try:
+        namespaces = _namespace_bindings(data)
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return data, 0
+
+    source_texts: dict[ElementTree.Element, str] = {}
+    replaced_items = 0
+    for element in root.iter():
+        if element.text is None or not _is_drawing_diagram_text_element(element.tag):
+            continue
+        source_texts[element] = element.text
+        element.text = replace_native_text(
+            element.text, replacement_provider, source_language, target_language
+        )
+        replaced_items += 1
+
+    if not replaced_items:
+        return data, 0
+    if target_language.split("-", 1)[0].casefold() == "en":
+        _insert_smartart_english_run_joiners(root, source_texts)
+    return _serialize_with_compatibility_bindings(root, namespaces), replaced_items
+
+
+def _insert_smartart_english_run_joiners(
+    root: ElementTree.Element, source_texts: dict[ElementTree.Element, str]
+) -> None:
+    """Keep independently translated English SmartArt runs from running together."""
+    paragraph_tag = f"{{{_DRAWING_NAMESPACE}}}p"
+    run_container_tags = {
+        f"{{{_DRAWING_NAMESPACE}}}r",
+        f"{{{_DRAWING_NAMESPACE}}}fld",
+    }
+    for paragraph in root.iter(paragraph_tag):
+        previous_text: ElementTree.Element | None = None
+        for child in paragraph:
+            if child.tag in run_container_tags:
+                text_elements = tuple(
+                    element
+                    for element in child.iter()
+                    if element in source_texts
+                )
+            elif child in source_texts:
+                text_elements = (child,)
+            else:
+                # A line break, tab, or unsupported paragraph child is a visible
+                # boundary. Do not infer a prose separator across it.
+                previous_text = None
+                continue
+            for text_element in text_elements:
+                if previous_text is not None:
+                    _insert_smartart_run_joiner_if_needed(
+                        previous_text, text_element, source_texts
+                    )
+                previous_text = text_element
+
+
+def _insert_smartart_run_joiner_if_needed(
+    previous: ElementTree.Element,
+    current: ElementTree.Element,
+    source_texts: dict[ElementTree.Element, str],
+) -> None:
+    source_previous = source_texts[previous]
+    source_current = source_texts[current]
+    replacement_previous = previous.text or ""
+    replacement_current = current.text or ""
+    if not source_previous or not source_current:
+        return
+    if source_previous[-1].isspace() or source_current[0].isspace():
+        return
+    if not replacement_previous or not replacement_current:
+        return
+    if replacement_previous[-1].isspace() or replacement_current[0].isspace():
+        return
+    if not _smartart_english_boundary_needs_space(
+        replacement_previous, replacement_current
+    ):
+        return
+    previous.text = replacement_previous + " "
+    previous.set(f"{{{_XML_NAMESPACE}}}space", "preserve")
+
+
+def _smartart_english_boundary_needs_space(previous: str, current: str) -> bool:
+    """Return whether two translated SmartArt fragments need a readable joiner."""
+    left = previous[-1]
+    right = current[0]
+    if _is_latin_letter_or_decimal(left) and _is_latin_letter_or_decimal(right):
+        return True
+
+    if _is_opening_delimiter(right):
+        return _is_latin_letter_or_decimal(left) or left in ",.;:!?"
+
+    if left in ",;:!?" or _is_closing_delimiter(left):
+        if left in ",:" and previous[-2:-1].isdigit() and right.isdigit():
+            return False
+        return not _is_closing_delimiter(right) and not _is_opening_delimiter(left)
+
+    if left == ".":
+        # Keep decimal values intact when a formatting boundary splits them.
+        if previous[-2:-1].isdigit() and right.isdigit():
+            return False
+        return not _is_closing_delimiter(right)
+
+    return False
+
+
+def _is_opening_delimiter(character: str) -> bool:
+    return unicodedata.category(character) == "Ps" or character in "([{"
+
+
+def _is_closing_delimiter(character: str) -> bool:
+    return unicodedata.category(character) == "Pe" or character in ")]}"
+
+
+def _is_latin_letter_or_decimal(character: str) -> bool:
+    return unicodedata.category(character) == "Nd" or unicodedata.name(
+        character, ""
+    ).startswith("LATIN ")
 
 
 def _replace_xml_text(
