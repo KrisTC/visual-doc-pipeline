@@ -40,11 +40,11 @@ Automated tests shall build synthetic PPTX files with ordinary, placeholder, and
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-03-15, FR-2026-08-27-02, FR-2026-09-06-02 |
 
 ### Description
 
-When `--document-text-layout preserve-basic-layout` is selected, the PPTX handler shall replace text in every editable PowerPoint table cell. Where the cell exposes a finite text rectangle, including its cell bounds and text-frame padding, it shall use the shared bounded-text layout core and write explicit fitted Noto typography with autofit disabled. It shall retain the table's geometry, fill, borders, merge state, and other non-text properties.
+When either fitted document-text layout mode, `preserve-basic-layout` or `preserve-basic-layout-source-font`, is selected, the PPTX handler shall replace text in every editable PowerPoint table cell. Where the cell exposes a finite text rectangle, including its cell bounds and text-frame padding, it shall use the shared bounded-text layout core and write explicit fitted typography appropriate to the selected mode with autofit disabled. Typeface selection and source-font measurement for `preserve-basic-layout-source-font` are governed by FR-2026-08-27-02. It shall retain the table's fill, borders, merge state, and other non-text properties. Table-wide typography fitting, graphic-frame preservation, grid-column preservation, and row-height behaviour are governed by FR-2026-09-06-02.
 
 If a table cell cannot supply a reliable finite text rectangle or cannot safely accept explicit fitted formatting, the handler shall still replace its editable text through the established source-formatting path. It shall retain the existing font, size, and text-frame behavior for that cell rather than skipping replacement.
 
@@ -54,7 +54,7 @@ Table cells usually provide the explicit bounds needed for readable translated t
 
 ### Notes
 
-Automated tests shall use synthetic PPTX tables with ordinary cells and merged cells. They shall verify fitted replacement for bounded cells, source-formatting replacement fallback for an ineligible cell, preservation of table geometry, and valid output packages.
+Automated tests shall use synthetic PPTX tables with ordinary cells and merged cells. They shall verify fitted replacement for bounded cells in both fitted layout modes, source-formatting replacement fallback for an ineligible cell, preservation of table geometry, and valid output packages.
 
 ---
 
@@ -464,5 +464,132 @@ themes. They shall verify every major/minor and Latin/East Asian/complex-script
 alias, direct-family preservation, script-segment selection, an unresolved
 theme fallback, source-font JSON diagnostics, unchanged source aliases in
 written output, and no dependency on fonts installed on the test host.
+
+---
+
+## FR-2026-09-06-02
+
+| Property | Value |
+|----------|-------|
+| Title | Fit PowerPoint table text as a table-wide typography plan |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request and local output diagnosis |
+| Date Added | 2026-09-06 |
+| Related Requirements | FR-2026-08-03-16, FR-2026-08-27-02, FR-2026-08-27-06, FR-2026-08-28-03 |
+
+### Description
+
+In both fitted document-text layout modes, the PPTX adapter shall fit all
+eligible non-empty merge-origin cells of one PowerPoint table as one table-wide
+typography plan, rather than fitting cells independently.
+
+This requirement refines FR-2026-08-03-16. That requirement remains governing
+for editable-cell replacement, safe source-formatting fallback, and preservation
+of table non-text properties; this requirement governs table-wide fitting and
+table geometry, including row-height allocation.
+
+Before replacement formatting is written, the adapter shall capture the table
+graphic-frame rectangle, every grid-column width, every row height, merge
+state, and each cell's padded text rectangle. The graphic-frame rectangle is
+the authoritative rendered table size. In particular, the adapter shall not
+treat a row-height sum that differs from the frame height, or an individual
+zero-height row, as the table's rendered height or as an ineligible text bound.
+
+The adapter shall replace and resolve output typefaces for all eligible cells.
+When every source row has a positive height and the stored row-height total
+agrees with the captured frame height within one percent, it shall retain those
+row heights unchanged and iteratively determine the largest common font-scale
+factor, no greater than `1.0`, that fits within them. This preserves a
+well-formed PowerPoint table grid and avoids changing its rendered footprint.
+
+Otherwise, the adapter shall iteratively determine the largest common
+font-scale factor, no greater than `1.0`, for which it can allocate row heights
+within the captured table frame and fit every eligible cell. It shall derive
+each candidate cell's natural height at the candidate scale using its captured
+width and padding, then allocate at least that height to each row. A cell
+spanning rows shall require the combined allocated height of those rows. A row
+with a stored height of zero remains eligible and shall receive its required
+allocated height.
+
+The common scale factor shall apply to every resolved source run size in the
+table. It shall preserve deliberate source typography differences, such as a
+larger header or smaller note, while ensuring that cells with the same source
+font size receive the same fitted output size. Fitting results shall not depend
+on cell traversal order.
+
+The adapter shall preserve the captured table rectangle, grid-column widths,
+and merge state. It shall not resize the table or columns, or enable
+content-driven table or text-frame autofit. It shall write explicit no-autofit
+and fitted typography for every participating cell.
+
+When more than one row-height allocation can fit the selected common scale, the
+adapter shall preserve the source's positive row-height proportions when it
+distributes the remaining table height. This is a preference only: common-font
+readability takes precedence over source row-height proportions, and fixed
+table-frame size takes precedence over both. If no valid common scale can fit
+within the fixed frame, the adapter shall retain the fixed frame and apply the
+existing common minimum-scale overflow behaviour.
+
+If no common scale can fit every participating cell while keeping each written
+run at PowerPoint's valid one-point minimum, the adapter shall write the
+smallest common scale that keeps every run valid and report normal overflow
+behaviour; it shall not shrink only the overflowing cell or alter table
+geometry. Existing safe fallback behaviour remains applicable to a cell that
+has no reliable bounds or cannot safely accept explicit fitted formatting.
+
+In a debug-enabled run, the adapter shall add one `table_fit` entry for each
+table considered by this requirement to the document diagnostic sidecar under
+FR-2026-08-27-06. A document with one or more such entries shall receive a
+sidecar even when it has no ignored, failed, or unsupported work.
+
+Each `table_fit` entry shall identify the slide number and zero-based table
+shape index, without recording a shape name. It shall contain the input and
+written table rectangle, grid-column widths, row heights, merge-origin count,
+eligible-cell count, selected common scale, common fit status, whether the
+written table frame exactly matches the captured frame, whether the input
+row-height sum differed from that frame height, and the selected
+`row_allocation_strategy` of `source_rows` or `frame_allocation`. It shall
+record the final allocated row heights and their sum. For every participating
+cell, it shall record its zero-based row and column, row and column spans,
+captured padded bounds, resolved source font-size values, its independent fit
+scale and status for comparison, and its fit status at the selected common
+scale. It shall identify every cell that prevents a larger common scale and
+every cell using the established source-formatting fallback.
+
+These entries shall contain no source text, replacement text, shape name,
+provider response, source-font family name, credential, cache key, or raw
+exception detail. The diagnostic path shall use the replacement and layout
+results already produced for the table; it shall not invoke a provider again.
+
+### Rationale
+
+Independent cell fitting can make one translated body cell dramatically smaller
+than neighbouring cells that were clearly intended to share a text size. A
+common table scale preserves the author's typography. PowerPoint tables can
+carry row-height values whose sum does not equal the rendered graphic frame;
+using those values as absolute bounds shrinks both the apparent table and its
+text. A fixed-frame row allocation repairs malformed grids, while retaining an
+already well-formed grid avoids PowerPoint-specific visual reflow. The sidecar
+makes scale selection, row allocation, and input geometry inconsistencies
+visible during local iteration without disclosing table content.
+
+### Notes
+
+Automated tests shall use synthetic PPTX tables only. They shall verify that two
+body cells with equal source font sizes and materially different replacement
+lengths receive equal output font sizes; deliberate header/body size differences
+retain their proportional relationship; and the table frame, grid-column widths,
+and merges are unchanged in the output package and rendered output. Tests shall
+cover a stored row-height total that differs from the table frame, a zero-height
+row with text, a merged participating cell, and a table that reaches the common
+one-point overflow result.
+
+Debug tests shall verify one `table_fit` sidecar entry per considered table,
+including a successful table-only document; stable slide, shape, cell, scale,
+and geometry fields; correct limiting-cell and fallback reporting; no repeated
+provider calls; and the absence of source and replacement text, shape names,
+provider responses, font-family names, credentials, cache keys, and raw
+exception details. Tests and fixtures shall use synthetic data only.
 
 ---

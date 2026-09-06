@@ -211,6 +211,196 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             self._assert_valid_drawingml_font_sizes(slide_xml)
             self._assert_drawingml_paragraph_property_order(slide_xml)
 
+    # Verifies FR-2026-09-06-02.
+    def test_pptx_table_uses_a_common_scale_and_writes_safe_fit_diagnostics(self) -> None:
+        class _TableReplacementProvider:
+            def __init__(self) -> None:
+                self.requests: list[TextReplacementRequest] = []
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                if request.is_filename:
+                    return TextReplacementResult(request.text, 1.0)
+                replacements = {
+                    "header": "Header",
+                    "short": "Short",
+                    "long": "This replacement is deliberately much longer than its source text. " * 8,
+                    "merged": "Merged replacement text. " * 6,
+                    "fallback": "Fallback replacement",
+                }
+                return TextReplacementResult(replacements[request.text], 1.0)
+
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "deck.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            table_frame = slide.shapes.add_table(3, 3, Inches(1), Inches(1), Inches(6), Inches(2))
+            table_frame.name = "Must not appear in diagnostics"
+            table = table_frame.table
+            table.columns[0].width = Inches(1.5)
+            table.columns[1].width = Inches(4.0)
+            table.columns[2].width = 0
+            table.rows[0].height = Inches(0.4)
+            table.rows[1].height = Inches(1.0)
+            table.rows[2].height = Inches(0.6)
+            table.cell(0, 0).text = "header"
+            table.cell(0, 1).text = "header"
+            table.cell(1, 0).text = "short"
+            table.cell(1, 1).text = "long"
+            table.cell(1, 2).text = "fallback"
+            table.cell(2, 0).text = "merged"
+            table.cell(2, 0).merge(table.cell(2, 1))
+            for row_index in range(3):
+                for column_index in range(3):
+                    cell = table.cell(row_index, column_index)
+                    if cell.is_spanned or not cell.text:
+                        continue
+                    run = cell.text_frame.paragraphs[0].runs[0]
+                    run.font.size = Pt(30 if row_index == 0 else 20)
+            expected_frame = (
+                int(table_frame.left), int(table_frame.top), int(table_frame.width), int(table_frame.height)
+            )
+            expected_column_widths = tuple(int(column.width) for column in table.columns)
+            presentation.save(str(source))
+
+            provider = _TableReplacementProvider()
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                provider,
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            output = output_root / "deck.pptx"
+            output_presentation = Presentation(str(output))
+            output_shape = next(shape for shape in output_presentation.slides[0].shapes if shape.has_table)
+            output_table = output_shape.table
+            self.assertEqual(
+                expected_frame,
+                (int(output_shape.left), int(output_shape.top), int(output_shape.width), int(output_shape.height)),
+            )
+            self.assertEqual(expected_column_widths, tuple(int(column.width) for column in output_table.columns))
+            self.assertEqual(
+                expected_frame[3], sum(int(row.height) for row in output_table.rows)
+            )
+            body_short_size = output_table.cell(1, 0).text_frame.paragraphs[0].runs[0].font.size.pt
+            body_long_size = output_table.cell(1, 1).text_frame.paragraphs[0].runs[0].font.size.pt
+            header_size = output_table.cell(0, 0).text_frame.paragraphs[0].runs[0].font.size.pt
+            self.assertEqual(body_short_size, body_long_size)
+            self.assertAlmostEqual(header_size / body_short_size, 1.5, places=2)
+            self.assertTrue(output_table.cell(2, 0).is_merge_origin)
+            self.assertEqual(6, len([request for request in provider.requests if not request.is_filename]))
+            with ZipFile(output) as archive:
+                self.assertIn(b"noAutofit", archive.read("ppt/slides/slide1.xml"))
+
+            sidecar = output_root / "deck.pptx.diagnostics.json"
+            self.assertEqual([sidecar], result.diagnostic_sidecars)
+            diagnostic = json.loads(sidecar.read_text(encoding="utf-8"))["entries"][0]
+            self.assertEqual("table_fit", diagnostic["kind"])
+            self.assertEqual(0, diagnostic["slide_index"])
+            self.assertTrue(diagnostic["table_frame_preserved"])
+            self.assertEqual(expected_column_widths, tuple(diagnostic["input_geometry"]["column_widths"]))
+            self.assertEqual(expected_frame[3], diagnostic["allocated_row_height_total"])
+            self.assertEqual("source_rows", diagnostic["row_allocation_strategy"])
+            self.assertEqual(5, diagnostic["eligible_cell_count"])
+            self.assertEqual([{"row_index": 1, "column_index": 2}], diagnostic["fallback_cells"])
+            self.assertTrue(any(cell["column_span"] == 2 for cell in diagnostic["cells"]))
+            serialized_diagnostic = json.dumps(diagnostic)
+            for value in (
+                "Must not appear in diagnostics",
+                "This replacement is deliberately much longer",
+                '"fallback"',
+                "Noto Sans JP",
+            ):
+                self.assertNotIn(value, serialized_diagnostic)
+
+    # Verifies FR-2026-09-06-02's valid-font overflow fallback.
+    def test_pptx_table_uses_the_common_writable_minimum_when_it_overflows(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "overflow.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            table = slide.shapes.add_table(1, 1, Inches(1), Inches(1), Inches(0.5), Inches(0.05)).table
+            table.cell(0, 0).text = "source"
+            table.cell(0, 0).text_frame.paragraphs[0].runs[0].font.size = Pt(20)
+            presentation.save(str(source))
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="replacement " * 200),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            output = output_root / "overflow.pptx"
+            output_presentation = Presentation(str(output))
+            output_table = next(shape.table for shape in output_presentation.slides[0].shapes if shape.has_table)
+            self.assertEqual(1.0, output_table.cell(0, 0).text_frame.paragraphs[0].runs[0].font.size.pt)
+            diagnostic = json.loads(
+                (output_root / "overflow.pptx.diagnostics.json").read_text(encoding="utf-8")
+            )["entries"][0]
+            self.assertEqual("overflow", diagnostic["fit_status"])
+            self.assertEqual([{"row_index": 0, "column_index": 0}], diagnostic["limiting_cells"])
+
+    # Verifies FR-2026-09-06-02's frame-authoritative row allocation.
+    def test_pptx_table_allocates_a_zero_height_row_inside_its_fixed_frame(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            source = input_root / "zero-row.pptx"
+            presentation = Presentation()
+            slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+            table_frame = slide.shapes.add_table(2, 1, Inches(1), Inches(1), Inches(4), Inches(2))
+            table = table_frame.table
+            table.rows[0].height = 0
+            table.rows[1].height = Inches(0.5)
+            table_frame.height = Inches(2)
+            for row_index, value in enumerate(("first", "second")):
+                table.cell(row_index, 0).text = value
+                table.cell(row_index, 0).text_frame.paragraphs[0].runs[0].font.size = Pt(20)
+            expected_frame_height = int(table_frame.height)
+            presentation.save(str(source))
+
+            self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="replacement text " * 8),
+                document_text_layout="preserve-basic-layout",
+                diagnostics_enabled=True,
+            )
+
+            output = output_root / "zero-row.pptx"
+            output_presentation = Presentation(str(output))
+            output_table = next(shape.table for shape in output_presentation.slides[0].shapes if shape.has_table)
+            self.assertGreater(int(output_table.rows[0].height), 0)
+            self.assertEqual(expected_frame_height, sum(int(row.height) for row in output_table.rows))
+            first_size = output_table.cell(0, 0).text_frame.paragraphs[0].runs[0].font.size.pt
+            second_size = output_table.cell(1, 0).text_frame.paragraphs[0].runs[0].font.size.pt
+            self.assertEqual(first_size, second_size)
+            diagnostic = json.loads(
+                (output_root / "zero-row.pptx.diagnostics.json").read_text(encoding="utf-8")
+            )["entries"][0]
+            self.assertTrue(diagnostic["row_height_frame_mismatch"])
+            self.assertEqual("frame_allocation", diagnostic["row_allocation_strategy"])
+            self.assertEqual([], diagnostic["fallback_cells"])
+            self.assertEqual(2, diagnostic["eligible_cell_count"])
+            self.assertEqual(expected_frame_height, diagnostic["allocated_row_height_total"])
+
     # Verifies FR-2026-08-04-11 and FR-2026-08-05-01.
     def test_pptx_replaces_reachable_smartart_data_and_editable_wordart(self) -> None:
         for layout_mode in (
