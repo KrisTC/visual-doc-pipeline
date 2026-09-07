@@ -13,6 +13,30 @@ Basically I thought it would be fun and interesting to solve the middle hard par
 
 Project requirements are the source of truth and live in [requirements/](requirements/).
 
+## Normal use
+
+The main application is [`scripts/folder_replacement.py`](scripts/folder_replacement.py). The other scripts set up its runtime, configure providers, or support development and evaluation.
+
+Process a folder with the default providers (Google Cloud Translation and PaddleOCR):
+
+```sh
+./run.sh scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER --source-language ja
+```
+
+The default translation provider requires local Google Cloud credentials. Follow the [Google Cloud Translation setup guide](docs/google-cloud-translation-setup.md) before using it. To process text locally with Argos Translate instead, select its provider explicitly:
+
+```sh
+./run.sh scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER \
+  --source-language ja \
+  --text-replacement argos_translate
+```
+
+Use `--help` to see all current options, providers, and document-layout modes:
+
+```sh
+./run.sh scripts/folder_replacement.py --help
+```
+
 ## Development setup
 
 This project uses Python 3.13.14 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
@@ -100,56 +124,22 @@ Generate source-language-to-English visible replacement pages for every register
 
 Pages and their clipped rendered text images are written below `outputs/evaluations/text-replacement-examples/`. The evaluator uses the committed Noto Sans JP font asset and does not modify inputs.
 
-## Candidate core technologies
+## Core technologies
 
-Going to start with - **Offline:** PaddleOCR + Argos Translate.
+### Implemented provider plugins
 
-### Offline / open-source
+- **PaddleOCR — OCR.** The default OCR provider, with support for English and Japanese and text-region geometry. See the [OCR provider plugin documentation](docs/ocr-provider-api.md) and the [PaddleOCR documentation](https://paddlepaddle.github.io/PaddleOCR/main/en/quick_start.html).
 
-- **PaddleOCR - primary OCR**
-  - Default OCR adapter.
-  - Multilingual support, including Japanese, with text-region geometry.
-  - [PaddleOCR](https://paddlepaddle.github.io/PaddleOCR/main/en/quick_start.html)
+- **Google Cloud Translation Advanced v3 — translation.** The default text-replacement provider. See the [text-replacement provider documentation](docs/text-replacement-provider-api.md), [local setup guide](docs/google-cloud-translation-setup.md), and [Google Cloud Translation documentation](https://docs.cloud.google.com/translate/docs/advanced/translate-text-v3).
 
-- **Tesseract - comparison OCR**
-  - Use as a baseline/fallback in the OCR evaluation suite.
-  - Apache-2.0 licensed; Japanese training data (`jpn`).
-  - [Tesseract documentation](https://tesseract-ocr.github.io/tessdoc/)
+- **Argos Translate — offline translation.** An alternative text-replacement provider that translates locally, downloading official language packages when required. See the [text-replacement provider documentation](docs/text-replacement-provider-api.md) and [Argos Translate](https://github.com/argosopentech/argos-translate/).
 
-- **Argos Translate - simple offline translation**
-  - Local, open-source translation library with Japanese language packages.
-  - Good first replacement-script implementation.
-  - [Argos Translate](https://github.com/argosopentech/argos-translate/)
+### Future provider options
 
-- **LibreTranslate - local translation API**
-  - Self-hosted HTTP API built on Argos Translate.
-  - Useful for replacement scripts that call a local service.
-  - [Argos/LibreTranslate relationship](https://github.com/argosopentech/argos-translate/)
-
-- **CTranslate2 + an open-licensed translation model - advanced local option**
-  - Use later for faster local inference or user-selectable models.
-  - Keep runtime and model separate; assess each model’s licence and Japanese quality.
-  - [CTranslate2](https://github.com/OpenNMT/CTranslate2)
-
-### Cloud APIs
-
-- **Google Cloud Vision OCR + Cloud Translation - general cloud pair**
-  - OCR polygons and language hints such as `ja`.
-  - Formatted-document translation and glossaries.
-  - [Vision OCR](https://docs.cloud.google.com/vision/docs/ocr)
-  - [Cloud Translation documents](https://docs.cloud.google.com/translate/docs/advanced/translate-documents)
-
-- **Azure Vision / Document Intelligence + Azure Document Translation - Microsoft-oriented pair**
-  - Multilingual document OCR.
-  - Batch translation of standalone images and embedded images in DOCX/PPTX.
-  - [Azure Vision language support](https://learn.microsoft.com/en-us/azure/ai-services/computer-vision/language-support)
-  - [Azure Document Translation](https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/latest/overview)
-
-- **DeepL API - translation-provider adapter**
-  - Document translation for DOCX, PPTX, PDF, and image files.
-  - Glossary support.
-  - [DeepL document API](https://developers.deepl.com/api-reference/document/upload-and-translate-a-document)
-
-- **OpenAI or Gemini multimodal models - optional context-aware adapter**
-  - Use where surrounding image context improves translation.
-  - Do not use as the default source of OCR coordinates or deterministic rendering.
+- **Tesseract** — comparison or fallback OCR provider. [Documentation](https://tesseract-ocr.github.io/tessdoc/)
+- **LibreTranslate** — self-hosted translation API backed by Argos Translate. [Documentation](https://github.com/LibreTranslate/LibreTranslate)
+- **CTranslate2 with an open-licensed translation model** — faster local inference or user-selectable models. [Documentation](https://github.com/OpenNMT/CTranslate2)
+- **Google Cloud Vision OCR** — cloud OCR provider. [Documentation](https://docs.cloud.google.com/vision/docs/ocr)
+- **Azure Vision or Document Intelligence with Azure Document Translation** — Microsoft-oriented cloud OCR and translation providers. [Vision language support](https://learn.microsoft.com/en-us/azure/ai-services/computer-vision/language-support); [Document Translation](https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/latest/overview)
+- **DeepL API** — cloud translation provider. [Document API](https://developers.deepl.com/api-reference/document/upload-and-translate-a-document)
+- **OpenAI or Gemini multimodal models** — optional context-aware translation providers, not a default source of OCR coordinates or deterministic rendering.
