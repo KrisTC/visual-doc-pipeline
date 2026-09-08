@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import cast
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
@@ -12,6 +14,7 @@ from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr_plugins.no_ocr import NoOcrProvider
+from pipeline import mounted_plugins
 
 
 class OcrProviderFactoryTests(unittest.TestCase):
@@ -66,3 +69,38 @@ class OcrProviderFactoryTests(unittest.TestCase):
 
         with self.assertRaises(OcrProviderNotFoundError):
             factory.create("missing")
+
+    # Verifies FR-2026-09-07-02.
+    def test_discovers_a_trusted_mounted_ocr_plugin(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._write_plugin(
+                root / "ocr" / "mounted_ocr",
+                '"""Mounted OCR test provider."""\n'
+                "from pipeline.ocr_plugins.no_ocr import NoOcrProvider\n"
+                "SHORT_NAME = 'mounted-ocr'\n"
+                "def create_provider():\n"
+                "    return NoOcrProvider()\n",
+            )
+            with patch.object(mounted_plugins, "MOUNTED_PLUGIN_DIRECTORY", root):
+                factory = OcrProviderFactory.discover_default_plugins()
+
+            self.assertIn("mounted_ocr", factory.provider_names)
+            self.assertEqual("Mounted OCR test provider.", factory.provider_descriptions["mounted_ocr"])
+            self.assertIsInstance(factory.create("mounted_ocr"), NoOcrProvider)
+
+    # Verifies FR-2026-09-07-02.
+    def test_rejects_a_mounted_ocr_plugin_that_shadows_a_builtin(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._write_plugin(root / "ocr" / "no_ocr", "SHORT_NAME = 'other'\n")
+            with patch.object(mounted_plugins, "MOUNTED_PLUGIN_DIRECTORY", root):
+                with self.assertRaisesRegex(
+                    RuntimeError, "Mounted ocr plugin conflicts with provider 'no_ocr'"
+                ):
+                    OcrProviderFactory.discover_default_plugins()
+
+    @staticmethod
+    def _write_plugin(directory: Path, source: str) -> None:
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text(source, encoding="utf-8")

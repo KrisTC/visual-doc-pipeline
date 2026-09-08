@@ -25,9 +25,10 @@ MANAGED_SETTING_NAMES = frozenset(
     }
 )
 PROBE_SUCCESS_MARKER = "GOOGLE_CLOUD_TRANSLATION_PROBE=ok"
+DEFAULT_EU_LOCATION = "europe-west1"
 EU_LOCATION_HELP = (
     "Optional European Cloud Translation location. Examples: europe-west1 (Belgium), "
-    "europe-west3 (Frankfurt), europe-west4 (Netherlands). Omit for the global endpoint."
+    "europe-west3 (Frankfurt), europe-west4 (Netherlands). Omit for europe-west1 (Belgium)."
 )
 PROBE_CODE = "\n".join(
     (
@@ -124,7 +125,6 @@ def _remove_previous_managed_blocks(content: str) -> str:
 def _candidate_environment_content(
     existing_content: str,
     credential_path: Path,
-    project_id: str,
     location: str | None,
 ) -> str:
     newline = _newline_for(existing_content)
@@ -132,7 +132,6 @@ def _candidate_environment_content(
     managed_lines = [
         MANAGED_MARKER,
         f'GOOGLE_APPLICATION_CREDENTIALS="{credential_path.as_posix()}"',
-        f"GOOGLE_CLOUD_PROJECT={project_id}",
     ]
     if location is not None:
         managed_lines.append(f"GOOGLE_CLOUD_TRANSLATION_LOCATION={location}")
@@ -144,11 +143,11 @@ def _candidate_environment_content(
 
 
 def _probe_environment(
-    credential_path: Path, project_id: str, location: str | None, project_root: Path
+    credential_path: Path, location: str | None, project_root: Path
 ) -> None:
     probe_environment = os.environ.copy()
     probe_environment["GOOGLE_APPLICATION_CREDENTIALS"] = str(credential_path)
-    probe_environment["GOOGLE_CLOUD_PROJECT"] = project_id
+    probe_environment.pop("GOOGLE_CLOUD_PROJECT", None)
     if location is None:
         probe_environment.pop("GOOGLE_CLOUD_TRANSLATION_LOCATION", None)
     else:
@@ -197,15 +196,18 @@ def configure(
     """Probe a credential and atomically update the project-root dotenv file."""
     resolved_credential_path, project_id = _read_service_account(credential_file)
     normalized_location = _normalized_location(location)
+    configured_location = (
+        normalized_location if normalized_location not in {None, DEFAULT_EU_LOCATION} else None
+    )
     environment_file = project_root / ENVIRONMENT_FILE_NAME
     existing_content = environment_file.read_text(encoding="utf-8") if environment_file.exists() else ""
     candidate_content = _candidate_environment_content(
-        existing_content, resolved_credential_path, project_id, normalized_location
+        existing_content, resolved_credential_path, configured_location
     )
-    _probe_environment(resolved_credential_path, project_id, normalized_location, project_root)
+    _probe_environment(resolved_credential_path, configured_location, project_root)
     _atomically_write_environment(candidate_content, environment_file)
-    endpoint = "translate.googleapis.com" if normalized_location is None else "translate-eu.googleapis.com"
-    selected_location = normalized_location or "global"
+    endpoint = "translate-eu.googleapis.com"
+    selected_location = normalized_location or DEFAULT_EU_LOCATION
     return resolved_credential_path.name, project_id, endpoint, selected_location
 
 

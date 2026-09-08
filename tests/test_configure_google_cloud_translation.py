@@ -32,7 +32,7 @@ class SetupModule(Protocol):
     ) -> tuple[str, str, str, str]: ...
 
     def _probe_environment(
-        self, credential_path: Path, project_id: str, location: str | None, project_root: Path
+        self, credential_path: Path, location: str | None, project_root: Path
     ) -> None: ...
 
     def _read_service_account(self, credential_file: Path) -> tuple[Path, str]: ...
@@ -71,9 +71,9 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
                 result = self.setup.configure(credential_file, None, root)
 
             self.assertEqual(
-                (credential_file.name, "synthetic-project", "translate.googleapis.com", "global"), result
+                (credential_file.name, "synthetic-project", "translate-eu.googleapis.com", "europe-west1"), result
             )
-            probe.assert_called_once_with(credential_file.resolve(), "synthetic-project", None, root)
+            probe.assert_called_once_with(credential_file.resolve(), None, root)
             content = environment_file.read_text(encoding="utf-8")
             self.assertIn("CUSTOM_SETTING=preserved\n", content)
             self.assertIn("# Managed by scripts/configure-paddle-cuda-environment.ps1\n", content)
@@ -82,7 +82,7 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
             self.assertIn(self.setup.MANAGED_MARKER, content)
             self.assertIn('GOOGLE_APPLICATION_CREDENTIALS="', content)
             self.assertIn(credential_file.as_posix(), content)
-            self.assertIn("GOOGLE_CLOUD_PROJECT=synthetic-project\n", content)
+            self.assertNotIn("GOOGLE_CLOUD_PROJECT=synthetic-project\n", content)
 
     # Verifies FR-2026-08-24-05.
     def test_migrates_the_legacy_powershell_managed_block_and_writes_eu_location(self) -> None:
@@ -100,17 +100,17 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
             )
 
             with patch.object(self.setup, "_probe_environment") as probe:
-                result = self.setup.configure(credential_file, " europe-west1 ", root)
+                result = self.setup.configure(credential_file, " europe-west3 ", root)
 
             self.assertEqual(
-                (credential_file.name, "synthetic-project", "translate-eu.googleapis.com", "europe-west1"), result
+                (credential_file.name, "synthetic-project", "translate-eu.googleapis.com", "europe-west3"), result
             )
-            probe.assert_called_once_with(credential_file.resolve(), "synthetic-project", "europe-west1", root)
+            probe.assert_called_once_with(credential_file.resolve(), "europe-west3", root)
             content = environment_file.read_text(encoding="utf-8")
             self.assertNotIn("configure-google-cloud-translation.ps1", content)
             self.assertNotIn("old-project", content)
             self.assertIn("CUSTOM_SETTING=preserved\n", content)
-            self.assertIn("GOOGLE_CLOUD_TRANSLATION_LOCATION=europe-west1\n", content)
+            self.assertIn("GOOGLE_CLOUD_TRANSLATION_LOCATION=europe-west3\n", content)
 
     # Verifies FR-2026-08-24-05.
     def test_failed_probe_keeps_the_existing_environment_file_unchanged(self) -> None:
@@ -160,7 +160,7 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
             self.assertEqual("synthetic-project", project_id)
 
     # Verifies FR-2026-08-24-05.
-    def test_help_lists_global_and_european_location_examples(self) -> None:
+    def test_help_lists_the_default_and_european_location_examples(self) -> None:
         completed_process = subprocess.run(
             [sys.executable, str(SCRIPT_PATH), "--help"], check=False, capture_output=True, text=True
         )
@@ -170,7 +170,7 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
         self.assertIn("europe-west1 (Belgium)", help_text)
         self.assertIn("europe-west3 (Frankfurt)", help_text)
         self.assertIn("europe-west4 (Netherlands)", help_text)
-        self.assertIn("Omit for the global endpoint", help_text)
+        self.assertIn("Omit for europe-west1 (Belgium)", help_text)
 
     # Verifies FR-2026-08-24-05.
     def test_probe_uses_only_derived_configuration_and_hides_provider_failure_output(self) -> None:
@@ -183,12 +183,12 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
 
             with patch.object(self.setup.subprocess, "run", return_value=completed_process) as run:
                 with self.assertRaisesRegex(self.setup.ConfigurationError, "credential validation failed") as error:
-                    self.setup._probe_environment(credential_file, "synthetic-project", None, root)
+                    self.setup._probe_environment(credential_file, None, root)
 
             self.assertNotIn("synthetic-private-key", str(error.exception))
             arguments = run.call_args.kwargs
             self.assertEqual(str(credential_file), arguments["env"]["GOOGLE_APPLICATION_CREDENTIALS"])
-            self.assertEqual("synthetic-project", arguments["env"]["GOOGLE_CLOUD_PROJECT"])
+            self.assertNotIn("GOOGLE_CLOUD_PROJECT", arguments["env"])
             self.assertNotIn("GOOGLE_CLOUD_TRANSLATION_LOCATION", arguments["env"])
 
 

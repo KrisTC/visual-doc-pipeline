@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
+from pipeline import mounted_plugins
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from pipeline.text_replacement.factory import TextReplacementProviderFactory
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
@@ -92,3 +96,41 @@ class TextReplacementProviderFactoryTests(unittest.TestCase):
 
         with self.assertRaises(TextReplacementProviderNotFoundError):
             factory.create("missing")
+
+    # Verifies FR-2026-09-07-02.
+    def test_discovers_a_trusted_mounted_text_replacement_plugin(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._write_plugin(
+                root / "text_replacement" / "mounted_text",
+                '"""Mounted text test provider."""\n'
+                "from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider\n"
+                "SHORT_NAME = 'mounted-text'\n"
+                "def create_provider():\n"
+                "    return CharacterMaskProvider()\n",
+            )
+            with patch.object(mounted_plugins, "MOUNTED_PLUGIN_DIRECTORY", root):
+                factory = TextReplacementProviderFactory.discover_default_plugins()
+
+            self.assertIn("mounted_text", factory.provider_names)
+            self.assertEqual(
+                "Mounted text test provider.", factory.provider_descriptions["mounted_text"]
+            )
+            self.assertIsInstance(factory.create("mounted_text"), CharacterMaskProvider)
+
+    # Verifies FR-2026-09-07-02.
+    def test_rejects_a_mounted_text_plugin_that_shadows_a_builtin(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self._write_plugin(root / "text_replacement" / "identity", "SHORT_NAME = 'other'\n")
+            with patch.object(mounted_plugins, "MOUNTED_PLUGIN_DIRECTORY", root):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Mounted text_replacement plugin conflicts with provider 'identity'",
+                ):
+                    TextReplacementProviderFactory.discover_default_plugins()
+
+    @staticmethod
+    def _write_plugin(directory: Path, source: str) -> None:
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text(source, encoding="utf-8")

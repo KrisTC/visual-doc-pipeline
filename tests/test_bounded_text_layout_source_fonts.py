@@ -2,24 +2,26 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from dataclasses import replace
+import shutil
 import unittest
-from unittest.mock import patch
+from dataclasses import replace
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import call, patch
 
 import skia  # type: ignore[import-not-found]
 
+from pipeline import bounded_text_layout
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
     EmbeddedTypefaceCandidate,
     SourceTypefaceReference,
-    fit_explicit_noto_text_box,
     _portable_segments,
+    fit_explicit_noto_text_box,
     source_font_measurement,
 )
-
 
 FONT_PATH = Path(__file__).parent / "assets" / "fonts" / "NotoSansCJKjp-Regular.ttf"
 FONT_FAMILY = "Noto Sans CJK JP"
@@ -88,6 +90,98 @@ class SourceFontMeasurementTests(unittest.TestCase):
         )
 
         self.assertEqual("installed-source-face", measurement.selections[0].source)
+
+    # Verifies FR-2026-09-07-04.
+    def test_uses_an_exact_face_from_the_optional_mounted_font_catalog(self) -> None:
+        assert self.typeface is not None
+        with TemporaryDirectory() as temporary_directory:
+            mounted_directory = Path(temporary_directory)
+            shutil.copyfile(FONT_PATH, mounted_directory / FONT_PATH.name)
+            with patch.object(
+                bounded_text_layout, "MOUNTED_FONT_DIRECTORY", mounted_directory
+            ):
+                bounded_text_layout._mounted_font_manager.cache_clear()
+                try:
+                    measurement = source_font_measurement(self._box())
+                finally:
+                    bounded_text_layout._mounted_font_manager.cache_clear()
+
+        self.assertEqual("mounted-source-face", measurement.selections[0].source)
+        key = measurement.text_box.paragraphs[0].runs[0].font_classification
+        self.assertEqual(FONT_FAMILY, measurement.typefaces[key].getFamilyName())
+
+    # Verifies FR-2026-09-07-04.
+    def test_mounted_face_can_be_used_for_source_font_output(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            mounted_directory = Path(temporary_directory)
+            shutil.copyfile(FONT_PATH, mounted_directory / FONT_PATH.name)
+            with patch.object(
+                bounded_text_layout, "MOUNTED_FONT_DIRECTORY", mounted_directory
+            ):
+                bounded_text_layout._mounted_font_manager.cache_clear()
+                try:
+                    fitted = fit_explicit_noto_text_box(
+                        self._box(),
+                        preserve_source_font_family=True,
+                        measure_source_fonts=True,
+                    )
+                finally:
+                    bounded_text_layout._mounted_font_manager.cache_clear()
+
+        output_run = fitted.text_box.paragraphs[0].runs[0]
+        self.assertEqual(FONT_FAMILY, output_run.font_family)
+        self.assertEqual(
+            (SourceTypefaceReference("latin", FONT_FAMILY),),
+            output_run.source_typefaces,
+        )
+
+    # Verifies FR-2026-09-07-04.
+    def test_ignores_a_malformed_mounted_font_and_uses_the_existing_fallback(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            mounted_directory = Path(temporary_directory)
+            (mounted_directory / "broken.ttf").write_bytes(b"not a font")
+            with patch.object(
+                bounded_text_layout, "MOUNTED_FONT_DIRECTORY", mounted_directory
+            ):
+                bounded_text_layout._mounted_font_manager.cache_clear()
+                try:
+                    measurement = source_font_measurement(self._box())
+                finally:
+                    bounded_text_layout._mounted_font_manager.cache_clear()
+
+        self.assertEqual("noto-fallback", measurement.selections[0].source)
+
+    # Verifies FR-2026-09-07-04.
+    def test_discovers_every_face_in_a_mounted_font_collection(self) -> None:
+        assert self.typeface is not None
+        with TemporaryDirectory() as temporary_directory:
+            mounted_directory = Path(temporary_directory)
+            collection = mounted_directory / "collection.ttc"
+            # TTC header, version 1.0, two face offsets, then enough padding
+            # to make the header structurally valid for catalog enumeration.
+            collection.write_bytes(
+                b"ttcf" + b"\x00\x01\x00\x00" + b"\x00\x00\x00\x02"
+                + b"\x00\x00\x00\x14\x00\x00\x00\x18" + b"\x00" * 16
+            )
+            with (
+                patch.object(bounded_text_layout, "MOUNTED_FONT_DIRECTORY", mounted_directory),
+                patch.object(
+                    skia.Typeface,
+                    "MakeFromFile",
+                    return_value=self.typeface,
+                ) as load_face,
+            ):
+                bounded_text_layout._mounted_font_manager.cache_clear()
+                try:
+                    manager = bounded_text_layout._mounted_font_manager()
+                finally:
+                    bounded_text_layout._mounted_font_manager.cache_clear()
+
+        self.assertIsNotNone(manager)
+        self.assertEqual(
+            [(str(collection), 0), (str(collection), 1)],
+            [call.args for call in load_face.call_args_list],
+        )
 
     # Verifies FR-2026-08-22-04.
     def test_falls_back_when_the_source_face_lacks_a_replacement_glyph(self) -> None:

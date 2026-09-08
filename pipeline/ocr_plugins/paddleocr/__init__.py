@@ -73,6 +73,7 @@ class _EngineRecord:
 CPU_DEVICE = "cpu"
 AUTO_DEVICE = "auto"
 GPU_DEVICE = "gpu:0"
+_CPU_MKLDNN_DISABLED_PLATFORMS = frozenset({"linux", "win32"})
 
 
 class PaddleOcrProvider:
@@ -111,8 +112,10 @@ class PaddleOcrProvider:
         image_array = np.asarray(opaque_rgb_for_ocr(request.image), dtype=np.uint8)
         try:
             raw_result = _predict(engine_record.engine, image_array)
-        except Exception as error:
-            raw_result = self._retry_with_cpu(native_language, image_array, request.language, error)
+        except Exception:
+            raw_result = self._retry_with_cpu(
+                native_language, image_array, request.language, engine_record.device
+            )
         return _parse_result(raw_result)
 
     def _create_cpu_engine(
@@ -133,18 +136,20 @@ class PaddleOcrProvider:
         native_language: str,
         image_array: npt.NDArray[np.uint8],
         requested_language: str,
-        gpu_error: Exception,
+        active_device: str,
     ) -> object:
-        """Retry a failed GPU request once using a cached CPU engine."""
+        """Retry one failed inference using a cached CPU engine."""
         try:
             cpu_record = _create_engine(native_language, CPU_DEVICE)
             self._engines[native_language] = cpu_record
             return _predict(cpu_record.engine, image_array)
         except Exception as error:
-            message = (
-                f"PaddleOCR failed to process language {requested_language!r} "
-                "on GPU and CPU fallback."
-            )
+            message = f"PaddleOCR failed to process language {requested_language!r} on CPU."
+            if active_device == GPU_DEVICE:
+                message = (
+                    f"PaddleOCR failed to process language {requested_language!r} "
+                    "on GPU and CPU fallback."
+                )
             raise OcrProviderError(message) from error
 
 
@@ -186,7 +191,7 @@ def _create_engine(language: str, device: str) -> _EngineRecord:
         engine_kwargs: dict[str, str | bool] = {
             "lang": language,
             "enable_mkldnn": not (
-                selected_device == CPU_DEVICE and sys.platform == "win32"
+                selected_device == CPU_DEVICE and sys.platform in _CPU_MKLDNN_DISABLED_PLATFORMS
             ),
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,

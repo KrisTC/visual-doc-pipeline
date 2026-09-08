@@ -119,6 +119,44 @@ The existing seven-day artifact cooldown remains mandatory for every PyPI-source
 
 ---
 
+## SR-2026-09-08-01
+
+| Property | Value |
+|----------|-------|
+| Title | Official PyTorch CPU wheel registry exception |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-approved CPU OCI image dependency decision |
+| Date Added | 2026-09-08 |
+| Related Requirements | SR-2026-08-01-01, SR-2026-08-21-02, FR-2026-09-07-01, TR-2026-09-07-01 |
+
+### Description
+
+This requirement explicitly permits the project to resolve only the
+`torch==2.13.0+cpu` distribution from PyTorch's official CPU simple index at
+`https://download.pytorch.org/whl/cpu/`. This permission is limited to that
+distribution, exact version, and registry. It shall use the generic exception
+and verified-installation controls defined by SR-2026-08-21-02.
+
+### Rationale
+
+Argos Translate requires PyTorch through its normal dependency graph. The Linux
+PyPI wheel currently includes CUDA packages, while PyTorch's official CPU wheel
+preserves Argos support in the CPU OCI image without adding CUDA, cuDNN, or an
+NVIDIA driver.
+
+### Notes
+
+The existing seven-day artifact cooldown remains mandatory for every
+PyPI-sourced package. The PyTorch CPU index does not expose PyPI-compatible
+publication timestamps, so SR-2026-08-21-02's reviewed SHA-256 verification is
+the alternative integrity control. The exception authorizes no GPU, CUDA, ROCm,
+XPU, or other PyTorch variant. It is intentionally limited to the CPU image's
+Linux `x86_64` dependency resolution; other platforms continue to use the
+ordinary PyPI source selected by the project's markers.
+
+---
+
 ## SR-2026-08-03-02
 
 | Property | Value |
@@ -157,7 +195,7 @@ An SVG `data:` URI is self-contained data, not an external resource, and is perm
 
 ### Description
 
-Google Cloud Translation provider configuration shall be supplied only through the repository-root `.env.local` dotenv file or through the invoking process environment. The `.env.local` file shall remain Git-ignored and shall not be committed. It shall contain `GOOGLE_APPLICATION_CREDENTIALS` with an absolute local path to the service-account credential JSON file, `GOOGLE_CLOUD_PROJECT`, and may contain `GOOGLE_CLOUD_TRANSLATION_LOCATION`.
+Google Cloud Translation provider configuration shall be supplied only through the repository-root `.env.local` dotenv file or through the invoking process environment. The `.env.local` file shall remain Git-ignored and shall not be committed. It shall contain `GOOGLE_APPLICATION_CREDENTIALS` with an absolute local path to the service-account credential JSON file and may contain `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_TRANSLATION_LOCATION` as explicit overrides. When `GOOGLE_CLOUD_PROJECT` is absent, the provider may read only the mounted or locally referenced service-account JSON file's `project_id` field to select the project.
 
 The provider shall use Google Application Default Credentials from the service-account credential JSON file referenced by `GOOGLE_APPLICATION_CREDENTIALS`. The credential file shall be stored outside the repository or in a Git-ignored location; it shall not be committed, copied into generated artifacts, or written to logs. The provider and setup helper shall not create service accounts or credential files.
 
@@ -177,7 +215,7 @@ Cloud translation requires an external trust boundary and credentials. Restricti
 
 The project shall provide a concise Google Cloud Translation setup guide. It shall direct a developer to obtain a service-account credential JSON file, store the file in an approved local folder outside the repository, and run `uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file ../credentials/credential.json` to validate the file and configure the provider. The helper shall derive the default project ID from the credential file's `project_id` value. It shall direct the administrator to enable billing and the Cloud Translation API and assign the service account **Cloud Translation API User** (`roles/cloudtranslate.user`) through the project role picker. It shall link to Google's [Cloud Translation setup guide](https://docs.cloud.google.com/translate/docs/setup), [Cloud Translation authentication guide](https://docs.cloud.google.com/translate/docs/authentication), [Cloud Translation access-control guide](https://docs.cloud.google.com/translate/docs/access-control), [Application Default Credentials guide](https://docs.cloud.google.com/docs/authentication/provide-credentials-adc), [Cloud Translation API page](https://console.cloud.google.com/apis/library/translate.googleapis.com), and [Google Cloud billing page](https://console.cloud.google.com/billing). The guide shall not contain a project-specific URL, API key, credential file, access token, or service-account private-key value.
 
-`.env.local` may set `GOOGLE_CLOUD_TRANSLATION_LOCATION` to a supported continental-European location, such as `europe-west1`. That setting selects Google's EU multi-regional endpoint; when it is absent, the provider uses the global endpoint. The EU endpoint keeps at-rest data and machine-learning processing within continental Europe; it does not remove the developer's responsibility to confirm that their organization approves the configured project, identity, location, and applicable Google Cloud service terms. The endpoint configuration shall follow Google's [Global and multi-regional endpoints documentation](https://docs.cloud.google.com/translate/docs/advanced/endpoints).
+`.env.local` may set `GOOGLE_CLOUD_TRANSLATION_LOCATION` to a supported continental-European location. When it is absent, the provider uses `europe-west1` and Google's EU multi-regional endpoint. The EU endpoint keeps at-rest data and machine-learning processing within continental Europe; it does not remove the developer's responsibility to confirm that their organization approves the configured project, identity, location, and applicable Google Cloud service terms. The endpoint configuration shall follow Google's [Global and multi-regional endpoints documentation](https://docs.cloud.google.com/translate/docs/advanced/endpoints).
 
 Automated tests shall use synthetic configuration values and mocked Google clients. They shall verify that missing or invalid service-account credential configuration fails without secret disclosure, that API-key-only configuration is rejected without a network request, and that the local-evaluation path cannot invoke the remote provider.
 
@@ -282,5 +320,44 @@ Automated tests shall use synthetic PDFs and mocked renderer boundaries. They
 shall verify that an oversized page is retained before renderer invocation and
 that diagnostics omit source text, pixels, renderer input, and exception
 details.
+
+---
+
+## SR-2026-09-07-01
+
+| Property | Value |
+|----------|-------|
+| Title | Constrain OCI container mounts, credentials, and plugin trust boundaries |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-07 |
+| Related Requirements | SR-2026-08-01-01, SR-2026-08-21-01, SR-2026-08-21-02, SR-2026-08-24-01, SR-2026-08-27-01, FR-2026-09-07-01, FR-2026-09-07-02, TR-2026-09-07-01 |
+
+### Description
+
+Each container image shall treat `/input`, `/plugins`, and `/fonts` as read-only operator-provided mounts, `/output` and `/runtime-cache` as the only normal writable mounts, and the application installation as read-only to its non-root process. Documentation shall instruct operators to mount input, plugins, and fonts read-only. The images shall not copy mounted input, plugin, font, credential, or cache content into their layers.
+
+A provider package under `/plugins` is arbitrary executable code trusted by the operator who mounts it. The project shall not represent a mounted plugin as sandboxed, validate it by executing an installer, or load it from a network location. Plugin-discovery errors shall not expose plugin source contents, environment values, credential paths, source-document paths, or cache paths.
+
+Font files under `/fonts` are also operator-provided input to a native font
+parser. The image shall not install them, execute metadata or font-provided
+code, fetch related resources, or copy them to another mount. A font parsing or
+matching failure shall fall back to the existing Noto source-measurement path
+without logging font bytes, credential data, or source-document content.
+
+The image shall not contain credentials, tokens, `.env.local`, confidential sample data, derived confidential artifacts, or provider-result caches. It may read a credential mounted at the fixed secret path of FR-2026-09-07-01 and existing Google configuration environment variables only when the selected provider requires them. It shall not print their values or paths, copy a credential into `/output` or `/runtime-cache`, or set a credential environment variable when an explicit caller-provided value takes precedence. SR-2026-08-24-01's Google Cloud remote-data and least-privilege requirements remain unchanged.
+
+Container startup shall not fetch or install Python packages, resolve dependencies, or download executable plugin code. The one permitted first-use network activity is the existing, explicitly documented runtime-asset bootstrap performed by the container under FR-2026-09-07-01; it shall download only the approved optional Noto assets and PaddleOCR model assets through their existing providers. It shall not process source documents before those downloads complete. Operators may pre-populate and mount `/runtime-cache` when runtime network access is not acceptable.
+
+### Rationale
+
+Container mounts make host data and executable extensions available to the pipeline. Explicit read/write boundaries, non-root execution, and clear credential precedence reduce accidental disclosure while retaining normal provider configuration and model bootstrapping.
+
+### Notes
+
+`/runtime-cache` contains font and model assets only; it is not an authorization for source-adjacent OCR or translation result caching. The established `PIPELINE_PLUGIN_CACHE` opt-in remains disabled by default and is governed by SR-2026-08-27-01.
+
+Automated tests shall use synthetic mounts, configuration, and plugins. They shall verify non-root execution, credential precedence, no credential copying or logging, read-only-mount documentation, no startup dependency installation, and that mounted plugin code is described as trusted rather than sandboxed.
 
 ---

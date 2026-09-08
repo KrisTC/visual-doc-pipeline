@@ -52,6 +52,7 @@ from pipeline.folder_replacement.pdf import (
     _pdf_expansion_geometry_is_known,
     _pdf_fitted_region_operations,
     _pdf_is_candidate_bullet_error,
+    _pdf_source_font_supports_text,
     _pdf_text_advance,
 )
 from pipeline.folder_replacement.xlsx import _replace_drawing
@@ -89,6 +90,19 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementPdfTests(FolderReplacementTestCase):
+    # Verifies FR-2026-08-04-09 and FR-2026-09-07-04.
+    def test_source_font_pdf_rejects_simple_font_without_encoding_evidence(self) -> None:
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/TrueType"),
+            NameObject("/BaseFont"): NameObject("/SyntheticSubset"),
+            NameObject("/Encoding"): NameObject("/WinAnsiEncoding"),
+        })
+
+        self.assertFalse(
+            _pdf_source_font_supports_text("replacement", (NameObject("/F1"), 12), {"/F1": font})
+        )
+
     # Verifies FR-2026-08-04-07.
     def test_pdf_basic_layout_embeds_a_fitted_font_for_bounded_freetext(self) -> None:
         with TemporaryDirectory() as temporary:

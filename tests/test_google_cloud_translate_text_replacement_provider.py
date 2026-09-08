@@ -79,7 +79,7 @@ class _FakeClientFactory:
 
 class GoogleCloudTranslateProviderTests(unittest.TestCase):
     # Verifies FR-2026-08-24-04.
-    def test_translates_text_through_the_global_endpoint(self) -> None:
+    def test_derives_the_project_and_uses_the_default_eu_endpoint(self) -> None:
         client_factory = _FakeClientFactory(_FakeResponse([_FakeTranslation("Hola")]))
 
         result = self._replace(
@@ -88,9 +88,9 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
 
         self.assertEqual("Hola", result.text)
         self.assertEqual(0.0, result.confidence)
-        self.assertEqual(["translate.googleapis.com"], client_factory.endpoints)
+        self.assertEqual(["translate-eu.googleapis.com"], client_factory.endpoints)
         self.assertEqual(
-            "projects/synthetic-project/locations/global",
+            "projects/synthetic-project/locations/europe-west1",
             client_factory.client.requests[0]["parent"],
         )
         self.assertEqual(["Hello"], client_factory.client.requests[0]["contents"])
@@ -105,13 +105,13 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         result = self._replace(
             TextReplacementRequest("report.docx", True, "en", "fr"),
             client_factory,
-            {"GOOGLE_CLOUD_TRANSLATION_LOCATION": "europe-west1"},
+            {"GOOGLE_CLOUD_TRANSLATION_LOCATION": "europe-west3"},
         )
 
         self.assertEqual("rapport.docx", result.text)
         self.assertEqual(["translate-eu.googleapis.com"], client_factory.endpoints)
         self.assertEqual(
-            "projects/synthetic-project/locations/europe-west1",
+            "projects/synthetic-project/locations/europe-west3",
             client_factory.client.requests[0]["parent"],
         )
         self.assertEqual(["report"], client_factory.client.requests[0]["contents"])
@@ -143,7 +143,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         client_factory = _FakeClientFactory(
             _FakeResponse([_FakeTranslation("translated")])
         )
-        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        configuration = _Configuration("synthetic-project", "europe-west1", "translate-eu.googleapis.com")
         modules = _GoogleModules(cast(Callable[[str], _TranslationClient], client_factory.create_client))
         provider = GoogleCloudTranslateProvider()
         with (
@@ -161,7 +161,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
 
         load_configuration.assert_called_once_with()
         load_modules.assert_called_once_with()
-        self.assertEqual(["translate.googleapis.com"], client_factory.endpoints)
+        self.assertEqual(["translate-eu.googleapis.com"], client_factory.endpoints)
         self.assertEqual(2, len(client_factory.client.requests))
 
     # Verifies FR-2026-09-03-04.
@@ -223,7 +223,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
 
     # Verifies FR-2026-08-28-01.
     def test_retries_client_initialization_after_construction_failure(self) -> None:
-        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        configuration = _Configuration("synthetic-project", "europe-west1", "translate-eu.googleapis.com")
         client = _FakeClient(_FakeResponse([_FakeTranslation("translated")]))
         create_client = Mock(side_effect=[RuntimeError("temporary"), client])
         modules = _GoogleModules(cast(Callable[[str], _TranslationClient], create_client))
@@ -251,8 +251,8 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
         client_factory = _FakeClientFactory(_FakeResponse([_FakeTranslation("translated")]))
         modules = _GoogleModules(cast(Callable[[str], _TranslationClient], client_factory.create_client))
         configurations = [
-            _Configuration("first-project", "global", "translate.googleapis.com"),
-            _Configuration("second-project", "europe-west1", "translate-eu.googleapis.com"),
+            _Configuration("first-project", "europe-west1", "translate-eu.googleapis.com"),
+            _Configuration("second-project", "europe-west3", "translate-eu.googleapis.com"),
         ]
         request = TextReplacementRequest("text", False, "en", "fr")
         with (
@@ -270,7 +270,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
 
         self.assertEqual(2, load_configuration.call_count)
         self.assertEqual(
-            ["translate.googleapis.com", "translate-eu.googleapis.com"], client_factory.endpoints
+            ["translate-eu.googleapis.com", "translate-eu.googleapis.com"], client_factory.endpoints
         )
 
     # Verifies FR-2026-08-24-04 and SR-2026-08-24-01.
@@ -291,6 +291,42 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
                     self.assertRaisesRegex(TextReplacementProviderError, "configuration"),
                 ):
                     provider.replace(TextReplacementRequest("Hello", False, "en", "fr"))
+
+        load_modules.assert_not_called()
+
+    # Verifies FR-2026-08-24-04 and SR-2026-08-24-01.
+    def test_uses_an_explicit_project_when_the_credential_has_no_project_id(self) -> None:
+        client_factory = _FakeClientFactory(_FakeResponse([_FakeTranslation("translated")]))
+        with TemporaryDirectory() as temporary_directory:
+            credential_path = _write_synthetic_credential(Path(temporary_directory), project_id=None)
+            environment = _environment(credential_path, GOOGLE_CLOUD_PROJECT="explicit-project")
+            modules = _GoogleModules(cast(Callable[[str], _TranslationClient], client_factory.create_client))
+            with (
+                patch.dict(os.environ, environment, clear=True),
+                patch(
+                    "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules",
+                    return_value=modules,
+                ),
+            ):
+                GoogleCloudTranslateProvider().replace(TextReplacementRequest("text", False, "en", "fr"))
+
+        self.assertEqual(
+            "projects/explicit-project/locations/europe-west1", client_factory.client.requests[0]["parent"]
+        )
+
+    # Verifies FR-2026-08-24-04 and SR-2026-08-24-01.
+    def test_rejects_a_credential_without_a_project_id_when_not_overridden(self) -> None:
+        provider = GoogleCloudTranslateProvider()
+        with TemporaryDirectory() as temporary_directory:
+            credential_path = _write_synthetic_credential(Path(temporary_directory), project_id=None)
+            with (
+                patch.dict(os.environ, _environment(credential_path), clear=True),
+                patch(
+                    "pipeline.text_replacement_plugins.google_cloud_translate._load_google_modules"
+                ) as load_modules,
+                self.assertRaisesRegex(TextReplacementProviderError, "configuration"),
+            ):
+                provider.replace(TextReplacementRequest("text", False, "en", "fr"))
 
         load_modules.assert_not_called()
 
@@ -346,7 +382,7 @@ class GoogleCloudTranslateProviderTests(unittest.TestCase):
             return GoogleCloudTranslateProvider().replace(request)
 
     def _patched_client(self, client: _TranslationClient) -> AbstractContextManager[None]:
-        configuration = _Configuration("synthetic-project", "global", "translate.googleapis.com")
+        configuration = _Configuration("synthetic-project", "europe-west1", "translate-eu.googleapis.com")
         modules = _GoogleModules(lambda _endpoint: client)
         return _patch_client_configuration(configuration, modules)
 
@@ -355,15 +391,17 @@ def _environment(credential_path: Path, **additional_values: str) -> dict[str, s
     """Return an isolated provider environment with one synthetic credential file."""
     return {
         "GOOGLE_APPLICATION_CREDENTIALS": str(credential_path),
-        "GOOGLE_CLOUD_PROJECT": "synthetic-project",
         **additional_values,
     }
 
 
-def _write_synthetic_credential(directory: Path) -> Path:
+def _write_synthetic_credential(directory: Path, project_id: str | None = "synthetic-project") -> Path:
     """Create a minimal non-secret service-account-shaped JSON file for validation."""
     credential_path = directory / "credential.json"
-    credential_path.write_text(json.dumps({"type": "service_account"}), encoding="utf-8")
+    credential = {"type": "service_account"}
+    if project_id is not None:
+        credential["project_id"] = project_id
+    credential_path.write_text(json.dumps(credential), encoding="utf-8")
     return credential_path
 
 

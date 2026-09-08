@@ -11,7 +11,7 @@ import zipfile
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
-from urllib.parse import urldefrag, urljoin, urlsplit
+from urllib.parse import unquote, urldefrag, urljoin, urlsplit
 from urllib.request import Request, urlopen
 
 from pipeline.terminal_progress import LiveProgress
@@ -22,6 +22,7 @@ ALLOWLIST = ROOT / "approved-dependency-artifact-hashes.toml"
 CACHE_DIRECTORY = ROOT / ".dependency-artifact-cache"
 PYPROJECT = ROOT / "pyproject.toml"
 CHUNK_SIZE = 1024 * 1024
+ARTIFACT_USER_AGENT = "visual-doc-pipeline-artifact-verifier/1.0"
 REQUIREMENT_ID_PATTERN = re.compile(r"SR-\d{4}-\d{2}-\d{2}-\d{2}\Z")
 EXACT_PYTHON_VERSION_PATTERN = re.compile(r"==(?P<major>\d+)\.(?P<minor>\d+)\.\d+\Z")
 
@@ -114,7 +115,7 @@ def _wheel_urls(registry: str, distribution: str, version: str) -> tuple[str, ..
     urls: set[str] = set()
     for link in parser.links:
         url, _ = urldefrag(urljoin(index_url, link))
-        filename = Path(urlsplit(url).path).name
+        filename = unquote(Path(urlsplit(url).path).name)
         wheel_parts = filename.removesuffix(".whl").rsplit("-", maxsplit=3)
         if (
             filename.startswith(filename_prefix)
@@ -140,7 +141,10 @@ def _download_artifact(
         with destination.open("rb") as existing:
             while chunk := existing.read(CHUNK_SIZE):
                 digest.update(chunk)
-    request = Request(url, headers={"Range": f"bytes={existing_size}-"} if existing_size else {})
+    headers = {"User-Agent": ARTIFACT_USER_AGENT}
+    if existing_size:
+        headers["Range"] = f"bytes={existing_size}-"
+    request = Request(url, headers=headers)
     with urlopen(request) as response:
         append = existing_size > 0 and response.status == 206
         if not append:

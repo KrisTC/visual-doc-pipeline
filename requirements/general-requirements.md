@@ -1471,3 +1471,137 @@ eligibility rules, and failure handling remain in force unless this requirement
 expressly changes them.
 
 ---
+
+## FR-2026-09-07-01
+
+| Property | Value |
+|----------|-------|
+| Title | Run folder replacement through fixed-path CPU and GPU OCI container interfaces |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-approved implementation decision |
+| Date Added | 2026-09-07 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-27-02, FR-2026-08-27-04, FR-2026-09-07-02, FR-2026-09-07-03, FR-2026-09-07-04, TR-2026-09-07-01, SR-2026-09-07-01 |
+
+### Description
+
+The project shall publish distinct Linux `x86_64` CPU and NVIDIA GPU OCI image variants whose user-facing workload is the existing folder-replacement command. The variants shall use the same fixed paths, entrypoint, mount contract, and folder-replacement options. Each image shall use `/input` as its fixed source root and `/output` as its fixed destination root. It shall invoke `scripts/folder_replacement.py` with those roots before every user-supplied folder-replacement option. A container user shall therefore supply only the existing command options, such as `--source-language`, `--target-language`, `--ocr`, and `--text-replacement`; it shall not accept or document positional input or output roots in the container interface.
+
+`/input` shall exist and be a directory. `/output` shall be a writable directory, may be created by the container when its parent is writable, and shall not resolve to `/input` or a descendant of `/input`. The image shall not write source documents. Its usage documentation shall mount `/input` read-only and mount `/output` separately as writable storage. Existing per-file failure isolation, output hierarchy preservation, exit statuses, and all folder-replacement options remain unchanged.
+
+Each image shall reserve `/runtime-cache` as writable storage for runtime assets. It shall set the non-root runtime user's home and XDG cache root beneath that directory so the application's optional-font cache and PaddleOCR's established normal per-user model-cache location reside there. It shall not add a project-owned model format, model cache, or integrity mechanism. A user may mount durable writable storage at `/runtime-cache`; an unmounted cache is ephemeral.
+
+Before its first folder-replacement invocation against an empty runtime cache, each container variant shall initialize the runtime assets required by its supported PaddleOCR languages and fitted-layout modes. The initialization shall be idempotent, use the existing runtime-asset bootstrap behaviours, finish before any input is processed, and fail the container without processing input when it cannot complete. A populated cache shall not be re-downloaded or re-initialized merely because a new container starts. This container-only behaviour supersedes FR-2026-08-27-04's requirement for an operator to run a separate bootstrap command before normal folder replacement; it does not change the non-container command.
+
+Each image shall reserve `/plugins` for optional provider plugins as defined by FR-2026-09-07-02 and `/fonts` for the optional source-font catalog defined by FR-2026-09-07-04. It shall reserve `/run/secrets/google-application-credentials.json` as the recommended read-only target for a Google service-account credential. When that regular file exists, the image shall set `GOOGLE_APPLICATION_CREDENTIALS` to that absolute path unless the invoking process explicitly supplied the variable. When `google_cloud_translate` is selected, `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_TRANSLATION_LOCATION` shall remain optional explicit overrides: the provider derives the project from the credential file and defaults to `europe-west1` under FR-2026-08-24-04.
+
+The usage documentation shall give one CPU-image example and one NVIDIA GPU-image example. Both shall request a pseudo-terminal with Docker's `--tty` option so the existing Rich progress display can render live, mount the fixed input and output paths, mount a Google service-account credential at its fixed target for the default Google Translation provider, and pass only folder-replacement options after the image name. The NVIDIA example shall request the GPU through the container runtime rather than exposing a new pipeline device option. The examples shall state that the credential project and `europe-west1` location are selected without Docker environment variables, and show the optional runtime-cache, plugin, font, and override environment configuration separately. The documentation shall state that `--interactive` is not required for progress and that non-TTY invocation remains supported with non-live terminal output.
+
+### Rationale
+
+Fixed in-container paths make the container interface a thin packaging of the established command, rather than a second configuration layer. A durable cache avoids repeated model and font downloads, while automatic first-use setup keeps the single-command workflow usable.
+
+### Notes
+
+The runtime cache is distinct from the opt-in source-adjacent provider-result cache of FR-2026-08-27-10 and SR-2026-08-27-01. The images shall not set or document `PIPELINE_PLUGIN_CACHE`; mounting `/input` read-only intentionally prevents that optional cache from being written there.
+
+The CPU image shall contain the exact locked CPU `paddlepaddle` wheel and no CUDA, cuDNN, `paddlepaddle-gpu`, or NVIDIA driver components. It shall run without `--gpus`. The GPU image shall contain the CUDA-enabled Paddle runtime described by FR-2026-09-07-03 and require an exposed NVIDIA device. Apple Silicon users may run the `linux/amd64` CPU image with Docker Desktop emulation and an explicit platform request; native Linux ARM64 images are out of scope because the selected PaddlePaddle version has no compatible Linux ARM64 wheel.
+
+Automated tests shall use synthetic input and a temporary container cache. They shall verify the fixed arguments passed to the folder-replacement command, rejection of invalid fixed roots, first-use initialization before source processing, cache reuse, writable output, and propagation of command exit status. They shall not use credentials, confidential samples, or a real GPU.
+
+---
+
+## FR-2026-09-07-02
+
+| Property | Value |
+|----------|-------|
+| Title | Discover trusted provider plugins from the fixed container plugin mount |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-07 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-03-03, FR-2026-09-07-01, SR-2026-09-07-01 |
+
+### Description
+
+In addition to built-in providers, the container shall discover OCR provider packages below `/plugins/ocr/<provider-name>/` and text-replacement provider packages below `/plugins/text_replacement/<provider-name>/`. Each provider directory shall be a Python package and shall satisfy the corresponding existing provider contract, including its required factory metadata. The container shall discover these packages before constructing command help, so mounted providers appear in the normal provider reference sections and may be selected using the existing `--ocr` or `--text-replacement` option.
+
+`/plugins` shall be a read-only, optional mount. An absent or empty mount shall leave built-in discovery and the normal command unchanged. A mounted provider shall not replace or shadow a built-in provider, and duplicate provider names within one provider kind shall fail before input processing with a concise configuration error. The error shall identify only the conflicting provider name and kind, not source-document, credential, or environment data.
+
+The container shall not install packages, resolve dependencies, download code, or modify the plugin mount at startup. A mounted plugin may use only dependencies already present in the image. A user needing additional plugin dependencies shall construct a derived image as defined by TR-2026-09-07-01.
+
+### Rationale
+
+The fixed mount supports user-managed extensions without requiring users to rebuild the main image for ordinary plugin-code changes. Failing closed on name collisions keeps provider selection predictable.
+
+### Notes
+
+Mounted provider code is a trusted-code boundary, not data input. Its security constraints are defined by SR-2026-09-07-01. The mount layout deliberately does not require a `PYTHONPATH` setting or a second plugin-path command option.
+
+Automated tests shall create synthetic provider packages in temporary plugin roots. They shall verify discovery for both provider kinds, normal help visibility and selection, absence behaviour, collision rejection, and that no runtime dependency-installation command is invoked.
+
+---
+
+## FR-2026-09-07-04
+
+| Property | Value |
+|----------|-------|
+| Title | Use an optional mounted font catalog for container source-font measurement |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-07 |
+| Related Requirements | FR-2026-08-27-02, FR-2026-09-07-01, TR-2026-09-07-01, SR-2026-09-07-01 |
+
+### Description
+
+The container shall optionally accept a read-only font directory mounted at
+`/fonts`. When that directory is present, the source-font resolver used by
+`preserve-basic-layout-source-font` shall recursively discover supported font
+files from that directory and use their family and style metadata for source
+measurement. The resolver shall prefer an exact embedded source face, then an
+exact matching face from `/fonts`, then an exact matching face supplied by the
+image's own font environment, and finally the committed Noto fallback required
+by FR-2026-08-27-02.
+
+Font discovery shall be deterministic for the same mounted files: it shall use
+stable path ordering, deterministic family/style matching, and no ambient
+host-font search outside the container. A missing, unreadable, malformed, or
+unsupported mounted font shall be ignored for matching and shall use the
+existing Noto fallback; it shall not make an otherwise eligible replacement
+fail solely because the optional mount is present.
+
+Mounted fonts shall affect source measurement and source-font output selection
+only when the existing source-font rules permit that face to render every
+replacement glyph and to be represented safely by the output format. They
+shall not replace the committed Noto faces used by `preserve-basic-layout`,
+portable fallback segments, OCR bitmap rendering, or deterministic tests. The
+pipeline shall never copy, embed, modify, subset, or redistribute a mounted
+font file merely because it was used for measurement.
+
+The container usage documentation shall show mounting a host font directory or
+an application-managed font bundle to `/fonts:ro`. It shall state that mounted
+fonts are optional, operator-supplied inputs and that their licensing and
+suitability remain the operator's responsibility.
+
+### Rationale
+
+Documents often name fonts that are not distributed with the application.
+Making a selected font directory visible lets source-font mode obtain more
+accurate source metrics while preserving the existing portable Noto output and
+fallback guarantees.
+
+### Notes
+
+This requirement changes only the container's source-font catalog. It does not
+make host fonts part of the reproducible image, and it does not permit the
+pipeline to search an arbitrary host filesystem. The non-container command's
+existing installed-font behaviour remains unchanged.
+
+Automated tests shall use synthetic TTF/OTF fixtures in a temporary `/fonts`
+root and a synthetic document requesting their family names. They shall verify
+embedded-before-mounted precedence, mounted-before-image precedence,
+deterministic matching, malformed-font fallback, absence behaviour, and that
+portable Noto output is unchanged.
+
+---

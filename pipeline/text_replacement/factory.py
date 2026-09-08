@@ -10,6 +10,7 @@ import re
 from types import MappingProxyType, ModuleType
 from typing import cast
 
+from pipeline.mounted_plugins import discover_mounted_plugin_packages
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.provider_cache import CachingTextReplacementProvider, caching_is_enabled
@@ -83,6 +84,16 @@ class TextReplacementProviderFactory:
             creators[provider_name] = _provider_creator(plugin_module)
             descriptions[provider_name] = _description(plugin_module.__doc__)
             local_evaluation_eligibility[provider_name] = _local_evaluation_eligible(plugin_module)
+            cache_identities[provider_name] = _cache_identity(plugin_module)
+            short_names[provider_name] = _short_name(plugin_module)
+        for provider_name, plugin_module in discover_mounted_plugin_packages(
+            "text_replacement", set(creators)
+        ):
+            creators[provider_name] = _provider_creator(plugin_module)
+            descriptions[provider_name] = _description(plugin_module.__doc__)
+            local_evaluation_eligibility[provider_name] = _local_evaluation_eligible(
+                plugin_module
+            )
             cache_identities[provider_name] = _cache_identity(plugin_module)
             short_names[provider_name] = _short_name(plugin_module)
         return cls(creators, descriptions, local_evaluation_eligibility, cache_identities, short_names)

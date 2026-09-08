@@ -10,8 +10,6 @@ dependencies = [
     "numpy",
     "openpyxl",
     "paddleocr==3.7.0",
-    "paddlepaddle==3.3.1; sys_platform != 'win32'",
-    "paddlepaddle-gpu==3.3.1; sys_platform == 'win32'",
     "pillow",
     "pypdf",
     "pypdfium2==5.13.0",
@@ -20,6 +18,16 @@ dependencies = [
     "regex",
     "rich>=15.0.0",
     "skia-python>=144.0.post2",
+    "torch==2.13.0+cpu; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "paddlepaddle==3.3.1; sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+gpu = [
+    "paddlepaddle==3.3.1; sys_platform != 'win32' and (sys_platform != 'linux' or platform_machine != 'x86_64')",
+    "paddlepaddle-gpu==3.3.1; sys_platform == 'win32' or (sys_platform == 'linux' and platform_machine == 'x86_64')",
 ]
 
 [dependency-groups]
@@ -32,13 +40,23 @@ dev = [
 exclude-newer = "7 days"
 no-build = true
 package = false
+conflicts = [
+    [{ extra = "cpu" }, { extra = "gpu" }],
+]
 
 [tool.uv.sources]
 paddlepaddle-gpu = { index = "paddle-cu126" }
+torch = { index = "pytorch-cpu", marker = "sys_platform == 'linux' and platform_machine == 'x86_64'" }
 
 [[tool.uv.index]]
 name = "paddle-cu126"
 url = "https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+explicit = true
+exclude-newer = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu/"
 explicit = true
 exclude-newer = false
 

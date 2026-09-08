@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
 import tomllib
 from collections.abc import Iterable, Mapping
@@ -135,10 +136,12 @@ def _index_configuration(uv: Mapping[str, object], errors: list[str]) -> IndexCo
     for package_name, source in mapping(uv.get("sources")).items():
         source_mapping = mapping(source)
         index_name = source_mapping.get("index")
+        marker = source_mapping.get("marker")
         if (
-            set(source_mapping) != {"index"}
+            set(source_mapping) not in ({"index"}, {"index", "marker"})
             or not isinstance(index_name, str)
             or index_name not in explicit_indexes
+            or ("marker" in source_mapping and not isinstance(marker, str))
         ):
             errors.append(
                 f"pyproject.toml: source for {package_name!r} must select a configured explicit index."
@@ -273,26 +276,32 @@ def success_message(
     )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pyproject", type=Path, default=PYPROJECT)
+    parser.add_argument("--lockfile", type=Path, default=LOCKFILE)
+    arguments = parser.parse_args(argv)
+    pyproject_path = arguments.pyproject.resolve()
+    lockfile_path = arguments.lockfile.resolve()
     errors: list[str] = []
     project_name: str | None = None
     approved_artifacts = ApprovedArtifacts(set(), 0)
-    if not PYPROJECT.is_file():
-        errors.append("pyproject.toml is missing.")
+    if not pyproject_path.is_file():
+        errors.append(f"{pyproject_path}: pyproject.toml is missing.")
         index_configuration = IndexConfiguration(None, {}, {})
     else:
-        pyproject = load_toml(PYPROJECT)
+        pyproject = load_toml(pyproject_path)
         index_configuration = validate_pyproject(pyproject, errors)
         project_name_value = mapping(pyproject.get("project")).get("name")
         project_name = project_name_value if isinstance(project_name_value, str) else None
 
-    if not LOCKFILE.is_file():
-        errors.append("uv.lock is missing.")
+    if not lockfile_path.is_file():
+        errors.append(f"{lockfile_path}: uv.lock is missing.")
         lockfile_validation = LockfileValidation(0, 0)
     else:
         approved_artifacts = load_approved_artifacts(ALLOWLIST, errors)
         lockfile_validation = validate_lockfile(
-            load_toml(LOCKFILE),
+            load_toml(lockfile_path),
             project_name,
             index_configuration,
             approved_artifacts.package_versions,

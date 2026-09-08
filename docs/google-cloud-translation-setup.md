@@ -12,12 +12,12 @@ Run the helper with an absolute path or a path relative to your current director
 uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file ../credentials/translation-service-account.json
 ```
 
-To use the EU multi-regional endpoint, pass a continental-European location such as `europe-west1`:
+`europe-west1` is the default EU location. To choose another continental-European location, pass it explicitly:
 
 ```shell
-uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file /absolute/path/to/translation-service-account.json --location europe-west1
+uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file /absolute/path/to/translation-service-account.json --location europe-west3
 ```
 
-The helper writes `GOOGLE_APPLICATION_CREDENTIALS` as a quoted forward-slash path that uv can load on Windows, derives and writes `GOOGLE_CLOUD_PROJECT`, and writes `GOOGLE_CLOUD_TRANSLATION_LOCATION` only when specified. It preserves unrelated `.env.local` entries and migrates the former PowerShell helper's marked block. A failed credential validation or probe leaves the existing file unchanged.
+The helper writes `GOOGLE_APPLICATION_CREDENTIALS` as a quoted forward-slash path that uv can load on Windows. The provider derives its project from the credential JSON and defaults to `europe-west1`, so it does not write either corresponding environment variable unless a non-default location was explicitly requested. A manually supplied `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_TRANSLATION_LOCATION` remains an override. The helper preserves unrelated `.env.local` entries and migrates the former PowerShell helper's marked block. A failed credential validation or probe leaves the existing file unchanged.
 
 Further Google guidance: [Cloud Translation setup](https://docs.cloud.google.com/translate/docs/setup), [authentication](https://docs.cloud.google.com/translate/docs/authentication), [access control](https://docs.cloud.google.com/translate/docs/access-control), and [global and multi-regional endpoints](https://docs.cloud.google.com/translate/docs/advanced/endpoints).

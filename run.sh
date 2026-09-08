@@ -26,6 +26,6 @@ fi
 
 cd "${project_root}"
 if [[ -n "${env_file}" ]]; then
-    exec uv run --env-file "${env_file}" python "$@"
+    exec uv run --exact --extra gpu --env-file "${env_file}" python "$@"
 fi
-exec uv run python "$@"
+exec uv run --exact --extra gpu python "$@"

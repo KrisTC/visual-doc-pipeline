@@ -78,7 +78,7 @@ if ($null -ne $envFile) {
     }
 }
 
-$uvArguments = @('run')
+$uvArguments = @('run', '--exact', '--extra', 'gpu')
 if ($null -ne $selectedEnvFile) {
     Set-ManagedDotenvPath $selectedEnvFile
     $uvEnvironmentFile = $selectedEnvFile -replace '\\', '/'

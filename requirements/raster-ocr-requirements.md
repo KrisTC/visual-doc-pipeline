@@ -100,7 +100,7 @@ For every non-skipped rotated case, the contract test shall verify that the prov
 |----------|-------|
 | Title | PaddleOCR Windows and accelerator runtime support |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request following Windows PaddleOCR runtime failure |
 | Date Added | 2026-08-21 |
 | Related Requirements | FR-2026-08-01-02, TR-2026-08-01-01, SR-2026-08-01-01, SR-2026-08-21-01 |
@@ -111,17 +111,17 @@ The PaddleOCR provider shall select its execution device automatically after Pad
 
 When automatic-engine initialization or inference fails, the provider shall retry the request once with an explicit CPU engine. A failure from that CPU retry shall raise `OcrProviderError` without further fallback.
 
-On Windows CPU inference, the provider shall disable PaddleOCR's OneDNN/MKLDNN execution path and use Paddle's ordinary CPU execution mode. This workaround shall not apply to GPU inference or non-Windows CPU inference.
+On Windows and Linux CPU inference, the provider shall disable PaddleOCR's OneDNN/MKLDNN execution path and use Paddle's ordinary CPU execution mode. This workaround shall not apply to GPU inference or macOS CPU inference.
 
 ### Rationale
 
-PaddleOCR documents NVIDIA GPU acceleration and the project now provides a Windows test runner. The pinned Windows CPU runtime fails in OneDNN execution, while the same test input succeeds with OneDNN disabled. Automatic GPU selection preserves available performance improvements without making GPU hardware mandatory.
+PaddleOCR documents NVIDIA GPU acceleration and the project now provides a Windows test runner. The pinned Windows and Linux CPU runtimes fail in OneDNN execution, while the same test input succeeds with OneDNN disabled. Automatic GPU selection preserves available performance improvements without making GPU hardware mandatory.
 
 ### Notes
 
 The provider shall not add a device-selection command-line option in this feature. Its automatic GPU choice depends on the PaddlePaddle distribution and the locally installed NVIDIA driver and CUDA runtime. The current CPU-only environment remains valid and shall select CPU. A CUDA-enabled PaddlePaddle distribution may be adopted only when it can comply with the repository's uv lockfile, PyPI-only, no-source-build, and dependency-cooldown policies. The provider shall not import PaddlePaddle separately to probe device availability before PaddleOCR initializes.
 
-Automated tests shall mock Paddle runtime availability and engine behavior to verify device selection, the Windows CPU OneDNN setting, and the single GPU-to-CPU fallback without requiring CUDA hardware. GPU inference verification remains an optional local check on compatible hardware.
+Automated tests shall mock Paddle runtime availability and engine behavior to verify device selection, the Windows and Linux CPU OneDNN setting, preserved macOS CPU behavior, and the single GPU-to-CPU fallback without requiring CUDA hardware. GPU inference verification remains an optional local check on compatible hardware.
 
 ---
 
@@ -686,7 +686,7 @@ The project shall provide a Windows PowerShell script that discovers the newest 
 
 The setup script shall manage only the `.env.local` `PATH` entry. It shall configure that entry so PaddlePaddle can load the validated NVIDIA DLL directories while preserving the invoking user's existing `PATH`. It shall preserve every user-managed `.env.local` entry, including future provider credentials or other secrets, unchanged. The file shall be ignored by Git and must not be committed. Project commands shall use it when it exists, without requiring CUDA or cuDNN directories to be added permanently to the user's global Windows environment.
 
-The project shall provide repository-root `run.ps1` and executable `run.sh` Python launcher scripts. Each launcher shall accept one or more Python arguments, run `python` with those arguments through `uv run`, and, when the repository-root `.env.local` file exists, pass that file to uv with `--env-file`. The launcher shall also support an explicit dotenv-file override for project-internal setup validation. The launcher shall preserve the Python process's exit code. Every project script that otherwise invokes `uv run python` directly shall invoke the platform-appropriate `run` launcher instead.
+The project shall provide repository-root `run.ps1` and executable `run.sh` Python launcher scripts. Each launcher shall accept one or more Python arguments, run `python` with those arguments through an exact `uv run` synchronisation selecting the root project's `gpu` optional-dependency profile, and, when the repository-root `.env.local` file exists, pass that file to uv with `--env-file`. The launcher shall also support an explicit dotenv-file override for project-internal setup validation. The launcher shall preserve the Python process's exit code. Every project script that otherwise invokes `uv run python` directly shall invoke the platform-appropriate `run` launcher instead.
 
 The setup script shall merge its candidate `PATH` entry with a temporary copy of `.env.local`, then start a fresh process through the PowerShell `run` wrapper using that temporary dotenv-file override. It shall verify that the installed PaddlePaddle distribution reports CUDA compilation support and detects at least one available CUDA device. The script shall report the detected CUDA Toolkit and cuDNN locations and the number of visible devices. It shall exit non-zero without creating `.env.local` when it did not previously exist, or modifying it when it did, if discovery, validation, dotenv loading, or Paddle CUDA-device detection fails. It shall delete the temporary candidate file in every outcome.
 
@@ -703,5 +703,42 @@ The setup script shall not download, install, update, or modify NVIDIA software,
 The setup script shall update the `PATH` entry atomically after the probe succeeds, so a failed run cannot leave a partially written file or overwrite user-managed settings. A malformed or duplicate managed `PATH` entry shall fail with a diagnostic rather than causing the script to rewrite unrelated content. The `PATH` entry is the setup script's only managed part of `.env.local`; users are responsible for adding, rotating, and removing any secrets. Diagnostics and automated tests shall not display secret values.
 
 The `.env.local` file shall be added to `.gitignore` when this requirement is implemented. Automated tests shall mock installation discovery and the child-process probe; they shall not require CUDA hardware or NVIDIA software in CI. They shall verify that the setup script preserves arbitrary user-managed dotenv entries and rolls back cleanly on failure, and that each run wrapper uses `.env.local` only when it exists. The runtime probe is a required local validation on supported Windows machines, while CPU-only platforms remain valid under FR-2026-08-21-01.
+
+---
+
+## FR-2026-09-07-03
+
+| Property | Value |
+|----------|-------|
+| Title | Support opportunistic NVIDIA PaddleOCR acceleration in the OCI image |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-07 |
+| Related Requirements | FR-2026-08-21-01, FR-2026-08-24-03, FR-2026-09-07-01, TR-2026-09-07-01, SR-2026-08-21-01 |
+
+### Description
+
+The GPU OCI image variant defined by FR-2026-09-07-01 shall support Linux `x86_64` hosts with an NVIDIA GPU. It shall contain an exact, CUDA-enabled Linux `paddlepaddle-gpu` wheel and the compatible CUDA and cuDNN user-space runtime libraries selected during image construction. The image shall not contain or attempt to install an NVIDIA kernel driver.
+
+When the host exposes one or more NVIDIA devices through a configured container runtime, the existing PaddleOCR provider shall retain its automatic device selection and use GPU 0. The image shall not add an OCR device CLI option or require a project-specific GPU environment variable. The GPU image shall fail with a concise runtime diagnostic when no compatible device is exposed; FR-2026-09-07-01's CPU image is the deterministic CPU path.
+
+The project shall provide a GPU validation command that starts the published image with a requested GPU and verifies, without processing a source document, that PaddlePaddle is CUDA-enabled and reports at least one visible CUDA device. It shall fail non-zero with a concise diagnostic when the host driver, NVIDIA container runtime, requested device, or image runtime is unavailable. GPU validation is a documented optional hardware check, not a mandatory CI test.
+
+### Rationale
+
+The image must include the user-space components compatible with its pinned Paddle runtime, while the host remains responsible for exposing its driver and GPU through the normal container runtime. A separate CPU image avoids a CUDA wheel's early driver-library load preventing deterministic CPU execution.
+
+### Notes
+
+This requirement adds Linux-container support; it does not alter the Windows CUDA discovery and dotenv configuration of FR-2026-08-24-03. It makes no GPU claim for macOS, non-NVIDIA accelerators, or a host that does not expose a device to the container.
+
+Decision recorded 2026-09-08: publish separate CPU and GPU images. The exact
+Linux `paddlepaddle-gpu` wheel imports `libcuda.so.1` before provider device
+selection, and the NVIDIA container runtime supplies that driver library only
+when a device is requested. The GPU image therefore does not claim CPU fallback;
+the CPU image supplies it using the normal CPU Paddle wheel.
+
+Automated tests shall mock Paddle's CUDA capability boundary and verify image configuration metadata and the validation command's success and failure reporting. A manually run validation on a compatible NVIDIA Linux host shall verify the actual GPU path before a release is published.
 
 ---

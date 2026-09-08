@@ -21,14 +21,20 @@ SHORT_NAME = "gct"
 _CREDENTIALS_ENVIRONMENT_VARIABLE = "GOOGLE_APPLICATION_CREDENTIALS"
 _PROJECT_ENVIRONMENT_VARIABLE = "GOOGLE_CLOUD_PROJECT"
 _LOCATION_ENVIRONMENT_VARIABLE = "GOOGLE_CLOUD_TRANSLATION_LOCATION"
-_GLOBAL_ENDPOINT = "translate.googleapis.com"
 _EU_ENDPOINT = "translate-eu.googleapis.com"
+_DEFAULT_LOCATION = "europe-west1"
 
 
 def cache_identity() -> str:
     """Return the non-secret output-affecting Google configuration for cache keys."""
     project = os.environ.get(_PROJECT_ENVIRONMENT_VARIABLE, "").strip()
-    location = os.environ.get(_LOCATION_ENVIRONMENT_VARIABLE, "global").strip() or "global"
+    credential_path = os.environ.get(_CREDENTIALS_ENVIRONMENT_VARIABLE, "").strip()
+    if not project and credential_path:
+        try:
+            project = _validate_service_account_credential(Path(credential_path)) or ""
+        except TextReplacementProviderError:
+            pass
+    location = os.environ.get(_LOCATION_ENVIRONMENT_VARIABLE, "").strip() or _DEFAULT_LOCATION
     return f"google_cloud_translate:v3:v1:{project}:{location}"
 
 
@@ -188,24 +194,25 @@ def create_provider() -> TextReplacementProvider:
 
 def _load_configuration() -> _Configuration:
     """Validate the local credential-file and endpoint configuration before a request."""
-    project_id = os.environ.get(_PROJECT_ENVIRONMENT_VARIABLE, "").strip()
     credential_path = os.environ.get(_CREDENTIALS_ENVIRONMENT_VARIABLE, "").strip()
-    if not project_id or not credential_path:
+    if not credential_path:
         message = "Google Cloud Translation requires project and service-account credential configuration."
         raise TextReplacementProviderError(message)
 
-    _validate_service_account_credential(Path(credential_path))
-    location = os.environ.get(_LOCATION_ENVIRONMENT_VARIABLE, "").strip()
-    if not location:
-        return _Configuration(project_id, "global", _GLOBAL_ENDPOINT)
+    credential_project_id = _validate_service_account_credential(Path(credential_path))
+    project_id = os.environ.get(_PROJECT_ENVIRONMENT_VARIABLE, "").strip() or credential_project_id
+    if not project_id:
+        message = "Google Cloud Translation requires project and service-account credential configuration."
+        raise TextReplacementProviderError(message)
+    location = os.environ.get(_LOCATION_ENVIRONMENT_VARIABLE, "").strip() or _DEFAULT_LOCATION
     if not location.casefold().startswith("europe-"):
         message = "Google Cloud Translation supports only global or continental-European locations."
         raise TextReplacementProviderError(message)
     return _Configuration(project_id, location, _EU_ENDPOINT)
 
 
-def _validate_service_account_credential(credential_path: Path) -> None:
-    """Reject missing, malformed, or non-service-account JSON without exposing it."""
+def _validate_service_account_credential(credential_path: Path) -> str | None:
+    """Return an optional service-account project ID without exposing credential data."""
     if not credential_path.is_absolute() or not credential_path.is_file():
         message = "Google Cloud Translation service-account credential configuration is invalid."
         raise TextReplacementProviderError(message)
@@ -217,6 +224,8 @@ def _validate_service_account_credential(credential_path: Path) -> None:
     if credential_data.get("type") != "service_account":
         message = "Google Cloud Translation service-account credential configuration is invalid."
         raise TextReplacementProviderError(message)
+    project_id = credential_data.get("project_id")
+    return project_id.strip() if isinstance(project_id, str) and project_id.strip() else None
 
 
 def _load_google_modules() -> _GoogleModules:

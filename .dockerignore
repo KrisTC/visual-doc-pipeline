@@ -1,0 +1,10 @@
+.git
+.venv
+.env.local
+.dependency-artifact-cache
+__pycache__
+*.py[cod]
+sample-data/confidential/
+outputs/
+docs/
+README.md

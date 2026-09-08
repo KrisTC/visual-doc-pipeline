@@ -15,6 +15,15 @@ Project requirements are the source of truth and live in [requirements/](require
 
 ## Normal use
 
+### Recommended: use Docker
+
+For the folder replacement script, start with the Docker workflow. It packages
+the runtime dependencies and provides separate CPU and NVIDIA GPU images. See
+the [container usage guide](docs/container-usage.md) for build and run
+instructions.
+
+### Run locally
+
 The main application is [`scripts/folder_replacement.py`](scripts/folder_replacement.py). The other scripts set up its runtime, configure providers, or support development and evaluation.
 
 Process a folder with the default providers (Google Cloud Translation and PaddleOCR):
@@ -42,7 +51,7 @@ Use `--help` to see all current options, providers, and document-layout modes:
 This project uses Python 3.13.14 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
 
 ```sh
-uv run --no-sync python scripts/sync_verified_dependencies.py
+uv run --no-sync python scripts/sync_verified_dependencies.py --extra gpu
 ```
 
 Check the dependency source and cooldown policy with:

@@ -17,3 +17,48 @@ url = "https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepadd
 sha256 = "dbcbe299e8af3c8b45bede6eff58f473dec5cb333ebefda5d5ac7dc0ebb78fdd"
 size = 579382278
 wheel_tags = "cp313-cp313-win_amd64"
+
+[[artifact]]
+requirement = "SR-2026-09-08-01"
+distribution = "torch"
+version = "2.13.0+cpu"
+url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-linux_s390x.whl"
+sha256 = "966d020354f465672dc7dd10d3a5c6cd17d7eb48620aa1d265b48a1f78f06898"
+size = 134905983
+wheel_tags = "cp313-cp313-linux_s390x"
+
+[[artifact]]
+requirement = "SR-2026-09-08-01"
+distribution = "torch"
+version = "2.13.0+cpu"
+url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_aarch64.whl"
+sha256 = "0b8f7d0423027ae8b90c7977c627f3379f325363a08224dffad9b4b2d684a83d"
+size = 155004088
+wheel_tags = "cp313-cp313-manylinux_2_28_aarch64"
+
+[[artifact]]
+requirement = "SR-2026-09-08-01"
+distribution = "torch"
+version = "2.13.0+cpu"
+url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl"
+sha256 = "3fbf9c9d1f3c10c2d59d04aca426dee9ccc6ceb32d255c61e93acc3b4f75fae6"
+size = 191815667
+wheel_tags = "cp313-cp313-manylinux_2_28_x86_64"
+
+[[artifact]]
+requirement = "SR-2026-09-08-01"
+distribution = "torch"
+version = "2.13.0+cpu"
+url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-win_amd64.whl"
+sha256 = "a17ff48608634db245e17e8bb00a9558554a49aeb1e4f5fe6cd039af2a10515b"
+size = 121934105
+wheel_tags = "cp313-cp313-win_amd64"
+
+[[artifact]]
+requirement = "SR-2026-09-08-01"
+distribution = "torch"
+version = "2.13.0+cpu"
+url = "https://download-r2.pytorch.org/whl/cpu/torch-2.13.0%2Bcpu-cp313-cp313-win_arm64.whl"
+sha256 = "ac7aaf322be4777765a53bed7264a214dd81b3a1d276b93150515a3c5f75e4b0"
+size = 74252794
+wheel_tags = "cp313-cp313-win_arm64"

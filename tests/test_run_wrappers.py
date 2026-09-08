@@ -63,13 +63,13 @@ class RunPowerShellWrapperTests(unittest.TestCase):
             environment = _wrapper_environment(fake_bin, arguments_file)
 
             _run_power_shell(wrapper, environment, "-c", "pass")
-            self.assertEqual("run python -c pass", _read_arguments(arguments_file))
+            self.assertEqual("run --exact --extra gpu python -c pass", _read_arguments(arguments_file))
 
             local_env_file = root / ".env.local"
             local_env_file.write_text("PROVIDER_TOKEN=synthetic\n", encoding="utf-8")
             _run_power_shell(wrapper, environment, "-c", "pass")
             arguments = _read_arguments(arguments_file)
-            self.assertTrue(arguments.startswith("run --env-file=C:/"))
+            self.assertTrue(arguments.startswith("run --exact --extra gpu --env-file=C:/"))
             self.assertNotIn("\\", arguments)
             self.assertTrue(arguments.endswith("/.env.local python -c pass"))
 
@@ -84,7 +84,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
                 "pass",
             )
             arguments = _read_arguments(arguments_file)
-            self.assertTrue(arguments.startswith("run --env-file=C:/"))
+            self.assertTrue(arguments.startswith("run --exact --extra gpu --env-file=C:/"))
             self.assertNotIn("\\", arguments)
             self.assertTrue(arguments.endswith("/candidate.env python -c pass"))
 
@@ -108,7 +108,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
             _run_power_shell(test_runner, _wrapper_environment(fake_bin, arguments_file))
 
             arguments = _read_arguments(arguments_file)
-            self.assertTrue(arguments.startswith("run python -m unittest discover -s "))
+            self.assertTrue(arguments.startswith("run --exact --extra gpu python -m unittest discover -s "))
             self.assertTrue(arguments.endswith("\\tests -p test_*.py"))
 
     # Verifies FR-2026-08-24-03.
@@ -164,13 +164,13 @@ class RunBashWrapperTests(unittest.TestCase):
             environment = _wrapper_environment(fake_bin, arguments_file)
 
             _run_bash(wrapper, environment, "-c", "pass")
-            self.assertEqual(("run", "python", "-c", "pass"), _read_argument_lines(arguments_file))
+            self.assertEqual(("run", "--exact", "--extra", "gpu", "python", "-c", "pass"), _read_argument_lines(arguments_file))
 
             local_env_file = root / ".env.local"
             local_env_file.write_text("PROVIDER_TOKEN=synthetic\n", encoding="utf-8")
             _run_bash(wrapper, environment, "-c", "pass")
             self.assertEqual(
-                ("run", "--env-file", str(local_env_file), "python", "-c", "pass"),
+                ("run", "--exact", "--extra", "gpu", "--env-file", str(local_env_file), "python", "-c", "pass"),
                 _read_argument_lines(arguments_file),
             )
 
@@ -186,7 +186,7 @@ class RunBashWrapperTests(unittest.TestCase):
                 "pass",
             )
             self.assertEqual(
-                ("run", "--env-file", str(override_env_file), "python", "-c", "pass"),
+                ("run", "--exact", "--extra", "gpu", "--env-file", str(override_env_file), "python", "-c", "pass"),
                 _read_argument_lines(arguments_file),
             )
 

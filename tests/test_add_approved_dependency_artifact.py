@@ -125,6 +125,20 @@ class ApprovedDependencyArtifactTests(unittest.TestCase):
         )
 
     # Verifies SR-2026-08-21-02.
+    def test_wheel_urls_accepts_a_url_encoded_local_version(self) -> None:
+        page = '<a href="torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl">cpu</a>'
+        with (
+            patch.object(approval, "urlopen", return_value=_Response(page.encode("utf-8"))),
+            patch.object(approval, "_supported_cpython_tags", return_value=frozenset({"cp313"})),
+        ):
+            urls = approval._wheel_urls("https://registry.example/whl/cpu/", "torch", "2.13.0+cpu")
+
+        self.assertEqual(
+            ("https://registry.example/whl/cpu/torch/torch-2.13.0%2Bcpu-cp313-cp313-manylinux_2_28_x86_64.whl",),
+            urls,
+        )
+
+    # Verifies SR-2026-08-21-02.
     def test_rejects_existing_records_without_replace(self) -> None:
         artifact = approval.Artifact(
             "SR-2026-08-21-01", "demo-package", "1.2.3", "https://example.test/demo.whl", "0" * 64, 1, "py3-none-any"

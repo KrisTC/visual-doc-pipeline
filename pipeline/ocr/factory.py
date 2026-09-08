@@ -10,6 +10,7 @@ import re
 from types import MappingProxyType, ModuleType
 from typing import cast
 
+from pipeline.mounted_plugins import discover_mounted_plugin_packages
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.provider import OcrProvider
 from pipeline.provider_cache import CachingOcrProvider, caching_is_enabled
@@ -68,6 +69,13 @@ class OcrProviderFactory:
                 continue
             plugin_module = import_module(module_info.name)
             provider_name = module_info.name.rpartition(".")[2]
+            creators[provider_name] = _provider_creator(plugin_module)
+            descriptions[provider_name] = _description(plugin_module.__doc__)
+            cache_identities[provider_name] = _cache_identity(plugin_module)
+            short_names[provider_name] = _short_name(plugin_module)
+        for provider_name, plugin_module in discover_mounted_plugin_packages(
+            "ocr", set(creators)
+        ):
             creators[provider_name] = _provider_creator(plugin_module)
             descriptions[provider_name] = _description(plugin_module.__doc__)
             cache_identities[provider_name] = _cache_identity(plugin_module)

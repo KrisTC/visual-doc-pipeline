@@ -285,3 +285,50 @@ page, filtering of decoded native and bitmap text, virtual-flow merging, and
 the safe independent-flow fallback.
 
 ---
+
+## TR-2026-09-07-01
+
+| Property | Value |
+|----------|-------|
+| Title | Build reproducible Linux CPU and GPU OCI images |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-07 |
+| Related Requirements | TR-2026-08-01-01, SR-2026-08-01-01, SR-2026-08-21-01, SR-2026-09-08-01, FR-2026-09-07-01, FR-2026-09-07-02, FR-2026-09-07-03, SR-2026-09-07-01 |
+
+### Description
+
+The repository shall provide Docker build definitions and usage documentation for distinct CPU and GPU Linux `x86_64` OCI images. The root `pyproject.toml` and committed root `uv.lock` shall define their common dependency graph and mutually exclusive `cpu` and `gpu` optional-dependency profiles. The CPU build shall synchronise the locked `cpu` profile; the GPU build shall synchronise the locked `gpu` profile. Each shall install its exact selected locked environment and shall not resolve or upgrade Python dependencies during image startup. Both shall use the same pinned Python version as the project. The CPU image shall install the exact locked PyPI `paddlepaddle` wheel. The GPU image shall select the exact Linux CUDA-enabled PaddlePaddle wheel authorized under SR-2026-08-21-01.
+
+The repository-root `run.sh` and `run.ps1` launchers shall select the `gpu` profile for normal local commands, without introducing a user-facing CPU/GPU launcher option. Its platform markers shall preserve the prior local behaviour: Linux `x86_64` and Windows select CUDA-enabled PaddlePaddle, while macOS and other supported CPU platforms select ordinary PaddlePaddle. A direct `uv` invocation that needs a profile shall select it explicitly. The verified non-default-registry artifact installer shall accept the selected profile and install only approved artifacts reachable from that profile on the current platform. In particular, a CPU image build shall not download or install the CUDA PaddlePaddle artifact from the universal lock.
+
+Every external OCI base image shall be referenced by immutable manifest digest. The build definition shall identify the selected Linux distribution and PaddlePaddle wheel for both images, and the CUDA and cuDNN runtime plus compatibility rationale for the GPU image. The CPU final image shall exclude CUDA, cuDNN, `paddlepaddle-gpu`, and NVIDIA driver components. Each final image shall include only runtime dependencies needed by the pipeline, including Fontconfig configuration and every committed Noto face used by bounded layout or portable output, and shall execute the workload as a non-root user. It shall create the fixed directories required by FR-2026-09-07-01 with ownership and permissions that allow the runtime user to write `/output` and `/runtime-cache` but not the application installation.
+
+The builds shall expose no service port and shall not start a daemon. Their entrypoint shall form the fixed-path folder-replacement invocation specified by FR-2026-09-07-01, append supplied arguments without shell evaluation, and preserve the command's exit status. The CPU build and entrypoint shall not require Docker-in-Docker, host networking, privileged mode, or an NVIDIA device. Each final image shall include the EGL and OpenGL runtime libraries required by the locked `skia-python` wheel. Usage documentation shall make the Linux `x86_64` platform explicit and state that Apple Silicon Docker Desktop runs the CPU image under emulation without NVIDIA GPU support.
+
+A custom-provider image shall be derived from the published base image. Its Docker definition shall install any additional plugin dependencies at build time, pin them in an explicit dependency definition, and subject them to the same wheel-only and provenance controls that apply to project dependencies. It shall not alter the base image's built-in provider packages.
+
+### Rationale
+
+The container must be repeatable enough to debug document-processing output, while GPU runtime compatibility requires explicit version selection. A narrow runtime image and non-root execution reduce the operational surface exposed to untrusted document inputs.
+
+### Notes
+
+The published tags shall distinguish the CPU and GPU variants. The Dockerfile may expose them as named targets, provided the documented build commands select a target explicitly. Native non-`x86_64` variants are out of scope.
+
+Decision recorded 2026-09-08: the CPU image shall use the exact
+`torch==2.13.0+cpu` wheel from PyTorch's official CPU index under
+SR-2026-09-08-01. Its verified wheel digest and lockfile record shall be
+committed before a CPU image is built. This preserves the complete existing
+provider set, including Argos Translate, without Linux CUDA artifacts.
+
+The `cpu` and `gpu` profiles are uv optional dependencies rather than
+dependency groups because they select mutually exclusive runtime variants. uv
+does not select optional dependencies by default; the repository launchers
+provide the normal local `gpu` selection and the Docker build selects its
+profile explicitly.
+
+Automated build checks shall verify lockfile use, digest-pinned bases, final user, entrypoint argument formation, fixed-directory permissions, and absence of runtime package installation. They shall not download model assets, require credentials, or require a GPU.
+
+---

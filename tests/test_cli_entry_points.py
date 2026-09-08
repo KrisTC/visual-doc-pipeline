@@ -15,6 +15,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from PIL import Image
 
+from pipeline import mounted_plugins
 from pipeline.ocr import OcrProviderFactory
 from pipeline.text_replacement import TextReplacementProviderFactory
 from scripts import folder_replacement
@@ -93,6 +94,36 @@ class CliEntryPointTests(unittest.TestCase):
         ):
             with self.subTest(choice=choice):
                 self.assertIn(choice, help_output)
+
+    # Verifies FR-2026-09-07-02.
+    def test_folder_replacement_help_lists_mounted_provider_plugins(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            ocr_package = root / "ocr" / "mounted_ocr"
+            ocr_package.mkdir(parents=True)
+            (ocr_package / "__init__.py").write_text(
+                '"""Mounted OCR help provider."""\n'
+                "from pipeline.ocr_plugins.no_ocr import NoOcrProvider\n"
+                "SHORT_NAME = 'mounted-ocr'\n"
+                "def create_provider():\n"
+                "    return NoOcrProvider()\n",
+                encoding="utf-8",
+            )
+            text_package = root / "text_replacement" / "mounted_text"
+            text_package.mkdir(parents=True)
+            (text_package / "__init__.py").write_text(
+                '"""Mounted text help provider."""\n'
+                "from pipeline.text_replacement_plugins.identity import IdentityProvider\n"
+                "SHORT_NAME = 'mounted-text'\n"
+                "def create_provider():\n"
+                "    return IdentityProvider()\n",
+                encoding="utf-8",
+            )
+            with patch.object(mounted_plugins, "MOUNTED_PLUGIN_DIRECTORY", root):
+                help_text = folder_replacement._argument_parser().format_help()
+
+        self.assertIn("mounted_ocr: Mounted OCR help provider.", help_text)
+        self.assertIn("mounted_text: Mounted text help provider.", help_text)
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_colours_options_for_a_supported_terminal(self) -> None:

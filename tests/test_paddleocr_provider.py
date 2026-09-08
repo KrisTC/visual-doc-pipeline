@@ -11,6 +11,7 @@ import warnings
 import numpy as np
 from PIL import Image
 
+from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr_plugins.paddleocr import (
     AUTO_DEVICE,
@@ -111,22 +112,38 @@ class PaddleOcrProviderTests(unittest.TestCase):
         )
 
     # Verifies FR-2026-08-21-01.
-    def test_windows_cpu_engine_disables_mkldnn(self) -> None:
-        created: list[dict[str, object]] = []
+    def test_cpu_inference_failure_does_not_claim_a_gpu_fallback(self) -> None:
+        provider = PaddleOcrProvider()
+        cpu_record = _EngineRecord(cast(PaddleOcrEngine, _Engine(RuntimeError("CPU failed"))), CPU_DEVICE)
 
-        def create_engine(**kwargs: object) -> _Engine:
-            created.append(kwargs)
-            return _Engine(_empty_result())
-
-        paddleocr_module = SimpleNamespace(PaddleOCR=create_engine)
-        with (
-            patch("pipeline.ocr_plugins.paddleocr.import_module", return_value=paddleocr_module),
-            patch("pipeline.ocr_plugins.paddleocr.sys.platform", "win32"),
+        with patch(
+            "pipeline.ocr_plugins.paddleocr._create_engine",
+            side_effect=(cpu_record, cpu_record),
         ):
-            _create_engine("en", CPU_DEVICE)
+            with self.assertRaisesRegex(OcrProviderError, "on CPU") as raised:
+                provider.recognize(OcrRequest(Image.new("RGB", (1, 1)), "en"))
 
-        self.assertEqual(False, created[0]["enable_mkldnn"])
-        self.assertEqual(CPU_DEVICE, created[0]["device"])
+        self.assertNotIn("GPU", str(raised.exception))
+
+    # Verifies FR-2026-08-21-01.
+    def test_windows_and_linux_cpu_engines_disable_mkldnn_but_macos_retains_it(self) -> None:
+        for platform, expected_mkldnn in (("win32", False), ("linux", False), ("darwin", True)):
+            with self.subTest(platform=platform):
+                created: list[dict[str, object]] = []
+
+                def create_engine(**kwargs: object) -> _Engine:
+                    created.append(kwargs)
+                    return _Engine(_empty_result())
+
+                paddleocr_module = SimpleNamespace(PaddleOCR=create_engine)
+                with (
+                    patch("pipeline.ocr_plugins.paddleocr.import_module", return_value=paddleocr_module),
+                    patch("pipeline.ocr_plugins.paddleocr.sys.platform", platform),
+                ):
+                    _create_engine("en", CPU_DEVICE)
+
+                self.assertEqual(expected_mkldnn, created[0]["enable_mkldnn"])
+                self.assertEqual(CPU_DEVICE, created[0]["device"])
 
     # Verifies FR-2026-08-21-01.
     def test_automatic_engine_uses_gpu_when_initialized_paddle_reports_one(self) -> None:

@@ -6043,7 +6043,10 @@ def _pdf_source_font_supports_text(
     if font.get("/Subtype") == "/Type0":
         return False
     if font.get("/ToUnicode") is None:
-        return True
+        # A simple font without a ToUnicode map gives no evidence that its
+        # active encoding contains the replacement glyphs. Do not let a
+        # mounted measurement face turn that uncertainty into PDF output.
+        return False
     try:
         _encoding, character_map = get_encoding(font)
     except (LookupError, ValueError):

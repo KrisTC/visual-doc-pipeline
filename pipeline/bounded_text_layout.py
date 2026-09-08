@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
+import re
+import struct
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
-import re
-import unicodedata
+from typing import Protocol, cast
+
+import regex  # type: ignore[import-untyped]
 
 # skia-python does not publish PEP 561 stubs; this is the native measurement boundary.
 import skia  # type: ignore[import-not-found]
-import regex  # type: ignore[import-untyped]
 
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.portable_fonts import optional_static_typefaces
-
+from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FONT_DIRECTORY = PROJECT_ROOT / "tests" / "assets" / "fonts"
@@ -28,6 +30,8 @@ EMU_PER_PIXEL = 9_525
 PIXELS_PER_POINT = 4.0 / 3.0
 DEFAULT_FONT_SIZE_POINTS = 18.0
 _TOKEN_PATTERN = re.compile(r"[\n\v]|\S+\s*|\s+")
+MOUNTED_FONT_DIRECTORY = Path("/fonts")
+_MOUNTED_FONT_SUFFIXES = frozenset({".otc", ".otf", ".ttc", ".ttf"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +178,110 @@ class EmbeddedTypefaceCandidate:
     typeface: skia.Typeface
 
 
+class _FontManagerLike(Protocol):
+    """The family/style lookup needed from a Skia font manager."""
+
+    def matchFamilyStyle(
+        self, family: str, style: skia.FontStyle
+    ) -> skia.Typeface | None:
+        """Return a candidate face for one family and style request."""
+
+
+class _MountedFontManager:
+    """Deterministic family/style lookup over one mounted font directory."""
+
+    def __init__(self, typefaces: tuple[skia.Typeface, ...]) -> None:
+        self._typefaces = typefaces
+
+    def matchFamilyStyle(
+        self, family: str, style: skia.FontStyle
+    ) -> skia.Typeface | None:
+        for typeface in self._typefaces:
+            if _same_family(typeface.getFamilyName(), family) and _same_style(
+                typeface.fontStyle(), style
+            ):
+                return typeface
+        return None
+
+
+class _SourceFontManagerChain:
+    """Ordered mounted-then-image font managers for source measurement."""
+
+    def __init__(
+        self, managers: tuple[tuple[_FontManagerLike, str], ...]
+    ) -> None:
+        self.candidates = managers
+
+
+@lru_cache(maxsize=1)
+def _mounted_font_manager() -> _MountedFontManager | None:
+    """Load supported fonts from the fixed optional container mount."""
+    if not MOUNTED_FONT_DIRECTORY.is_dir():
+        return None
+    typefaces: list[skia.Typeface] = []
+    for path in sorted(
+        (
+            candidate
+            for candidate in MOUNTED_FONT_DIRECTORY.rglob("*")
+            if candidate.is_file()
+            and candidate.suffix.casefold() in _MOUNTED_FONT_SUFFIXES
+        ),
+        key=lambda candidate: candidate.as_posix(),
+    ):
+        for index in _font_file_face_indexes(path):
+            try:
+                typeface = skia.Typeface.MakeFromFile(str(path), index)
+            except Exception:
+                continue
+            if typeface is not None:
+                typefaces.append(typeface)
+    return _MountedFontManager(tuple(typefaces)) if typefaces else None
+
+
+def _font_file_face_indexes(path: Path) -> tuple[int, ...]:
+    """Return every face index in a valid SFNT collection, or index zero.
+
+    Skia's ``MakeFromFile`` defaults to face zero. Collection files therefore
+    need their TTC header read explicitly so their remaining faces participate
+    in the same deterministic path ordering as standalone font files.
+    """
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(12)
+        if header[:4] != b"ttcf":
+            return (0,)
+        face_count = struct.unpack(">I", header[8:12])[0]
+        if face_count == 0 or 12 + face_count * 4 > path.stat().st_size:
+            return ()
+    except (OSError, struct.error):
+        return ()
+    return tuple(range(face_count))
+
+
+def _default_source_font_manager() -> _FontManagerLike | _SourceFontManagerChain:
+    """Return the fixed mounted catalog followed by the image font manager."""
+    installed = cast(_FontManagerLike, skia.FontMgr.RefDefault())
+    mounted = _mounted_font_manager()
+    if mounted is None:
+        return installed
+    return _SourceFontManagerChain(((mounted, "mounted-source-face"), (installed, "installed-source-face")))
+
+
+def _source_font_manager_candidates(
+    manager: object,
+) -> tuple[tuple[_FontManagerLike, str], ...]:
+    """Return ordered source-font managers while retaining test doubles."""
+    candidates = getattr(manager, "candidates", None)
+    if isinstance(candidates, tuple) and all(
+        isinstance(candidate, tuple)
+        and len(candidate) == 2
+        and isinstance(candidate[1], str)
+        for candidate in candidates
+    ):
+        return cast(tuple[tuple[_FontManagerLike, str], ...], candidates)
+    return ((cast(_FontManagerLike, manager), "installed-source-face"),)
+
+
 @dataclass(frozen=True, slots=True)
 class SourceFontMeasurement:
     """A run-keyed layout model and the faces selected to measure it."""
@@ -241,7 +349,7 @@ def source_font_measurement(
     this shared boundary neither knows package formats nor opens document paths.
     """
     selected_typefaces = dict(typefaces or noto_typefaces())
-    manager = font_manager or skia.FontMgr.RefDefault()
+    manager = font_manager or _default_source_font_manager()
     selections: list[SourceFontSelection] = []
     paragraphs: list[BoundedTextParagraph] = []
     for paragraph_index, paragraph in enumerate(text_box.paragraphs):
@@ -279,17 +387,18 @@ def _source_typeface(
         for candidate in embedded_faces:
             if _same_family(candidate.family, requested_family) and _same_style(candidate.style, requested_style) and _same_family(candidate.typeface.getFamilyName(), requested_family) and _glyphs_available(candidate.typeface, run.text):
                 return candidate.typeface, SourceFontSelection("embedded-source-face", requested_family, candidate.typeface.getFamilyName(), None, reference.original_family, requested_family, reference.script)
-        face = font_manager.matchFamilyStyle(requested_family, requested_style)
-        if face is None:
-            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-face-unavailable", reference.original_family, requested_family, reference.script)
-        elif not _same_family(face.getFamilyName(), requested_family):
-            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-family-mismatch", reference.original_family, requested_family, reference.script)
-        elif not _same_style(face.fontStyle(), requested_style):
-            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-style-mismatch", reference.original_family, requested_family, reference.script)
-        elif not _glyphs_available(face, run.text):
-            last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-glyphs-unavailable", reference.original_family, requested_family, reference.script)
-        else:
-            return face, SourceFontSelection("installed-source-face", requested_family, face.getFamilyName(), None, reference.original_family, requested_family, reference.script)
+        for candidate_manager, source_kind in _source_font_manager_candidates(font_manager):
+            face = candidate_manager.matchFamilyStyle(requested_family, requested_style)
+            if face is None:
+                last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-face-unavailable", reference.original_family, requested_family, reference.script)
+            elif not _same_family(face.getFamilyName(), requested_family):
+                last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-family-mismatch", reference.original_family, requested_family, reference.script)
+            elif not _same_style(face.fontStyle(), requested_style):
+                last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-style-mismatch", reference.original_family, requested_family, reference.script)
+            elif not _glyphs_available(face, run.text):
+                last_selection = SourceFontSelection("noto-fallback", requested_family, fallback.getFamilyName(), "source-glyphs-unavailable", reference.original_family, requested_family, reference.script)
+            else:
+                return face, SourceFontSelection(source_kind, requested_family, face.getFamilyName(), None, reference.original_family, requested_family, reference.script)
     assert last_selection is not None
     generic_classification = {"serif": "serif", "monospace": "fixed-width", "sans-serif": "sans-serif"}.get(
         (last_selection.original_reference or "").lower()
@@ -530,7 +639,8 @@ def _explicit_fitted_run(
     source_output = (
         preserve_source_font_family
         and selection is not None
-        and selection.source in {"embedded-source-face", "installed-source-face"}
+        and selection.source
+        in {"embedded-source-face", "mounted-source-face", "installed-source-face"}
     )
     if source_output:
         family = run.font_family or measurement_typefaces[run.font_classification].getFamilyName()

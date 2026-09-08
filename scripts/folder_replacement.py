@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import os
 from pathlib import Path
 import re
@@ -74,15 +74,20 @@ class _ColourArgumentParser(argparse.ArgumentParser):
         self._print_message(message, output)
 
 
-def _argument_parser() -> argparse.ArgumentParser:
+def _argument_parser(
+    fixed_roots: tuple[Path, Path] | None = None,
+) -> argparse.ArgumentParser:
     """Create the main folder-replacement command-line parser."""
     text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
     ocr_factory = OcrProviderFactory.discover_default_plugins()
     parser = _ColourArgumentParser(
         description=__doc__, formatter_class=_HelpFormatter
     )
-    parser.add_argument("input_folder", type=Path, help="Folder to process.")
-    parser.add_argument("output_folder", type=Path, help="Folder for processed files.")
+    if fixed_roots is None:
+        parser.add_argument("input_folder", type=Path, help="Folder to process.")
+        parser.add_argument("output_folder", type=Path, help="Folder for processed files.")
+    else:
+        parser.set_defaults(input_folder=fixed_roots[0], output_folder=fixed_roots[1])
 
     command_options = parser.add_argument_group("command options")
     command_options.add_argument(
@@ -205,9 +210,13 @@ def _colourize_help_line(line: str) -> str:
     )
 
 
-def parse_arguments() -> argparse.Namespace:
+def parse_arguments(
+    arguments: Sequence[str] | None = None,
+    *,
+    fixed_roots: tuple[Path, Path] | None = None,
+) -> argparse.Namespace:
     """Parse the main folder-replacement command line."""
-    return _argument_parser().parse_args()
+    return _argument_parser(fixed_roots).parse_args(arguments)
 
 
 def _load_default_typeface() -> skia.Typeface:
@@ -233,17 +242,25 @@ def _load_default_typeface() -> skia.Typeface:
     return weighted_typeface
 
 
-def main() -> int:
+def main(
+    arguments: Sequence[str] | None = None,
+    *,
+    fixed_roots: tuple[Path, Path] | None = None,
+) -> int:
     """Run the configured folder replacement and report its outcome."""
-    parser = _argument_parser()
-    arguments = parser.parse_args()
-    _validate_roots(arguments, parser)
-    include_patterns = _parse_include_patterns(arguments.include, parser)
-    ocr_provider = _create_ocr_provider(arguments.ocr, parser)
-    replacement_provider = _create_text_replacement_provider(arguments.text_replacement, parser)
+    parser = _argument_parser(fixed_roots)
+    parsed_arguments = parser.parse_args(arguments)
+    _validate_roots(parsed_arguments, parser)
+    include_patterns = _parse_include_patterns(parsed_arguments.include, parser)
+    ocr_provider = _create_ocr_provider(parsed_arguments.ocr, parser)
+    replacement_provider = _create_text_replacement_provider(
+        parsed_arguments.text_replacement, parser
+    )
     try:
         require_runtime_assets(
-            arguments.target_language, arguments.ocr, arguments.document_text_layout
+            parsed_arguments.target_language,
+            parsed_arguments.ocr,
+            parsed_arguments.document_text_layout,
         )
     except RuntimeAssetsRequiredError as error:
         print("Folder replacement did not start: runtime prerequisites are not met.", file=sys.stderr)
@@ -251,17 +268,17 @@ def main() -> int:
         print("No input document was processed. Resolve the prerequisite, then rerun.", file=sys.stderr)
         return 2
     result = replace_input_folder(
-        arguments.input_folder,
-        arguments.output_folder,
+        parsed_arguments.input_folder,
+        parsed_arguments.output_folder,
         ocr_provider=ocr_provider,
         text_replacement_provider=replacement_provider,
-        source_language=arguments.source_language,
-        target_language=arguments.target_language,
+        source_language=parsed_arguments.source_language,
+        target_language=parsed_arguments.target_language,
         typeface=_load_default_typeface(),
-        document_text_layout=arguments.document_text_layout,
-        xlsx_translation_mode=arguments.xlsx_translation_mode,
+        document_text_layout=parsed_arguments.document_text_layout,
+        xlsx_translation_mode=parsed_arguments.xlsx_translation_mode,
         include_patterns=include_patterns,
-        diagnostics_enabled=arguments.debug,
+        diagnostics_enabled=parsed_arguments.debug,
     )
     print(
         "Folder replacement complete: "
@@ -273,7 +290,7 @@ def main() -> int:
     if result.diagnostic_sidecars:
         print(
             "Folder replacement diagnostics: "
-            f"{len(result.diagnostic_sidecars)} sidecar(s) written under {arguments.output_folder}."
+            f"{len(result.diagnostic_sidecars)} sidecar(s) written under {parsed_arguments.output_folder}."
         )
     return 1 if result.failed_files else 0
 
