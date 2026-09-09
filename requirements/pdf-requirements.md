@@ -46,7 +46,7 @@ Automated tests shall use synthetic PDFs only. They shall cover Type0 `/ToUnicod
 |----------|-------|
 | Title | Support complete Unicode replacement in unbounded PDF content |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | Implementation review |
 | Date Added | 2026-08-04 |
 | Related Requirements | FR-2026-08-04-09 |
@@ -1583,6 +1583,55 @@ cluster retain the complete region with the ordinary unsupported diagnostic.
 They shall also verify that a marker with zero or one following
 non-whitespace source scalar is neither classified as a candidate nor mapped,
 and that it retains the existing ordinary unsupported outcome.
+
+---
+
+## FR-2026-09-09-01
+
+| Property | Value |
+|----------|-------|
+| Title | Serialize fitted PDF line feeds as layout boundaries |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User-reported Linux-container PDF rendering diagnosis |
+| Date Added | 2026-09-09 |
+| Related Requirements | FR-2026-08-03-07, FR-2026-08-27-02, FR-2026-08-29-03, FR-2026-09-01-01 |
+
+### Description
+
+For fitted native PDF page-content and Form-XObject replacement in either
+fitted document-text-layout mode, a U+000A line feed in source or returned
+replacement text shall be represented only as an output layout boundary. The
+adapter shall not pass it to portable-font glyph lookup, encode it in a PDF
+text-showing operand, or include it as a mapped portable-font glyph.
+
+The adapter shall preserve each explicit line boundary and any empty output
+line through its existing fitted line placement. It shall retain each emitted
+line's established font selection, paint state, position, and portable Unicode
+mapping. A line feed shall not cause an otherwise supported visual region to
+be retained with `pdf_replacement_font_glyph_encoding_unavailable`.
+
+This requirement applies to ordinary and paint-emphasis fitted regions. It
+does not change the existing policy for unsupported printable Unicode,
+ineligible regions, or inferred source soft wraps.
+
+### Rationale
+
+Linux Skia returns glyph ID zero for a line feed while another supported
+platform may return a nonzero placeholder. Treating a layout control as a
+portable-font glyph therefore makes otherwise valid PDF replacement dependent
+on the processing platform.
+
+### Verification
+
+Automated tests shall use synthetic PDFs and deterministic replacement
+providers only. They shall verify a fitted multiline page-content or
+Form-XObject region, including one with adjacent paint spans, preserves its
+explicit output line boundaries; writes parser-loadable, visually separate
+output lines; makes no portable-font glyph request for U+000A; and does not
+record `pdf_replacement_font_glyph_encoding_unavailable` solely because of a
+line feed. The test shall simulate the Linux glyph-lookup result for U+000A so
+it is platform independent.
 
 ---
 

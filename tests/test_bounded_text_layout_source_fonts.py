@@ -20,6 +20,7 @@ from pipeline.bounded_text_layout import (
     SourceTypefaceReference,
     _portable_segments,
     fit_explicit_noto_text_box,
+    fitted_text_lines,
     source_font_measurement,
 )
 
@@ -66,6 +67,19 @@ class SourceFontMeasurementTests(unittest.TestCase):
                 ),
             ),
         )
+
+    # Verifies FR-2026-09-09-01's shared fitted-line boundary behaviour.
+    def test_fitted_lines_exclude_explicit_line_feed_from_every_segment(self) -> None:
+        fitted = fit_explicit_noto_text_box(self._box("first\nsecond"))
+
+        lines = fitted_text_lines(fitted)
+
+        self.assertEqual(["first", "second"], [line.text for line in lines])
+        self.assertTrue(all(
+            "\n" not in segment.text
+            for line in lines
+            for segment in line.segments
+        ))
 
     # Verifies FR-2026-08-22-04.
     def test_prefers_a_verified_embedded_source_face(self) -> None:

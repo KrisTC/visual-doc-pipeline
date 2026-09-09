@@ -32,6 +32,8 @@ from pypdf.generic import ArrayObject, ByteStringObject, ContentStream, DecodedS
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
+import pipeline.folder_replacement.pdf as pdf_adapter
+
 from pipeline.folder_replacement import (
     FolderReplacementResult,
     parse_include_patterns,
@@ -587,6 +589,62 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
                     "kind", "reason_code", "container_kind", "page", "replacement_text"
                 )} for entry in report["entries"]],
             )
+
+    # Verifies FR-2026-09-09-01.
+    def test_basic_layout_pdf_serializes_line_feed_as_a_painted_line_boundary(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"; output_root = root / "output"; input_root.mkdir()
+            source = input_root / "document.pdf"
+            writer = PdfWriter(); page = writer.add_blank_page(200, 100)
+            contents = DecodedStreamObject()
+            contents.set_data(
+                b"BT /F1 12 Tf 10 70 Td 1 0 0 rg (first) Tj "
+                b"0 0 1 rg (second) Tj ET"
+            )
+            page.replace_contents(ContentStream(contents, writer))
+            with source.open("wb") as source_file:
+                writer.write(source_file)
+
+            original_encoder = pdf_adapter._pdf_static_glyph_bytes
+
+            def linux_line_feed_encoder(
+                font_reference: object, text: str, classification: str = "sans-serif"
+            ) -> bytes:
+                if "\n" in text:
+                    raise _PdfReplacementSerializationError(
+                        "pdf_replacement_font_glyph_encoding_unavailable",
+                        "Synthetic Linux line-feed glyph failure.",
+                        text,
+                    )
+                return original_encoder(font_reference, text, classification)
+
+            with patch(
+                "pipeline.folder_replacement.pdf._pdf_static_glyph_bytes",
+                side_effect=linux_line_feed_encoder,
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(replacement_text="first\nsecond"),
+                    document_text_layout="preserve-basic-layout",
+                    diagnostics_enabled=True,
+            )
+
+            self.assertGreater(result.replaced_native_text_items, 0)
+            diagnostics = [
+                entry
+                for sidecar in result.diagnostic_sidecars
+                for entry in json.loads(sidecar.read_text(encoding="utf-8"))["entries"]
+            ]
+            self.assertFalse(any(
+                entry.get("reason_code") == "pdf_replacement_font_glyph_encoding_unavailable"
+                for entry in diagnostics
+            ))
+            output = PdfReader(output_root / "document.pdf")
+            stream = ContentStream(output.pages[0].get_contents(), output)
+            self.assertGreaterEqual(sum(operator == b"Tm" for _operands, operator in stream.operations), 2)
 
     # Verifies FR-2026-08-27-06.
     def test_basic_layout_pdf_records_unsupported_portable_text_and_keeps_the_region(self) -> None:

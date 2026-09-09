@@ -29,7 +29,9 @@ FONT_PATHS = {
 EMU_PER_PIXEL = 9_525
 PIXELS_PER_POINT = 4.0 / 3.0
 DEFAULT_FONT_SIZE_POINTS = 18.0
-_TOKEN_PATTERN = re.compile(r"[\n\v]|\S+\s*|\s+")
+# Keep hard line boundaries separate from their preceding token.  Downstream
+# writers place lines independently; a line boundary is never a font glyph.
+_TOKEN_PATTERN = re.compile(r"[\r\n\v]|\S+[^\S\r\n\v]*|[^\S\r\n\v]+")
 MOUNTED_FONT_DIRECTORY = Path("/fonts")
 _MOUNTED_FONT_SUFFIXES = frozenset({".otc", ".otf", ".ttc", ".ttf"})
 
@@ -1061,7 +1063,7 @@ def _layout_lines(
         for run in paragraph.runs:
             style = _style(run, scale)
             for token in _tokens(run.text):
-                if token in {"\n", "\v"}:
+                if token in {"\n", "\r", "\v"}:
                     lines.append(
                         _line(segments, current_width, paragraph, scale, paragraph_width)
                     )
@@ -1099,7 +1101,7 @@ def _layout_lines(
 
 def _tokens(text: str) -> Iterable[str]:
     for token in _TOKEN_PATTERN.findall(text):
-        if token in {"\n", "\v"} or not _wide_character(token):
+        if token in {"\n", "\r", "\v"} or not _wide_character(token):
             yield token
         else:
             yield from token
