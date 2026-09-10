@@ -85,7 +85,7 @@ LABEL org.opencontainers.image.title="visual-doc-pipeline" \
 # and Skia needs EGL/OpenGL. Remove APT indexes in this same layer, then create
 # the fixed container mounts and writable paths.
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends fontconfig libegl1 libgl1 libglib2.0-0 \
+    && apt-get install --yes --no-install-recommends fontconfig libegl1 libgl1 libglib2.0-0 libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 --shell /usr/sbin/nologin pipeline \
     && mkdir -p /input /output /plugins /fonts /run/secrets /runtime-cache/home /runtime-cache/cache \
