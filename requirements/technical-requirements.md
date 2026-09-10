@@ -52,7 +52,9 @@ Dependency-specific validation causes routine publisher hosting changes to requi
 
 ### Notes
 
-The checker validates metadata relationships. The verified-installation workflow remains responsible for downloading the approved artifact and verifying its SHA-256 digest before installation.
+The checker validates metadata relationships. The verified-installation workflow
+remains responsible for selecting the approved artifact and invoking uv to
+download and verify its SHA-256 digest before installation.
 
 ---
 

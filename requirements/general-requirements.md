@@ -1362,8 +1362,9 @@ command or its output paths.
 The project shall replace every current `tqdm` terminal-progress display with
 one Rich live display. This applies to the folder-replacement command, OCR
 evaluation command, native text-replacement evaluation command, runtime-asset
-bootstrap command, approved-dependency-artifact workflow, and verified-
-dependency-installation workflow. `rich` shall be a locked runtime dependency
+bootstrap command, and approved-dependency-artifact workflow. The verified-
+dependency-installation workflow delegates download progress to uv as defined
+by SR-2026-08-21-02. `rich` shall be a locked runtime dependency
 managed under TR-2026-08-01-01. The replaced `tqdm` dependency and its type
 stub dependency shall be removed when no remaining product or test code uses
 them.

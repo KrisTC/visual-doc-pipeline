@@ -12,6 +12,62 @@ from scripts import sync_verified_dependencies
 
 
 class SyncVerifiedDependenciesTests(unittest.TestCase):
+    # Verifies SR-2026-08-21-02: uv receives the approved direct URL and hash
+    # before it downloads or installs the artifact.
+    def test_installs_approved_wheels_with_uv_hash_verification(self) -> None:
+        artifact = sync_verified_dependencies.ApprovedArtifact(
+            distribution="example-package",
+            version="1.0.0",
+            url="https://example.invalid/example_package-1.0.0-cp313-cp313-macosx_14_0_arm64.whl",
+            sha256="0" * 64,
+            wheel_tags="cp313-cp313-macosx_14_0_arm64",
+        )
+        with TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            requirements_contents: list[str] = []
+
+            def record_install(command: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                requirements_contents.append(Path(command[-1]).read_text(encoding="utf-8"))
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch(
+                    "scripts.sync_verified_dependencies._select_artifact",
+                    return_value=artifact,
+                ),
+                patch(
+                    "scripts.sync_verified_dependencies.subprocess.run",
+                    side_effect=record_install,
+                ) as run,
+            ):
+                sync_verified_dependencies._install_verified_artifacts(
+                    (("example-package", "1.0.0"),),
+                    (artifact,),
+                    directory,
+                    directory,
+                )
+
+        command = run.call_args.args[0]
+        self.assertEqual(
+            [
+                "uv",
+                "pip",
+                "install",
+                "--require-hashes",
+                "--no-deps",
+                "--no-index",
+                "--only-binary",
+                ":all:",
+                "--requirements",
+                command[-1],
+            ],
+            command,
+        )
+        self.assertEqual(
+            [f"example-package @ {artifact.url} --hash=sha256:{artifact.sha256}\n"],
+            requirements_contents,
+        )
+
     # Verifies TR-2026-09-07-01 and SR-2026-09-08-01.
     def test_accepts_a_manylinux_x86_64_cpu_wheel_on_linux(self) -> None:
         self.assertTrue(

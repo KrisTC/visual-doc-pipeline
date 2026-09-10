@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Synchronize locked dependencies and install non-default artifacts after verification."""
+"""Synchronize locked dependencies and let uv verify approved non-default wheels."""
 
 from __future__ import annotations
 
 import argparse
 import ast
-import hashlib
 import os
 import platform
 import re
@@ -16,20 +15,13 @@ import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 from urllib.parse import unquote
-from urllib.request import Request, urlopen
-
-if TYPE_CHECKING:
-    from pipeline.terminal_progress import LiveProgress
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = ROOT / "approved-dependency-artifact-hashes.toml"
 LOCKFILE = ROOT / "uv.lock"
 POLICY_CHECK = ROOT / "scripts" / "check-dependency-policy.py"
 PYPI_SIMPLE_URL = "https://pypi.org/simple"
-CHUNK_SIZE = 1024 * 1024
-ARTIFACT_USER_AGENT = "visual-doc-pipeline-artifact-verifier/1.0"
 EXPORTED_REQUIREMENT = re.compile(
     r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^]]*])?\s*==\s*([^\s;\\]+)"
     r"(?:\s*;\s*(.*?))?\s*$"
@@ -262,27 +254,6 @@ def _select_artifact(artifacts: tuple[ApprovedArtifact, ...], distribution: str,
     return matches[0]
 
 
-def _download_verified(
-    artifact: ApprovedArtifact, directory: Path, display: LiveProgress | None = None
-) -> Path:
-    destination = directory / unquote(Path(artifact.url).name)
-    digest = hashlib.sha256()
-    with urlopen(Request(artifact.url, headers={"User-Agent": ARTIFACT_USER_AGENT})) as response, destination.open("wb") as output:
-        content_length = response.headers.get("Content-Length")
-        total = int(content_length) if content_length is not None else None
-        if display is not None:
-            display.start_download(destination.name, total)
-        while chunk := response.read(CHUNK_SIZE):
-            digest.update(chunk)
-            output.write(chunk)
-            if display is not None:
-                display.advance_download(len(chunk))
-    if digest.hexdigest() != artifact.sha256:
-        destination.unlink(missing_ok=True)
-        raise ValueError(f"SHA-256 verification failed for {artifact.url}.")
-    return destination
-
-
 def sync_dependencies(
     *,
     extra: str,
@@ -322,32 +293,35 @@ def _install_verified_artifacts(
     directory: Path,
     project_root: Path,
 ) -> None:
-    """Install verified wheels, using progress only when this interpreter has Rich."""
-    try:
-        from pipeline.terminal_progress import LiveProgress
-    except ImportError:
-        for distribution, version in non_default_packages:
-            _install_verified_artifact(_select_artifact(artifacts, distribution, version), directory, project_root)
+    """Ask uv to download and verify only the approved wheel URLs."""
+    selected_artifacts = tuple(
+        _select_artifact(artifacts, distribution, version)
+        for distribution, version in non_default_packages
+    )
+    if not selected_artifacts:
         return
-    with LiveProgress() as display:
-        display.start_overall(len(non_default_packages), "artifact")
-        for distribution, version in non_default_packages:
-            artifact = _select_artifact(artifacts, distribution, version)
-            _install_verified_artifact(artifact, directory, project_root, display)
-            display.advance_overall()
-            display.clear_current()
-
-
-def _install_verified_artifact(
-    artifact: ApprovedArtifact,
-    directory: Path,
-    project_root: Path,
-    display: LiveProgress | None = None,
-) -> None:
-    """Download one reviewed wheel and install exactly those verified bytes."""
-    wheel = _download_verified(artifact, directory, display)
+    requirements_path = directory / "approved-artifacts.txt"
+    requirements_path.write_text(
+        "".join(
+            f"{artifact.distribution} @ {artifact.url} --hash=sha256:{artifact.sha256}\n"
+            for artifact in selected_artifacts
+        ),
+        encoding="utf-8",
+    )
+    requirements_path.chmod(0o600)
     subprocess.run(
-        ["uv", "pip", "install", "--offline", "--no-deps", str(wheel)],
+        [
+            "uv",
+            "pip",
+            "install",
+            "--require-hashes",
+            "--no-deps",
+            "--no-index",
+            "--only-binary",
+            ":all:",
+            "--requirements",
+            str(requirements_path),
+        ],
         check=True,
         cwd=project_root,
     )

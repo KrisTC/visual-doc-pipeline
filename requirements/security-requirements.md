@@ -71,7 +71,7 @@ A requirement that explicitly permits a non-default package registry may define 
 
 The repository shall store the approved SHA-256 digest for every wheel artifact permitted by such an exception in the root-level `approved-dependency-artifact-hashes.toml` security-control file. Approving a distribution version shall approve the complete set of wheel siblings for that distribution and version whose Python tags are compatible with the project's declared Python version, across every platform the authorizing registry provides for those tags. Each record shall identify exactly one authorizing security-requirement ID, distribution name, version, artifact URL, and SHA-256 digest. The authorizing requirement must explicitly permit that artifact. The file shall contain no artifact record that no implemented or approved security requirement permits.
 
-Dependency-policy validation shall require every locked non-default-registry package name and version to have at least one approved artifact record. The locked artifact URL need not match an approved artifact URL. Before an approved artifact may be installed, a project-owned verification workflow shall obtain that exact approved artifact and compare its streaming SHA-256 digest with the approved record. A missing record, mismatched name, version, or digest shall fail closed and prevent installation. The workflow shall install only the verified artifact; it shall not verify one download and later fetch a different artifact from the registry.
+Dependency-policy validation shall require every locked non-default-registry package name and version to have at least one approved artifact record. The locked artifact URL need not match an approved artifact URL. Before an approved artifact may be installed, a project-owned verified-installation workflow shall generate a transient, non-user-editable requirements input from its matching approved artifact record. Each generated requirement shall identify the exact approved wheel URL and its approved SHA-256 digest. The workflow shall invoke uv to download and install that input with `--require-hashes`, `--no-deps`, and `--no-index`. uv's hash check shall fail closed before installation. A missing record, mismatched name, version, or digest, source distribution, unapproved artifact, or attempt to resolve an additional dependency shall prevent installation.
 
 The workflow shall derive artifact URLs from the authorizing registry's PEP 503 simple-index page for the requested normalized distribution name. Its user-facing inputs shall be the authorizing requirement ID, registry base URL, distribution name, and exact version. It shall derive the supported CPython tags from the project `requires-python` declaration, select every wheel whose filename declares the requested version and one of those tags, reject source distributions and direct artifact URLs supplied as inputs, and fail when it finds no eligible wheels. It shall download and verify every selected wheel before writing its approved-hash record. It shall persist each verified record immediately and retain incomplete downloads in a gitignored local cache so an interrupted run resumes completed records and, where the registry supports HTTP range requests, partial wheel bytes. The discovered artifact URLs, wheel tags, sizes, and SHA-256 digests shall be displayed for human review.
 
@@ -85,8 +85,12 @@ The approved-hash file is a custom project security-control input, rather than a
 
 An exception requirement shall state whether the standard seven-day cooldown applies to its registry. If the registry does not publish reliable upload timestamps, that exception must expressly justify an alternative control before the registry can be used.
 
-The artifact-approval and verified-installation workflows' download progress is
-defined by FR-2026-09-03-01.
+The artifact-approval workflow's download progress is defined by
+FR-2026-09-03-01. The verified-installation workflow delegates download
+progress to uv because uv performs the download and hash verification.
+Verified-installation tests shall use synthetic artifacts and verify that the
+generated uv command requires hashes, disables index and dependency resolution,
+and supplies a mismatched digest to uv before it can install the artifact.
 
 ---
 
