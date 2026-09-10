@@ -16,12 +16,19 @@ class ContainerConfigurationTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertIn("python:3.13.14-slim-bookworm@sha256:", dockerfile)
-        self.assertIn("nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04@sha256:", dockerfile)
+        self.assertIn("ubuntu:24.04@sha256:", dockerfile)
+        self.assertNotIn("nvidia/cuda:", dockerfile)
         self.assertIn("COPY pyproject.toml uv.lock ./", dockerfile)
         self.assertIn("sync_verified_dependencies.py --no-dev --extra cpu", dockerfile)
         self.assertIn("sync_verified_dependencies.py --no-dev --extra gpu", dockerfile)
+        # Verifies TR-2026-09-07-01: GPU synchronisation transforms the locked
+        # CPU environment instead of reinstalling their shared dependencies.
+        self.assertIn("FROM build-cpu AS build-gpu", dockerfile)
         self.assertIn("FROM runtime-cpu AS cpu", dockerfile)
         self.assertIn("FROM runtime-gpu AS gpu", dockerfile)
+        self.assertIn("COPY --from=build-gpu /usr/local/bin/python3.13 /usr/local/bin/python3.13", dockerfile)
+        self.assertNotIn("COPY --from=build-gpu /usr/local/bin/python /usr/local/bin/python", dockerfile)
+        self.assertNotIn("COPY --from=build-gpu /usr/local/bin/python3 /usr/local/bin/python3", dockerfile)
         self.assertIn("USER pipeline", dockerfile)
         self.assertIn("fontconfig libegl1 libgl1 libglib2.0-0 libgomp1", dockerfile)
         self.assertIn("fontconfig libegl1 libgl1 libglib2.0-0", dockerfile)

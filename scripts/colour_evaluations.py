@@ -4,14 +4,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 import html
 import json
 import os
-from pathlib import Path
 import sys
+from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -26,7 +25,6 @@ from pipeline.text_region_colours import (
     TextRegionColourEstimate,
     estimate_text_region_colours,
 )
-
 
 SUCCEEDED_STATUS = "succeeded"
 

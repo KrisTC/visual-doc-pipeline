@@ -4,13 +4,12 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
 import os
-from pathlib import Path
 import re
 import sys
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Protocol
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -22,12 +21,14 @@ import skia  # type: ignore[import-not-found]
 
 from pipeline.folder_replacement import parse_include_patterns, replace_input_folder
 from pipeline.folder_replacement.xlsx import XLSX_TRANSLATION_MODE_CHOICES
-from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr import OcrProvider, OcrProviderFactory
+from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
+from pipeline.text_replacement import (
+    TextReplacementProvider,
+    TextReplacementProviderFactory,
+)
 from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementProviderFactory
-
 
 DEFAULT_FONT_PATH = PROJECT_ROOT / "tests" / "assets" / "fonts" / "NotoSansJP[wght].ttf"
 FONT_WEIGHT_AXIS_TAG = 0x77676874
@@ -176,7 +177,7 @@ def _supports_ansi_colour(output: object) -> bool:
     """Return whether an output stream supports the command's ANSI help styling."""
     isatty = getattr(output, "isatty", None)
     return (
-        callable(isatty)
+        callable(isatty) 
         and isatty()
         and os.environ.get("TERM") != "dumb"
         and "NO_COLOR" not in os.environ
