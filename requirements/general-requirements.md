@@ -51,7 +51,7 @@ Using `google_cloud_translate`, including by accepting its default, authorizes t
 |----------|-------|
 | Title | Report folder-replacement progress |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
 | Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01 |
@@ -85,6 +85,40 @@ The active-task text shall show the current native-text, embedded-image, or
 PDF-vector work item. Existing one-line per-file failure reporting shall remain
 visible without stopping later work. A failure shall reset the current-task and
 nested-operation rows before later files are processed.
+
+The command shall write machine-readable live progress to `progress.json` in
+the root of the specified output folder. The progress file shall contain a
+top-level `progress` integer percentage, a top-level `eta_seconds` value, and
+a `files` object. The top-level `progress` value shall use the same completed share and integer
+percentage as the Rich Overall bar. The `files` object shall map each
+input-relative POSIX path to its entry. A file that will not be processed,
+including an unsupported file, a provider-cache sidecar, or one excluded by the
+include patterns, shall have status `skipped`.
+Each remaining file shall initially have status `queued`. When processing of a
+file starts, its status shall change to `processing` and it shall have a
+`progress` property containing an integer percentage from `0` through `100`.
+After each source work item, that percentage shall reflect the same completed
+share used by the terminal overall bar. A successfully written output shall
+have status `completed` and `progress` `100`; a file that fails shall have
+status `failed` and retain its most recently reported progress value.
+
+The top-level `eta_seconds` value and the `eta_seconds` property of each
+processing file entry shall be the estimated remaining duration from the same
+Rich Overall or Current task, respectively. Each shall be a numeric number of
+seconds when Rich has an estimate, or JSON `null` when Rich has insufficient
+completed work. A completed file's `eta_seconds` shall be `0`; queued, skipped,
+and failed file entries shall not contain `eta_seconds`.
+
+The command shall create the output root and write the complete initial
+progress file after discovery and before any eligible source is processed. It
+shall publish every subsequent update by atomically replacing `progress.json`
+with a complete new JSON file. It shall not hold an exclusive lock while work
+is in progress. Readers may therefore read either the previous complete JSON
+document or the replacement complete JSON document.
+
+Automated tests shall use synthetic files and verify the initial queued and
+skipped entries, processing updates, completed and failed entries, and that
+every observed progress-file write is valid JSON.
 
 ---
 

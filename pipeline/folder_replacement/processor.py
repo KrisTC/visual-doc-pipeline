@@ -60,6 +60,8 @@ class ProgressReporter(Protocol):
 
 
 ProgressFactory = Callable[[int, str], ProgressReporter]
+ProgressEntry = dict[str, str | int | float | None]
+ProgressEntries = dict[str, ProgressEntry]
 
 
 @dataclass(slots=True)
@@ -121,19 +123,55 @@ def replace_input_folder(
 
     result = FolderReplacementResult()
     reserved_paths: set[Path] = set()
-    source_paths = tuple(sorted(
-        path for path in input_root.rglob("*") if path.is_file() and not is_cache_sidecar(path)
-    ))
+    source_paths = tuple(sorted(path for path in input_root.rglob("*") if path.is_file()))
     eligible_source_count = sum(
-        path.suffix.lower() in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
+        not is_cache_sidecar(path)
+        and path.suffix.lower() in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
         and matches_include_patterns(path.relative_to(input_root), include_patterns)
         for path in source_paths
     )
+    output_root.mkdir(parents=True, exist_ok=True)
+    progress_entries: ProgressEntries = {
+        path.relative_to(input_root).as_posix(): {
+            "status": (
+                "queued"
+                if not is_cache_sidecar(path)
+                and path.suffix.lower()
+                in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
+                and matches_include_patterns(path.relative_to(input_root), include_patterns)
+                else "skipped"
+            )
+        }
+        for path in source_paths
+    }
+
     display = LiveProgress() if show_progress and progress_factory is None else None
     if display is not None:
         display.__enter__()
         display.start_overall(eligible_source_count * 100, "source %")
     completed_sources = 0
+    overall_progress = 0
+    overall_eta_seconds: float | None = None
+
+    def update_overall_state(current_file_progress: int = 0) -> None:
+        """Keep the JSON Overall state aligned with the Rich Overall task."""
+        nonlocal overall_progress, overall_eta_seconds
+        if display is not None:
+            overall_progress, overall_eta_seconds = display.overall_state()
+        elif eligible_source_count:
+            overall_progress = int(
+                (completed_sources * 100 + current_file_progress)
+                * 100
+                / (eligible_source_count * 100)
+            )
+            overall_eta_seconds = None
+
+    def publish_progress() -> None:
+        _write_progress_file(
+            output_root, overall_progress, overall_eta_seconds, progress_entries
+        )
+
+    publish_progress()
     try:
       for source_path in source_paths:
         temporary_destination: Path | None = None
@@ -141,6 +179,9 @@ def replace_input_folder(
         progress: ProgressReporter | None = None
         extension = source_path.suffix.lower()
         relative_source_path = source_path.relative_to(input_root)
+        progress_entry = progress_entries[relative_source_path.as_posix()]
+        if is_cache_sidecar(source_path):
+            continue
         if extension not in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS:
             result.ignored_files += 1
             if diagnostics_enabled:
@@ -182,13 +223,18 @@ def replace_input_folder(
         cache_scope = source_cache_scope(source_path)
         cache_scope.__enter__()
         try:
-            print(f"Processing: {relative_source_path}")
+            progress_entry["status"] = "processing"
+            progress_entry["progress"] = 0
+            progress_entry["eta_seconds"] = None
+            update_overall_state()
+            publish_progress()
+            source_work_total = _source_work_total(
+                source_path,
+                document_text_layout=document_text_layout,
+                xlsx_translation_mode=xlsx_translation_mode,
+            )
+            completed_work = 0
             if show_progress:
-                source_work_total = _source_work_total(
-                    source_path,
-                    document_text_layout=document_text_layout,
-                    xlsx_translation_mode=xlsx_translation_mode,
-                )
                 if display is not None:
                     progress = display.start_current(
                         relative_source_path.name, source_work_total, "work item"
@@ -196,13 +242,30 @@ def replace_input_folder(
                 else:
                     make_progress = progress_factory or _make_progress_bar
                     progress = make_progress(source_work_total, relative_source_path.name)
+            progress_entry["eta_seconds"] = (
+                None if display is None else display.current_state()[1]
+            )
+            update_overall_state()
+            publish_progress()
+            print(f"Processing: {relative_source_path}")
 
             def work_completed(label: str) -> None:
+                nonlocal completed_work
+                completed_work += 1
+                file_progress = min(
+                    100, int(completed_work * 100 / source_work_total)
+                )
+                progress_entry["progress"] = file_progress
                 if progress is not None:
                     progress.set_postfix_str(label)
                     progress.update()
                     if display is not None:
                         display.set_overall_from_current(completed_sources)
+                if display is not None:
+                    file_progress, progress_entry["eta_seconds"] = display.current_state()
+                    progress_entry["progress"] = file_progress
+                update_overall_state(file_progress)
+                publish_progress()
 
             if failure_context is not None:
                 failure_context.set_location(
@@ -327,6 +390,7 @@ def replace_input_folder(
                 result.retained_vector_graphics += retained_vectors
             os.replace(temporary_destination, destination)
         except (BadZipFile, OSError, RuntimeError, ValueError) as error:
+            progress_entry["status"] = "failed"
             result.failed_files += 1
             result.failures.append(f"{source_path}: {error}")
             print(f"Failed: {source_path}: {error}", file=sys.stderr)
@@ -368,6 +432,8 @@ def replace_input_folder(
                 )
             continue
         else:
+            progress_entry["status"] = "completed"
+            progress_entry["progress"] = 100
             reserved_paths.add(destination)
             result.processed_files += 1
             if diagnostics_enabled and document_diagnostics:
@@ -392,14 +458,45 @@ def replace_input_folder(
             cache_scope.__exit__(None, None, None)
             if display is not None:
                 display.complete_overall_source(completed_sources)
-                completed_sources += 1
                 display.clear_current()
             elif progress is not None:
                 progress.close()
+            completed_sources += 1
+            if progress_entry["status"] == "completed":
+                progress_entry["eta_seconds"] = 0
+            else:
+                progress_entry.pop("eta_seconds", None)
+            update_overall_state()
+            publish_progress()
     finally:
         if display is not None:
             display.__exit__(None, None, None)
     return result
+
+
+def _write_progress_file(
+    output_root: Path,
+    progress: int,
+    eta_seconds: float | None,
+    entries: ProgressEntries,
+) -> None:
+    """Atomically publish a complete machine-readable folder-progress snapshot."""
+    progress_path = output_root / "progress.json"
+    temporary_path = progress_path.with_name(f".{progress_path.name}.tmp")
+    temporary_path.write_text(
+        json.dumps(
+            {
+                "progress": progress,
+                "eta_seconds": eta_seconds,
+                "files": entries,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary_path, progress_path)
 
 
 def _diagnostic_options(

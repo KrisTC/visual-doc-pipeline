@@ -120,6 +120,10 @@ class LiveProgress:
         if self._overall is not None:
             self._progress.update(self._overall, completed=(completed_sources + 1) * 100)
 
+    def overall_state(self) -> tuple[int, float | None]:
+        """Return the displayed Overall percentage and its Rich ETA estimate."""
+        return self._task_state(self._overall)
+
     def start_current(self, name: str, total: int | None, unit: str) -> CurrentProgress:
         """Reset and show the active root task."""
         self._current = self._reset_task(self._current, name, total, unit)
@@ -140,6 +144,10 @@ class LiveProgress:
         if self._current is not None:
             self._progress.update(self._current, visible=False)
         self.clear_nested()
+
+    def current_state(self) -> tuple[int, float | None]:
+        """Return the displayed Current percentage and its Rich ETA estimate."""
+        return self._task_state(self._current)
 
     def start_nested(self, name: str, total: int | None = 3, unit: str = "stage") -> None:
         """Show one bounded nested-object operation inside a document."""
@@ -191,3 +199,10 @@ class LiveProgress:
             detail=detail,
         )
         return task_id
+
+    def _task_state(self, task_id: TaskID | None) -> tuple[int, float | None]:
+        """Return a task's rendered integer percentage and raw Rich ETA."""
+        if task_id is None:
+            return 0, None
+        task = self._progress.tasks[task_id]
+        return int(f"{task.percentage:.0f}"), task.time_remaining

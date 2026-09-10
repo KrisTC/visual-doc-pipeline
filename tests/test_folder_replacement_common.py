@@ -32,6 +32,7 @@ from pypdf.generic import ArrayObject, ByteStringObject, ContentStream, DecodedS
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
+import pipeline.folder_replacement.processor as folder_processor
 from pipeline.folder_replacement import (
     FolderReplacementResult,
     parse_include_patterns,
@@ -201,7 +202,94 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
 
             self.assertEqual(0, result.processed_files)
             self.assertEqual(1, result.ignored_files)
-            self.assertFalse(output_root.exists())
+            self.assertEqual(
+                {
+                    "progress": 0,
+                    "eta_seconds": None,
+                    "files": {"source.png": {"status": "skipped"}},
+                },
+                json.loads((output_root / "progress.json").read_text(encoding="utf-8")),
+            )
+
+    # Verifies FR-2026-08-03-04.
+    def test_writes_live_machine_readable_progress_for_all_input_files(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            selected_root = input_root / "selected"
+            selected_root.mkdir(parents=True)
+            self._write_png(selected_root / "complete.png")
+            (selected_root / "failed.docx").write_bytes(b"not a zip archive")
+            self._write_png(input_root / "excluded.png")
+            (input_root / "unsupported.txt").write_text("synthetic", encoding="utf-8")
+            snapshots: list[folder_processor.ProgressEntries] = []
+            original_write = folder_processor._write_progress_file
+
+            def capture_progress(
+                progress_root: Path,
+                progress: int,
+                eta_seconds: float | None,
+                entries: folder_processor.ProgressEntries,
+            ) -> None:
+                original_write(progress_root, progress, eta_seconds, entries)
+                json.loads((progress_root / "progress.json").read_text(encoding="utf-8"))
+                snapshots.append({path: dict(entry) for path, entry in entries.items()})
+
+            with patch.object(
+                folder_processor, "_write_progress_file", side_effect=capture_progress
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(),
+                    include_patterns=("selected/*",),
+                )
+
+            self.assertEqual(1, result.processed_files)
+            self.assertEqual(1, result.failed_files)
+            self.assertEqual(
+                {
+                    "progress": 100,
+                    "eta_seconds": None,
+                    "files": {
+                        "excluded.png": {"status": "skipped"},
+                        "selected/complete.png": {
+                            "status": "completed",
+                            "progress": 100,
+                            "eta_seconds": 0,
+                        },
+                        "selected/failed.docx": {"status": "failed", "progress": 0},
+                        "unsupported.txt": {"status": "skipped"},
+                    },
+                },
+                json.loads((output_root / "progress.json").read_text(encoding="utf-8")),
+            )
+            self.assertEqual(
+                {
+                    "excluded.png": {"status": "skipped"},
+                    "selected/complete.png": {"status": "queued"},
+                    "selected/failed.docx": {"status": "queued"},
+                    "unsupported.txt": {"status": "skipped"},
+                },
+                snapshots[0],
+            )
+            self.assertIn(
+                "processing",
+                [
+                    snapshot["selected/complete.png"]["status"]
+                    for snapshot in snapshots
+                ],
+            )
+            self.assertIn(
+                {
+                    "status": "processing",
+                    "progress": 0,
+                    "eta_seconds": None,
+                },
+                [snapshot["selected/failed.docx"] for snapshot in snapshots],
+            )
 
     # Verifies FR-2026-08-03-03.
     def test_processes_supported_files_ignores_others_and_resolves_filename_collisions(self) -> None:
@@ -397,8 +485,14 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             def complete_overall_source(self, _completed_sources: int) -> None:
                 return None
 
+            def overall_state(self) -> tuple[int, float | None]:
+                return 0, None
+
             def clear_current(self) -> None:
                 return None
+
+            def current_state(self) -> tuple[int, float | None]:
+                return 0, None
 
             def start_nested(self, name: str, total: int, unit: str = "stage") -> None:
                 self.started.append((name, total, unit))
