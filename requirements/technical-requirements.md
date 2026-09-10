@@ -406,3 +406,59 @@ or release credentials; those need separate requirements before a publishing
 workflow is implemented.
 
 ---
+
+## TR-2026-09-10-02
+
+| Property | Value |
+|----------|-------|
+| Title | Publish version-tagged CPU and GPU OCI images to GitHub Container Registry |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-10 |
+| Related Requirements | TR-2026-09-07-01, TR-2026-09-10-01, SR-2026-09-07-01 |
+
+### Description
+
+When a Git tag matching `v*` is created, GitHub Actions shall publish a release
+only when the tag resolves to the current tip commit of `main`. The workflow
+shall build the repository's `cpu` and `gpu` Dockerfile targets for Linux
+`amd64` and publish them to, respectively,
+`ghcr.io/<repository-owner>/visual-doc-pipeline-cpu` and
+`ghcr.io/<repository-owner>/visual-doc-pipeline-gpu`. Each image shall be
+published with the Git tag itself as its version tag and with `latest`, which
+shall identify that same release.
+
+The workflow shall create a GitHub Release for the Git tag after both variant
+images have been published successfully. It shall not create the GitHub
+Release when either image build or publication fails.
+
+The workflow shall use GitHub Actions' scoped `GITHUB_TOKEN` with the minimum
+permissions needed to read repository contents, write packages, and create
+the GitHub Release. It shall not receive repository secrets or deploy
+credentials. It shall use only third-party GitHub Actions pinned to immutable
+commit revisions.
+
+The workflow shall not create, alter, or delete Git tags. It shall permit
+rerunning a failed release workflow for the same tag. The repository owner
+shall protect release tags through GitHub repository settings if immutability
+is required.
+
+### Notes
+
+The exact image owner is derived from the repository owner at workflow runtime.
+This permits the same workflow to operate after a repository transfer without
+embedding an account name in version-controlled configuration.
+
+Requiring the current `main` tip is the initial release policy. A future
+maintenance-release policy can deliberately permit version tags on selected
+release branches or older commits after its branch and support rules are
+defined.
+
+OCI registry publication across the two image repositories is non-transactional.
+If one push fails after the other succeeds, the workflow shall leave the
+partial registry state, create no GitHub Release, and fail. Rerunning the
+workflow for the same tag shall republish both variants, converge their
+version and `latest` tags, and then create the release.
+
+---

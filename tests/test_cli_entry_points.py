@@ -221,6 +221,8 @@ class CliEntryPointTests(unittest.TestCase):
                 "character_mask",
                 "--ocr",
                 "no_ocr",
+                "--document-text-layout",
+                "preserve-source-formatting",
             )
 
             self.assertEqual(0, completed_process.returncode, completed_process.stderr)
@@ -248,6 +250,8 @@ class CliEntryPointTests(unittest.TestCase):
                 "no_ocr",
                 "--include",
                 "*.png",
+                "--document-text-layout",
+                "preserve-source-formatting",
             )
 
             self.assertEqual(0, completed_process.returncode, completed_process.stderr)

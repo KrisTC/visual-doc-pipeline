@@ -22,6 +22,7 @@ from pipeline.text_region_rendering import (
 from pipeline.text_region_rendering.renderer import (
     _fit_text,
     _placement_coordinate,
+    _region_frame,
     _render_text_colour,
     _select_render_plan,
 )
@@ -197,9 +198,17 @@ class TextRegionRenderingTests(unittest.TestCase):
         )
 
         plan = _select_render_plan("Edinburgh", self._typeface(), polygon)
+        detected_frame = _region_frame(polygon)
+        detected_layout = _fit_text(
+            "Edinburgh",
+            self._typeface(),
+            detected_frame.width,
+            detected_frame.height,
+            detected_frame.is_axis_aligned,
+        )
 
         self.assertEqual(0.0, plan.frame.angle_degrees)
-        self.assertGreaterEqual(plan.layout.font.getSize(), 17.0)
+        self.assertGreaterEqual(plan.layout.font.getSize(), detected_layout.font.getSize())
 
     # Verifies FR-2026-08-02-10.
     def test_reversed_longest_baseline_edge_does_not_turn_text_upside_down(self) -> None:
