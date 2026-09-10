@@ -111,9 +111,12 @@ def _replace_image_text(
 def pdf_work_total(source: Path) -> int:
     """Return the native, embedded-raster, and per-page vector-review work units."""
     reader = PdfReader(source)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    _promote_direct_image_xobjects(writer)
     image_references: set[int] = set()
     inline_image_count = 0
-    for page in reader.pages:
+    for page in writer.pages:
         for image_file in page.images:
             reference = image_file.indirect_reference
             if reference is None:
@@ -139,6 +142,7 @@ def replace_pdf_file(
     reader = PdfReader(source)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
+    _promote_direct_image_xobjects(writer)
     native_items = 0
     seen_forms: set[int] = set()
     seen_annotations: set[int] = set()
@@ -229,6 +233,48 @@ def replace_pdf_file(
     with destination.open("wb") as output_file:
         writer.write(output_file)
     return native_items, image_regions
+
+
+def _promote_direct_image_xobjects(writer: PdfWriter) -> None:
+    """Give direct image streams writer references before pypdf enumerates them.
+
+    pypdf's ``PageObject.images`` assumes every XObject image has an indirect
+    reference.  Direct image streams are valid PDF and are emitted by some
+    producers, so make them ordinary writer-owned objects before using that
+    convenience API.
+    """
+    seen_xobjects: set[int] = set()
+    for page in writer.pages:
+        _promote_direct_image_xobjects_in_owner(page, writer, seen_xobjects)
+
+
+def _promote_direct_image_xobjects_in_owner(
+    owner: object, writer: PdfWriter, seen_xobjects: set[int]
+) -> None:
+    """Promote direct image XObjects in one page or Form XObject resource tree."""
+    if not isinstance(owner, DictionaryObject):
+        return
+    resources = owner.get("/Resources")
+    if not isinstance(resources, DictionaryObject):
+        return
+    xobjects = resources.get("/XObject")
+    if not isinstance(xobjects, DictionaryObject):
+        return
+    for name, reference in tuple(xobjects.items()):
+        xobject = reference.get_object()
+        if not isinstance(xobject, DictionaryObject):
+            continue
+        identifier = id(xobject)
+        if identifier in seen_xobjects:
+            continue
+        seen_xobjects.add(identifier)
+        subtype = xobject.get("/Subtype")
+        if subtype == "/Image":
+            if xobject.indirect_reference is None:
+                xobjects[name] = writer._add_object(xobject)
+            continue
+        if subtype == "/Form":
+            _promote_direct_image_xobjects_in_owner(xobject, writer, seen_xobjects)
 
 
 def _pdf_vector_render_document(
