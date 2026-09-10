@@ -131,8 +131,8 @@ Prefer the repository scripts in `scripts/` for development verification so agen
 
 Common commands:
 
-- `python3 scripts/typecheck-python.py`
-- `python3 scripts/check-all.py`
+- `./run.sh scripts/typecheck-python.py`
+- `./run.sh scripts/check-all.py`
 
 Use focused test arguments when appropriate instead of running the full suite unnecessarily.
 

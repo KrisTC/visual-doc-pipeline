@@ -1,0 +1,82 @@
+name: Publish container release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    name: Publish CPU and GPU container images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the release tag and derive image names
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_REF: ${{ github.ref }}
+        run: |
+          set -eu
+          case "$TAG_REF" in
+            refs/tags/v*) ;;
+            *)
+              echo "Release workflow requires a v* tag, got $TAG_REF." >&2
+              exit 1
+              ;;
+          esac
+          tag_commit="$(git rev-parse "${TAG_REF}^{commit}")"
+          main_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)"
+          if [ "$tag_commit" != "$main_commit" ]; then
+            echo "Release tag must resolve to the current main tip." >&2
+            exit 1
+          fi
+          version="${TAG_REF#refs/tags/}"
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          {
+            printf 'version=%s\n' "$version"
+            printf 'cpu_image=ghcr.io/%s/visual-doc-pipeline-cpu\n' "$owner"
+            printf 'gpu_image=ghcr.io/%s/visual-doc-pipeline-gpu\n' "$owner"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+
+      - name: Build and publish the CPU image
+        env:
+          IMAGE: ${{ steps.release.outputs.cpu_image }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          docker buildx build --platform linux/amd64 --target cpu
+          --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" --push .
+
+      - name: Build and publish the GPU image
+        env:
+          IMAGE: ${{ steps.release.outputs.gpu_image }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          docker buildx build --platform linux/amd64 --target gpu
+          --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" --push .
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -eu
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "GitHub Release $VERSION already exists."
+            exit 0
+          fi
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION"
