@@ -150,3 +150,15 @@ When uncertain:
 Do not present guesses as facts.
 
 It is acceptable to stop and request clarification when requirements are unclear.
+
+---
+
+Git workflow:
+
+- Never commit, push, pull, merge, rebase, tag, stash, reset, or open/modify pull requests.
+- Never change Git configuration.
+- If `HEAD` is detached, stop and ask for direction before making code changes.
+- If the current branch is `main` and code changes are required, create a new short-lived branch first using: `git switch -c feature/<descriptive-branch-name>`
+- Apart from creating that branch, do not perform any other Git-changing operation.
+- For any other Git operation, show me the exact command(s) to run myself instead.
+- If already on a non-`main` branch, keep using it unless I explicitly ask otherwise.
