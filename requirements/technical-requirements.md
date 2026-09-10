@@ -334,3 +334,75 @@ profile explicitly.
 Automated build checks shall verify lockfile use, digest-pinned bases, final user, entrypoint argument formation, fixed-directory permissions, and absence of runtime package installation. They shall not download model assets, require credentials, or require a GPU.
 
 ---
+
+## TR-2026-09-10-01
+
+| Property | Value |
+|----------|-------|
+| Title | Validate pull requests with GitHub Actions continuous integration |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-10 |
+| Related Requirements | TR-2026-08-01-01, TR-2026-08-01-03, TR-2026-08-01-04, TR-2026-09-07-01, SR-2026-08-01-01, SR-2026-08-21-02, SR-2026-09-08-01 |
+
+### Description
+
+The repository shall provide `.github/workflows/ci.yml`.  GitHub Actions shall
+run its CI checks for every pull-request revision, including revisions pushed
+after the pull request is opened or reopened.  The workflow shall test the
+pull request's merge result against its target branch, so a passing result
+represents the code that would be merged.
+
+The workflow shall use a Linux `x86_64` GitHub-hosted runner and the exact
+Python version declared by the project.  It shall perform the following
+checks, failing the workflow when any check fails:
+
+1. Run `scripts/check-dependency-policy.py` before dependencies are
+   installed.
+2. Create the development environment from the committed lockfile using the
+   repository's verified dependency-installation workflow with the `cpu`
+   profile.  The CI dependency installation shall not resolve, upgrade, or
+   lock dependencies.
+3. Run `scripts/typecheck-python.py`.
+4. Run the complete automated test suite through `scripts/run-tests.sh`.
+5. Build both named OCI image targets, `cpu` and `gpu`, from the repository
+   `Dockerfile` for `linux/amd64`.  The workflow shall not run either image,
+   download runtime model assets, require credentials, or require a GPU.
+
+The workflow shall run with the minimum GitHub token permissions needed to
+read the repository and shall not receive repository secrets, deployment
+credentials, or Google Cloud credentials.  It shall use the `pull_request`
+event rather than an event that executes pull-request code with target-branch
+privileges.  Third-party GitHub Actions used by the workflow shall be pinned
+to immutable commit revisions.
+
+The CI workflow shall publish distinct, stable check names for the dependency
+policy, Python verification, and OCI build checks.  A repository administrator
+shall configure the target branch's GitHub protection or ruleset to require
+those successful checks before merge.  The repository workflow itself shall
+not grant, remove, or substitute for a human pull-request review approval.
+
+### Rationale
+
+Pull-request CI gives contributors and reviewers repeatable evidence that a
+change preserves the dependency controls, Python quality gates, test suite,
+and both distributable container definitions before it is merged.  Keeping
+untrusted pull-request code in a read-only, secret-free workflow limits the
+effect of contributions from forks.
+
+### Notes
+
+The `cpu` profile is selected for Python verification because the GitHub-hosted
+runner has no NVIDIA GPU.  Building the GPU image validates its Dockerfile and
+locked dependency profile without asserting GPU runtime behaviour; GPU runtime
+validation remains a separate capability.
+
+GitHub branch-protection configuration is repository-hosted state rather than
+versioned content in `ci.yml`.  Its required-check names must match the
+workflow's published check names.  This requirement does not yet define
+release publishing, package publication, image registry choice, tag policy,
+or release credentials; those need separate requirements before a publishing
+workflow is implemented.
+
+---

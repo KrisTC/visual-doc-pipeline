@@ -190,6 +190,34 @@ class RunBashWrapperTests(unittest.TestCase):
                 _read_argument_lines(arguments_file),
             )
 
+    # Verifies TR-2026-09-10-01.
+    @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Bash wrapper requires a Unix host.")
+    def test_allows_ci_to_select_the_cpu_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            wrapper = _copy_root_script(root, "run.sh")
+            arguments_file = root / "uv-arguments.txt"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_uv = fake_bin / "uv"
+            fake_uv.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"${RUN_WRAPPER_ARGUMENTS_FILE}\"\n",
+                encoding="utf-8",
+            )
+            fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+            environment = {
+                **_wrapper_environment(fake_bin, arguments_file),
+                "VISUAL_DOC_PIPELINE_UV_EXTRA": "cpu",
+            }
+
+            _run_bash(wrapper, environment, "-c", "pass")
+
+            self.assertEqual(
+                ("run", "--exact", "--extra", "cpu", "python", "-c", "pass"),
+                _read_argument_lines(arguments_file),
+            )
+
 
 def _copy_script(root: Path, script_name: str) -> Path:
     """Copy one project script into an isolated synthetic project root."""
@@ -212,7 +240,11 @@ def _copy_root_script(root: Path, script_name: str) -> Path:
 def _wrapper_environment(fake_bin: Path, arguments_file: Path) -> dict[str, str]:
     """Build an environment in which the synthetic uv executable wins lookup."""
     return {
-        **os.environ,
+        **{
+            key: value
+            for key, value in os.environ.items()
+            if key != "VISUAL_DOC_PIPELINE_UV_EXTRA"
+        },
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
         "RUN_WRAPPER_ARGUMENTS_FILE": str(arguments_file),
     }
