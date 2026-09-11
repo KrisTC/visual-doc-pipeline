@@ -42,11 +42,24 @@ jobs:
           fi
           version="${TAG_REF#refs/tags/}"
           owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          source_url="https://github.com/$GITHUB_REPOSITORY"
           {
             printf 'version=%s\n' "$version"
+            printf 'revision=%s\n' "$tag_commit"
+            printf 'source_url=%s\n' "$source_url"
             printf 'cpu_image=ghcr.io/%s/visual-doc-pipeline-cpu\n' "$owner"
             printf 'gpu_image=ghcr.io/%s/visual-doc-pipeline-gpu\n' "$owner"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Validate and extract the matching changelog entry
+        env:
+          CHANGELOG_FILE: ${{ github.workspace }}/CHANGELOG.md
+          CHANGELOG_ENTRY_FILE: ${{ runner.temp }}/release-changelog-entry.md
+          VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          python3 scripts/release_notes.py extract
+          --changelog "$CHANGELOG_FILE" --tag "$VERSION"
+          --output "$CHANGELOG_ENTRY_FILE"
 
       - name: Log in to GitHub Container Registry
         env:
@@ -57,26 +70,67 @@ jobs:
         env:
           IMAGE: ${{ steps.release.outputs.cpu_image }}
           VERSION: ${{ steps.release.outputs.version }}
+          REVISION: ${{ steps.release.outputs.revision }}
+          SOURCE_URL: ${{ steps.release.outputs.source_url }}
         run: >-
           docker buildx build --platform linux/amd64 --target cpu
+          --label org.opencontainers.image.title="visual-doc-pipeline"
+          --label org.opencontainers.image.description="Configurable pipeline for visible-text replacement in documents and images."
+          --label org.opencontainers.image.source="$SOURCE_URL"
+          --label org.opencontainers.image.url="$SOURCE_URL"
+          --label org.opencontainers.image.licenses="Apache-2.0"
+          --label org.opencontainers.image.version="$VERSION"
+          --label org.opencontainers.image.revision="$REVISION"
+          --label org.opencontainers.image.variant="cpu"
           --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" --push .
 
       - name: Build and publish the GPU image
         env:
           IMAGE: ${{ steps.release.outputs.gpu_image }}
           VERSION: ${{ steps.release.outputs.version }}
+          REVISION: ${{ steps.release.outputs.revision }}
+          SOURCE_URL: ${{ steps.release.outputs.source_url }}
         run: >-
           docker buildx build --platform linux/amd64 --target gpu
+          --label org.opencontainers.image.title="visual-doc-pipeline"
+          --label org.opencontainers.image.description="Configurable pipeline for visible-text replacement in documents and images."
+          --label org.opencontainers.image.source="$SOURCE_URL"
+          --label org.opencontainers.image.url="$SOURCE_URL"
+          --label org.opencontainers.image.licenses="Apache-2.0"
+          --label org.opencontainers.image.version="$VERSION"
+          --label org.opencontainers.image.revision="$REVISION"
+          --label org.opencontainers.image.variant="gpu"
           --tag "$IMAGE:$VERSION" --tag "$IMAGE:latest" --push .
 
-      - name: Create the GitHub Release
+      - name: Generate release notes from the changelog and image references
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.release.outputs.version }}
+          CPU_IMAGE: ${{ steps.release.outputs.cpu_image }}
+          GPU_IMAGE: ${{ steps.release.outputs.gpu_image }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
+          RELEASE_BODY_FILE: ${{ runner.temp }}/existing-release-body.md
+          CHANGELOG_ENTRY_FILE: ${{ runner.temp }}/release-changelog-entry.md
+        run: |
+          set -eu
+          if ! gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RELEASE_BODY_FILE" 2>/dev/null; then
+            : > "$RELEASE_BODY_FILE"
+          fi
+          python3 scripts/release_notes.py compose \
+            --existing "$RELEASE_BODY_FILE" \
+            --changelog-entry "$CHANGELOG_ENTRY_FILE" \
+            --cpu-image "$CPU_IMAGE" --gpu-image "$GPU_IMAGE" \
+            --version "$VERSION" --output "$NOTES_FILE"
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: |
           set -eu
           if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "GitHub Release $VERSION already exists."
+            gh release edit "$VERSION" --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES_FILE"
             exit 0
           fi
-          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION"
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$VERSION" --notes-file "$NOTES_FILE"

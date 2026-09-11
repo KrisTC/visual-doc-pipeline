@@ -462,3 +462,259 @@ workflow for the same tag shall republish both variants, converge their
 version and `latest` tags, and then create the release.
 
 ---
+
+## TR-2026-09-11-01
+
+| Property | Value |
+|----------|-------|
+| Title | Annotate published OCI images with standard project and release metadata |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request; [GitHub Container Registry image-labelling guidance](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#labelling-container-images) |
+| Date Added | 2026-09-11 |
+| Related Requirements | TR-2026-09-07-01, TR-2026-09-10-02 |
+
+### Description
+
+The release workflow defined by TR-2026-09-10-02 shall apply OCI image
+annotations to each published CPU and GPU image. The annotations shall be
+present in the final image configuration for both the version and `latest`
+tags, and shall use the `org.opencontainers.image.*` label keys.
+
+Each published image shall include the following accurate metadata:
+
+- `org.opencontainers.image.title`: `visual-doc-pipeline`.
+- `org.opencontainers.image.description`: the project's published short
+  description, without claiming capabilities that the image does not provide.
+- `org.opencontainers.image.source` and `org.opencontainers.image.url`: the
+  canonical HTTPS URL of the repository that produced the image,
+  `https://github.com/<repository-owner>/<repository-name>`.
+- `org.opencontainers.image.licenses`: the SPDX identifier `Apache-2.0`.
+- `org.opencontainers.image.version`: the release Git tag.
+- `org.opencontainers.image.revision`: the immutable commit SHA resolved by
+  that release tag.
+- `org.opencontainers.image.variant`: `cpu` for the CPU image and `gpu` for
+  the GPU image.
+
+The workflow shall derive repository, tag, and commit values from its GitHub
+Actions release context or checked-out release commit. It shall not hard-code
+the repository owner, use an untrusted tag value as a shell expression, or
+include credentials, environment values, input-document data, or other
+sensitive data in image metadata. A failed metadata derivation or failed image
+publication shall fail the release before its GitHub Release is created.
+
+Automated release-workflow verification shall verify every required annotation
+for both image variants, including the CPU/GPU distinction and the workflow's
+derivation of version, revision, and repository URL from the release context.
+
+### Rationale
+
+Standard OCI annotations make both GitHub Container Registry packages
+recognisable and traceable to their source repository and exact release commit,
+while giving operators an unambiguous CPU or GPU variant indicator.
+
+### Notes
+
+`org.opencontainers.image.source` is the annotation GitHub Container Registry
+uses to associate an image package with its source repository. The requirement
+does not add a build-time timestamp annotation because an uncontrolled current
+time would undermine the reproducibility objective of TR-2026-09-07-01.
+
+---
+
+## TR-2026-09-11-02
+
+| Property | Value |
+|----------|-------|
+| Title | Include versioned container-image references in GitHub Release notes |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-11 |
+| Related Requirements | TR-2026-09-10-02 |
+
+### Description
+
+After it has successfully published both images required by TR-2026-09-10-02,
+the release workflow shall create or update the corresponding GitHub Release
+with a `## Container images` section. That section shall contain separately
+labelled, copyable CPU and GPU image references using the release Git tag:
+
+- CPU: `ghcr.io/<repository-owner>/visual-doc-pipeline-cpu:<release-tag>`.
+- GPU: `ghcr.io/<repository-owner>/visual-doc-pipeline-gpu:<release-tag>`.
+
+The image owner shall use the same lowercase repository-owner derivation as
+the published image tags. The workflow shall derive both references from its
+release context; it shall not hard-code a repository owner or substitute the
+mutable `latest` tag.
+
+On a rerun for a release that already exists, the workflow shall ensure this
+section is present and accurate rather than leaving an empty or stale release
+body. The section may coexist with release notes from other sources, which
+the workflow shall preserve.
+
+Automated release-workflow verification shall confirm that the generated
+release notes contain both variant labels and their version-tagged image
+references, and that rerun handling updates the container-images section.
+
+### Rationale
+
+Operators need a stable, copyable image reference at the release point. A
+version tag identifies the released artifact, whereas `latest` can later refer
+to a different release.
+
+---
+
+## TR-2026-09-11-03
+
+| Property | Value |
+|----------|-------|
+| Title | Generate a requirements-based changelog draft for a proposed release |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-11 |
+| Related Requirements | TR-2026-09-10-02 |
+
+### Description
+
+The project shall provide a repository-root script that determines the next
+release version and generates, without modifying `CHANGELOG.md`, a Markdown
+changelog draft at `outputs/changelog-drafts/<version>.md`. The
+`outputs/changelog-drafts/` directory shall be ignored by Git. The script
+shall overwrite an existing draft or requirements-diff artifact for that
+version if it already exists. On successful completion, it shall print the
+proposed release tag in the form `v<major>.<minor>.<patch>` and the two
+generated artifact paths relative to the repository root.
+
+Immediately after the draft's H1 heading, the script shall write a copy-ready
+release H2 heading containing the proposed version and the local calendar date
+on which the script runs, formatted as `YYYY-MM-DD`. When a version-baseline
+tag exists, the version text shall link to GitHub's comparison page from that
+tag to the proposed `v<version>` tag. The script shall derive the GitHub
+repository URL from the `origin` remote; it shall fail if `origin` is not a
+recognised GitHub repository URL. When no version-baseline tag exists, the
+heading shall contain the unlinked version and date because no comparison is
+available.
+
+The script shall inspect release tags matching `v<major>.<minor>.<patch>` and
+select the highest valid semantic-version tag as its version baseline. With no
+arguments, it shall increment that baseline's minor version and reset its
+patch version to zero. If invoked with the optional argument `major`, it shall
+increment the major version and reset its minor and patch versions to zero. If
+no matching release tag exists, it shall use `0.1.0`. It shall reject every
+other argument.
+
+The script shall collect changes to every file directly in `requirements/`
+from the version-baseline tag through `HEAD`, and shall write the complete Git
+diff for those files to
+`outputs/changelog-drafts/<version>.requirements.diff`. If no matching release
+tag exists, or `CHANGELOG.md` is empty, the script shall treat the release as
+the first release: it shall write the complete requirements history diff
+through `HEAD` and include every requirement currently present in
+`requirements/` in the draft. A missing `CHANGELOG.md` shall be treated as an
+empty changelog.
+
+From the requirements diff, the script shall identify the distinct
+requirements that were added, updated, or deleted. The generated draft shall
+group those requirements by their source file in `requirements/`. For each
+group, it shall derive a human-readable title and scope description from the
+corresponding routing-table entry in `requirements/README.md`. Within each
+file group, it shall separate added, updated, and deleted requirements and
+provide a table for each non-empty change-kind section with ID, title, status,
+and owner columns. For added and updated requirements, these fields shall be
+taken from the requirement at `HEAD`; for deleted requirements, they shall be
+taken from its last version before deletion.
+
+The draft shall order its source-file groups as follows when those groups have
+identified requirements: security requirements first, technical requirements
+second, general requirements third, and text-replacement requirements fourth.
+It shall order every other group alphabetically by requirements filename after
+those four groups.
+
+The copy-ready release H2 heading shall be the parent heading for all generated
+content. Source-file summary groups and the Requirement details section shall
+use H3 headings; their nested headings shall use successively lower heading
+levels.
+
+After the tables, the generated draft shall contain a separate headed section
+for each source requirements file using the same human-readable title and
+scope description. Each section shall contain one entry for every identified
+requirement from that file. An entry heading shall include only its ID, title,
+and status, with the status in brackets after the title, followed by that
+requirement's Rationale section. A deleted requirement's entry shall use its
+last version before deletion. The script shall preserve the requirement text
+in the generated draft sufficiently to distinguish its Rationale from other
+sections, but shall not add requirement fields other than those specified.
+
+### Rationale
+
+Release notes need a reviewable summary of the requirements that changed since
+the preceding release, while retaining the complete source diff for audit and
+without allowing a preparation tool to alter the published changelog.
+This will produce input to the developer or coding agent to produce the
+actual changelog entry in `CHANGELOG.md`.
+
+### Notes
+
+The release workflow currently uses Git tags matching `v*`
+(TR-2026-09-10-02); this requirement narrows the script's supported release
+tags to semantic-version tags. When valid release tags exist but
+`CHANGELOG.md` is empty, the tags determine the next version but the draft
+still includes all current requirements and the complete requirements history
+diff, as required for an initial changelog entry.
+
+---
+
+## TR-2026-09-12-01
+
+| Property | Value |
+|----------|-------|
+| Title | Publish the matching changelog entry in GitHub Release notes |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-09-12 |
+| Related Requirements | TR-2026-09-10-02, TR-2026-09-11-02, TR-2026-09-11-03 |
+
+### Description
+
+Before authenticating to a registry or building or publishing either image,
+the release workflow shall read the checked-out `CHANGELOG.md` and validate
+that it contains an entry for the release tag's semantic version after its
+leading `v` is removed. A release entry is an H2 heading whose version is
+either literal text or the visible text of a Markdown link. In both forms the
+version shall exactly equal the tag's version; any date or other text after
+the version is permitted. This shall support the linked version headings
+generated under TR-2026-09-11-03.
+
+The workflow shall fail before the image build or publication steps when
+`CHANGELOG.md` is missing, cannot be read, or has no matching release entry.
+
+After both images have been published successfully, the workflow shall create
+or update the GitHub Release with the complete matching changelog entry: its
+H2 heading and every following line, including headings of every lower level,
+up to but excluding the next release-entry H2 heading or the end of the file.
+The release notes shall retain the `## Container images` section required by
+TR-2026-09-11-02.
+
+On a workflow rerun, the workflow shall replace its previously generated
+changelog-entry content and container-images section with the current,
+validated content while preserving release-note content managed by other
+sources. It shall use unambiguous machine-readable boundaries for the
+workflow-managed changelog content, rather than relying on user-authored
+headings to identify the prior content.
+
+Automated release-workflow verification shall cover literal and linked version
+headings, complete extraction through nested headings, stopping at the next
+release-entry heading and at end of file, fail-fast behaviour before any image
+build or publication, and idempotent rerun handling.
+
+### Rationale
+
+The changelog is the reviewed release summary. Validating its entry before
+costly, irreversible image publication prevents published artifacts without
+corresponding release notes, while bounded extraction keeps adjacent release
+entries out of the published release page.
+
+---

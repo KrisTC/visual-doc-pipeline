@@ -2,6 +2,8 @@
 
 Configurable processing pipeline for finding and replacing visible text in documents, images and images embeded in documents.
 
+## Why?
+
 Basically I thought it would be fun and interesting to solve the middle hard part of document translation, I haven't come across anything that does this well, except possibly the latest version of https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/latest/overview?tabs=async 
 
 | Area | Solved? | My target |
