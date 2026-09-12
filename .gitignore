@@ -4,6 +4,7 @@ sample-data/confidential/*
 # Generated results
 outputs/results/*
 outputs/evaluations/*
+outputs/changelog-drafts/*
 
 # Resumable reviewed dependency-artifact downloads
 .dependency-artifact-cache/

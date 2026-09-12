@@ -2,17 +2,17 @@
 
 `scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER` recursively processes supported files and writes copies below the output folder. It preserves the directory hierarchy and source file format. Each output filename is first passed to the selected text-replacement provider with `is_filename=True`; collisions receive a numeric suffix. Unsupported files are ignored, and a failure for one eligible input is reported without stopping later files.
 
-The command requires `--source-language` and defaults to `--target-language en`, `--text-replacement character_mask`, `--ocr paddleocr`, and `--document-text-layout preserve-source-formatting`.
+The command requires `--source-language` and defaults to `--target-language en`, `--text-replacement google_cloud_translate`, `--ocr paddleocr`, and `--document-text-layout preserve-basic-layout-source-font`.
 
 ## Top-level input formats
 
 | Input kind | Extensions | Processing route |
 |---|---|---|
 | Raster bitmap | `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`, `.gif`, `.webp` | OCR, colour estimation, and shared bitmap replacement. Regions below 65% OCR confidence remain unchanged. |
-| PDF | `.pdf` | Native PDF text, annotations and AcroForm data/appearances, plus raster image XObjects in pages and Form XObjects. |
-| Word | `.docx` | Native OOXML text and Office media parts. |
-| PowerPoint | `.pptx` | Native OOXML text, including SmartArt and speaker notes, and Office media parts. |
-| Excel | `.xlsx` | Native OOXML text and Office media parts. Structured-table headers are retained unchanged. |
+| PDF | `.pdf` | Native PDF text, annotations and AcroForm data/appearances; raster image XObjects in pages and Form XObjects; and eligible vector-outline text through the PDF OCR route. |
+| Word | `.docx` | Native OOXML text; reachable chart content, including the chart's embedded XLSX workbook; and supported raster and vector Office media parts. |
+| PowerPoint | `.pptx` | Native OOXML text, including SmartArt and speaker notes, plus supported raster and vector Office media parts. |
+| Excel | `.xlsx` | Native OOXML text, charts, and drawings, plus supported raster and vector Office media parts. Structured-table headers are retained unchanged. |
 | Vector graphic | `.svg`, `.emf`, `.wmf` | The same in-memory vector handler used for Office-embedded vector parts. |
 
 ```mermaid
@@ -23,7 +23,7 @@ flowchart TD
     bitmap --> ocr[OCR and bitmap replacement]
     vector --> vectorHandler[Format-specific vector handler]
     document --> native[Native text replacement]
-    document --> nested[Nested image/vector traversal]
+    document --> nested[Nested Office, image, and vector traversal]
     nested --> ocr
     nested --> vectorHandler
     native --> output[Output folder]
@@ -59,6 +59,13 @@ PPTX speaker notes always use direct OOXML replacement. Editable SmartArt and Wo
 ## Document traversal
 
 Office documents are processed as packages rather than flat files. Visible WordprocessingML, DrawingML, SpreadsheetML, and VML text nodes are replaced throughout their eligible OOXML parts, including common content such as headers, footers, tables, comments, text boxes, grouped-shape text, notes, and shared spreadsheet strings. Raster and supported vector parts below an Office `media` directory are processed in place.
+
+The Office media route applies to every supported Office input format. It uses
+the shared bitmap path for `.png`, `.jpg`, `.jpeg`, `.tif`, `.tiff`, `.bmp`,
+`.gif`, and `.webp`, and the shared vector path for `.svg`, `.emf`, and `.wmf`.
+Word's supported chart traversal also follows a reachable embedded `.xlsx`
+workbook, updates the workbook's eligible text, and synchronizes its related
+chart content. It does not recursively process arbitrary embedded Office files.
 
 PDF processing includes page content and reusable Form XObjects, annotation and AcroForm values and appearance streams, and raster image XObjects, including those within Form XObjects. A PDF with an inline image that cannot safely be rewritten fails as one file; later inputs continue.
 

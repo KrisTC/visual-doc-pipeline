@@ -1,154 +1,165 @@
 # visual-doc-pipeline
 
-Configurable processing pipeline for finding and replacing visible text in documents, images and images embeded in documents.
+![Banner](docs/visual-doc-pipeline-banner.png)
 
-Basically I thought it would be fun and interesting to solve the middle hard part of document translation, I haven't come across anything that does this well, except possibly the latest version of https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/latest/overview?tabs=async 
+**Translate visible text across document folders while keeping the documents usable.**
 
-| Area | Solved? | My target |
-|---|---:|---|
-| Replacing text in documents | ✅ | Easy — lots of people do this |
-| OCR and translation | ✅ | Hard — lots of people solved this |
-| Presentation-aware text replacement | 🎯 | Medium — ensure replacements scale nicely, either as rich-text objects or rendered bitmaps |
-| Nested bitmaps in rich-text documents | 🎯 | Medium |
+`visual-doc-pipeline` is a folder-level document-processing tool for engineers
+who need more than string replacement. It recursively processes documents and
+images, including their supported nested content. It replaces editable text
+natively where it can, applies OCR to visible bitmap text where it must, and
+writes a corresponding output tree without changing the source files.
 
-Project requirements are the source of truth and live in [requirements/](requirements/).
+The primary interface is [`scripts/folder_replacement.py`](scripts/folder_replacement.py).
+For normal use, run it in the supplied Docker image.
 
-## Normal use
+## Why use it
 
-### Recommended: use Docker
+- **Works across a mixed document estate.** Process PDF, Word, PowerPoint,
+  Excel, raster images, SVG, EMF, and WMF in one folder walk, including
+  supported embedded content.
+- **Keeps native content native where supported.** Editable text is replaced in
+  its document format; embedded images and supported graphics take the OCR
+  route instead of forcing an entire document into a bitmap.
+- **Preserves the operational shape of the input.** The output keeps the input
+  directory hierarchy and file formats. Unsupported files are reported and
+  left alone; a failed file does not stop the rest of the batch.
+- **Built for orchestration.** The command atomically updates `progress.json` in
+  the output root while it runs, with overall progress, ETA, and per-file
+  queued, processing, completed, failed, or skipped status. A self-hosted
+  translation service can consume it without parsing terminal output.
+- **Aims to preserve the source's intended presentation.** Translation often
+  expands a string beyond its original space—particularly in PowerPoint—
+  leaving slides unreadable and requiring a manual resizing pass. For supported bounded
+  containers, layout modes use the source's available area and formatting to
+  fit the replacement while preserving the document's visual intent.
+- **Provider-based by design.** PaddleOCR and Google Cloud Translation are the
+  built-in defaults. Argos Translate provides an offline translation option,
+  and both OCR and text-replacement providers have documented extension points.
 
-For the folder replacement script, start with the Docker workflow. It packages
-the runtime dependencies and provides separate CPU and NVIDIA GPU images. See
-the [container usage guide](docs/container-usage.md) for build and run
-instructions.
+## What it processes
 
-### Run locally
+| Input | Processing approach |
+|---|---|
+| PNG, JPEG, TIFF, BMP, GIF, WebP | OCR, colour-aware background replacement, and rendered replacement text |
+| PDF | Native text, annotations, forms, raster image XObjects, and eligible vector-outline text |
+| DOCX | Native Word content, charts and their embedded Excel workbooks, plus supported media parts |
+| PPTX | Native slide content, SmartArt, speaker notes, and supported media parts |
+| XLSX | Native workbook content, charts, drawings, and supported media parts |
+| SVG, EMF, WMF | Supported editable text records and contained bitmap payloads |
 
-The main application is [`scripts/folder_replacement.py`](scripts/folder_replacement.py). The other scripts set up its runtime, configure providers, or support development and evaluation.
+Every supported Office format processes supported raster and vector graphics in
+its `media` parts. Word also follows supported chart relationships into their
+embedded Excel workbooks. The [format-support guide](docs/folder-replacer-format-support.md)
+maps the exact nested-content routes and boundaries.
 
-Process a folder with the default providers (Google Cloud Translation and PaddleOCR):
+## Quick start: Docker
 
-```sh
-./run.sh scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER --source-language ja
-```
+The published CPU image is the recommended starting point:
+`ghcr.io/kristc/visual-doc-pipeline-cpu:latest`. It fixes the input and output
+roots inside the container at `/input` and `/output`, keeps the input read-only,
+and runs the pipeline as a non-root user.
 
-The default translation provider requires local Google Cloud credentials. Follow the [Google Cloud Translation setup guide](docs/google-cloud-translation-setup.md) before using it. To process text locally with Argos Translate instead, select its provider explicitly:
-
-```sh
-./run.sh scripts/folder_replacement.py INPUT_FOLDER OUTPUT_FOLDER \
-  --source-language ja \
-  --text-replacement argos_translate
-```
-
-Use `--help` to see all current options, providers, and document-layout modes:
-
-```sh
-./run.sh scripts/folder_replacement.py --help
-```
-
-## Development setup
-
-This project uses Python 3.13.14 and [uv](https://docs.astral.sh/uv/). Create or update the local environment only from the committed lockfile:
-
-```sh
-uv run --no-sync python scripts/sync_verified_dependencies.py --extra gpu
-```
-
-Check the dependency source and cooldown policy with:
-
-```sh
-./run.sh scripts/check-dependency-policy.py
-```
-
-Run all automated tests with:
-
-```sh
-scripts/run-tests.sh
-```
-
-Type-check all Python with:
+Run a folder through the default PaddleOCR and Google Cloud Translation
+providers. Replace the three host paths with your input folder, output folder,
+and service-account credential file:
 
 ```sh
-./run.sh scripts/typecheck-python.py
+docker run --rm --platform linux/amd64 --tty \
+  --mount type=bind,src="/absolute/path/to/input",dst=/input,readonly \
+  --mount type=bind,src="/absolute/path/to/output",dst=/output \
+  --mount type=volume,src=visual-doc-pipeline-cache,dst=/runtime-cache \
+  --mount type=bind,src="/absolute/path/to/service-account.json",dst=/run/secrets/google-application-credentials.json,readonly \
+  ghcr.io/kristc/visual-doc-pipeline-cpu:latest \
+  --source-language ja --target-language en
 ```
 
-### Windows NVIDIA GPU OCR
+The first run downloads required runtime assets into the cache volume. The
+default translation provider needs a Google Cloud service account with the
+Cloud Translation API enabled. For credential setup, an NVIDIA GPU run, local
+translation with Argos, optional plugins or fonts, and platform notes, read the
+[container usage guide](docs/container-usage.md).
 
-On Windows, the locked environment uses PaddlePaddle's CUDA 12.6 GPU wheel and selects GPU 0 automatically when the NVIDIA runtime is available. GPU support requires an x64 NVIDIA CUDA 12 runtime and an x64 cuDNN 9 runtime in the child-process `PATH`, in addition to a compatible NVIDIA driver.
-
-The following archived installers were verified with the current PaddlePaddle wheel:
-
-- [CUDA Toolkit 12.0 for Windows x86_64](https://developer.nvidia.com/cuda-12-0-0-download-archive?target_os=Windows&target_arch=x86_64&target_version=11&target_type=exe_local)
-- [cuDNN 9.24 for Windows x86_64](https://developer.nvidia.com/cudnn-9-24-0-download-archive?target_os=Windows&target_arch=x86_64&target_version=11&target_type=exe_local)
-
-Install the x64 variants, then generate the local ignored runtime configuration:
-
-```powershell
-& .\scripts\configure-paddle-cuda-environment.ps1
-```
-
-The script selects the newest valid installed CUDA Toolkit 12.x directory and cuDNN 9.x `bin\12.*\x64` directory, writes only its managed `PATH` entry to the ignored `.env.local` file, and verifies that PaddlePaddle sees a CUDA device. It preserves other `.env.local` entries, including provider credentials. Subsequent project commands use that file through the repository-root `run.ps1` or `run.sh` wrapper. CPU-only and non-Windows environments continue to use the standard CPU PaddlePaddle dependency.
-
-The OCR task model and plugin contract are documented in [docs/ocr-provider-api.md](docs/ocr-provider-api.md). The text-replacement task model and plugin contract are documented in [docs/text-replacement-provider-api.md](docs/text-replacement-provider-api.md). The text-region-colour API is documented in [docs/text-region-colours-api.md](docs/text-region-colours-api.md), with its rationale and algorithm in [docs/text-region-colours-algorithm.md](docs/text-region-colours-algorithm.md). The Skia-backed in-place rendering API is documented in [docs/text-region-rendering-api.md](docs/text-region-rendering-api.md).
-
-### Prepare OCR-evaluation inputs
-
-Prepare local OCR inputs from the sample-data tree:
+To inspect every available option and provider:
 
 ```sh
-./run.sh scripts/prepare_ocr_evaluation_inputs.py
+docker run --rm --platform linux/amd64 \
+  ghcr.io/kristc/visual-doc-pipeline-cpu:latest --help
 ```
 
-The generated outputs are ignored by Git and may contain confidential material. Do not add, stage, or commit them.
+## How replacement is applied
 
-Only samples in a BCP 47 language directory are prepared. Place that directory directly below `sample-data/`, or one directory below it, for example `sample-data/ja/` or `sample-data/corpus/en-GB/`. The script mirrors eligible source paths and removes whole stale generated directories, while retaining extra files in generated directories that still correspond to source directories.
+![alt text](docs/simplified_replacment_algo.png)
 
-### Run OCR evaluations
+The pipeline chooses the least destructive supported route for each piece of
+visible text:
 
-Generate visual evaluation artifacts for every discovered OCR provider:
+1. It replaces eligible editable text in native document structures.
+2. It traverses supported embedded images and graphics, using OCR where the
+   visible text is raster content.
+3. It writes processed copies beneath the output folder and reports processed,
+   ignored, failed, and replaced items.
 
-```sh
-./run.sh scripts/ocr_evaluations.py
-```
+For bounded native text containers, `preserve-basic-layout` fits replacement
+text into the available space using portable fonts. The default
+`preserve-basic-layout-source-font` mode uses the same fitting calculation
+while retaining source font references where practical. Some document content
+is intentionally retained when a safe replacement cannot be established; the
+[format-support guide](docs/folder-replacer-format-support.md) explains those
+boundaries.
 
-The command first prepares inputs from `sample-data/`. Results are written below `outputs/evaluations/ocr/output/<provider>/`. Each provider root contains the existing `index.html` OCR viewer, plus `text-replacement.html` for complete and clipped output from every local text-replacement provider. Successful OCR JSON results include their input `source_language`. tqdm renders one compact progress bar at a time for each language folder and its immediate child folders. A provider is skipped when its input checksum and generated viewers are current; delete its `.input.sha256` or a viewer to regenerate it.
+## Providers and extension points
 
-### Run colour-estimation evaluations
+![Plugin Architecture](docs/plugin_architecture.png)
 
-Generate simple static HTML pages for the supplied colour-detection examples:
+The default combination is **PaddleOCR** for OCR and **Google Cloud Translation
+Advanced v3** for text replacement. Select `argos_translate` with
+`--text-replacement` when local translation is the better fit for your
+workflow. Provider contracts make it possible to add suitable OCR or
+text-replacement implementations without changing the folder-processing core.
 
-```sh
-./run.sh scripts/colour_evaluations.py
-```
+- [Google Cloud Translation setup](docs/google-cloud-translation-setup.md)
+- [OCR provider API](docs/ocr-provider-api.md)
+- [Text-replacement provider API](docs/text-replacement-provider-api.md)
 
-The pages are written below `outputs/evaluations/color-detection-examples/`. Each page shows the existing padded text-region bitmap for every OCR region, alongside labelled colour swatches, confidence values, and background classification. These local generated artifacts are ignored by Git.
+## Security by design
 
-### Run text-replacement evaluations
+Document translation frequently handles sensitive and untrusted files. Security
+boundaries are therefore part of the pipeline design, not an afterthought.
 
-Generate source-language-to-English visible replacement pages for every registered text-replacement provider:
+- **Constrained containers.** The image runs as a non-root user. Only `/output`
+  and `/runtime-cache` are writable; input, credentials, plugins, and fonts are
+  separate read-only mounts. Credentials are never copied into image layers,
+  output, or the runtime cache.
+- **Explicit cloud boundary.** Google Cloud Translation uses a least-privilege
+  service account rather than an API key and defaults to the EU endpoint.
+  Translation text crosses that boundary only when the operator selects the
+  provider and supplies its credentials.
+- **Conservative document processing.** The pipeline does not resolve external
+  URLs or file references in vector graphics. PDF vector OCR is rendered
+  locally with page-size limits to reduce resource-exhaustion risk from
+  untrusted files.
+- **Controlled runtime and supply chain.** Dependencies are locked, use a
+  seven-day package cooldown, and are installed from wheels rather than source
+  builds. Registry exceptions are narrowly pinned and hash-verified. The
+  container does not install packages at startup; mounted provider plugins are
+  explicitly treated as operator-trusted code.
 
-```sh
-./run.sh scripts/text_replacement_evaluations.py
-```
+These controls support a safer default deployment, but operators remain
+responsible for approving their translation provider, credentials, input data,
+and any mounted plugins. See the [container usage guide](docs/container-usage.md)
+for the mount and credential model.
 
-Pages and their clipped rendered text images are written below `outputs/evaluations/text-replacement-examples/`. The evaluator uses the committed Noto Sans JP font asset and does not modify inputs.
+## Documentation
 
-## Core technologies
+- [Container usage](docs/container-usage.md) — CPU and NVIDIA GPU builds, mounts,
+  credentials, caches, plugins, and fonts.
+- [Format support](docs/folder-replacer-format-support.md) — format-by-format
+  behaviour, layout modes, and known limits.
+- [Local development](docs/development.md) — environment setup, checks, Windows
+  CUDA configuration, and evaluation workflows.
+- [Project background](docs/project-background.md) — the problem this project is
+  intended to solve and its original motivation.
+- [Changelog](CHANGELOG.md) — release history and delivered capabilities.
 
-### Implemented provider plugins
-
-- **PaddleOCR — OCR.** The default OCR provider, with support for English and Japanese and text-region geometry. See the [OCR provider plugin documentation](docs/ocr-provider-api.md) and the [PaddleOCR documentation](https://paddlepaddle.github.io/PaddleOCR/main/en/quick_start.html).
-
-- **Google Cloud Translation Advanced v3 — translation.** The default text-replacement provider. See the [text-replacement provider documentation](docs/text-replacement-provider-api.md), [local setup guide](docs/google-cloud-translation-setup.md), and [Google Cloud Translation documentation](https://docs.cloud.google.com/translate/docs/advanced/translate-text-v3).
-
-- **Argos Translate — offline translation.** An alternative text-replacement provider that translates locally, downloading official language packages when required. See the [text-replacement provider documentation](docs/text-replacement-provider-api.md) and [Argos Translate](https://github.com/argosopentech/argos-translate/).
-
-### Future provider options
-
-- **Tesseract** — comparison or fallback OCR provider. [Documentation](https://tesseract-ocr.github.io/tessdoc/)
-- **LibreTranslate** — self-hosted translation API backed by Argos Translate. [Documentation](https://github.com/LibreTranslate/LibreTranslate)
-- **CTranslate2 with an open-licensed translation model** — faster local inference or user-selectable models. [Documentation](https://github.com/OpenNMT/CTranslate2)
-- **Google Cloud Vision OCR** — cloud OCR provider. [Documentation](https://docs.cloud.google.com/vision/docs/ocr)
-- **Azure Vision or Document Intelligence with Azure Document Translation** — Microsoft-oriented cloud OCR and translation providers. [Vision language support](https://learn.microsoft.com/en-us/azure/ai-services/computer-vision/language-support); [Document Translation](https://learn.microsoft.com/en-us/azure/ai-services/translator/document-translation/latest/overview)
-- **DeepL API** — cloud translation provider. [Document API](https://developers.deepl.com/api-reference/document/upload-and-translate-a-document)
-- **OpenAI or Gemini multimodal models** — optional context-aware translation providers, not a default source of OCR coordinates or deterministic rendering.
+The project design requirements are maintained in [requirements/](requirements/).
