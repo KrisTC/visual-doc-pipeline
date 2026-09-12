@@ -24,9 +24,13 @@ For normal use, run it in the supplied Docker image.
 - **Preserves the operational shape of the input.** The output keeps the input
   directory hierarchy and file formats. Unsupported files are reported and
   left alone; a failed file does not stop the rest of the batch.
-- **Aims to preserve the source's intended presentation.** Translation often expands a
-  string beyond its original space—particularly in PowerPoint—leaving slides
-  unreadable and requiring a manual resizing pass. For supported bounded
+- **Built for orchestration.** The command atomically updates `progress.json` in
+  the output root while it runs, with overall progress, ETA, and per-file
+  queued, processing, completed, failed, or skipped status. A self-hosted
+  translation service can consume it without parsing terminal output.
+- **Aims to preserve the source's intended presentation.** Translation often
+  expands a string beyond its original space—particularly in PowerPoint—
+  leaving slides unreadable and requiring a manual resizing pass. For supported bounded
   containers, layout modes use the source's available area and formatting to
   fit the replacement while preserving the document's visual intent.
 - **Provider-based by design.** PaddleOCR and Google Cloud Translation are the
