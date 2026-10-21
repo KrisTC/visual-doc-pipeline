@@ -115,7 +115,7 @@ class TextReplacementProviderFactory:
             return provider
         if not isinstance(identity, str) or not identity.strip():
             return provider
-        return CachingTextReplacementProvider(provider, f"{name}:{identity}")
+        return CachingTextReplacementProvider(provider, f"{name}:{identity}", name)
 
     @property
     def provider_names(self) -> tuple[str, ...]:

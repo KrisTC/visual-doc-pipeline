@@ -142,7 +142,7 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
                 self.assertEqual(vector_data, archive.read("word/media/vector.svg"))
 
     # Verifies FR-2026-09-06-01.
-    def test_standalone_retained_vector_does_not_write_debug_sidecar(self) -> None:
+    def test_standalone_retained_vector_writes_metrics_only_debug_sidecar(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             input_root = root / "input"
@@ -160,7 +160,10 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
             )
 
             self.assertEqual([], result.failures)
-            self.assertFalse((output_root / "outlined.svg.diagnostics.json").exists())
+            # Verifies FR-2026-10-21-01's metrics-only debug sidecar.
+            report = json.loads((output_root / "outlined.svg.diagnostics.json").read_text("utf-8"))
+            self.assertEqual([], report["entries"])
+            self.assertIn("run_activity", report)
 
     # Verifies FR-2026-09-04-01.
     def test_embedded_emf_receives_requested_basic_layout_mode(self) -> None:

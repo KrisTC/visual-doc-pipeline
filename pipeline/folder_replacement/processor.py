@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import os
 import sys
+from time import perf_counter
 from typing import Protocol
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
@@ -23,7 +24,12 @@ from pipeline.folder_replacement.failure_diagnostics import (
     FailureContext,
     exception_cause_types,
 )
-from pipeline.provider_cache import is_cache_sidecar, provider_diagnostic_name, source_cache_scope
+from pipeline.provider_cache import (
+    CACHE_FILENAME_SUFFIX, CacheInspectionError, CachingOcrProvider,
+    CachingTextReplacementProvider, inspect_cache, is_cache_sidecar,
+    provider_diagnostic_name, source_cache_scope,
+)
+from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacementProvider, RunMetrics
 from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
 from pipeline.vector_text import VectorReplacementResult, replace_vector_text
@@ -91,6 +97,8 @@ def replace_input_folder(
     xlsx_translation_mode: str = "full",
     include_patterns: tuple[str, ...] = (),
     diagnostics_enabled: bool = False,
+    ocr_provider_name: str | None = None,
+    text_replacement_provider_name: str | None = None,
     show_progress: bool = True,
     progress_factory: ProgressFactory | None = None,
 ) -> FolderReplacementResult:
@@ -215,11 +223,24 @@ def replace_input_folder(
         failure_context = FailureContext() if diagnostics_enabled else None
         processing_ocr: OcrProvider = ocr_provider
         processing_replacement: TextReplacementProvider = text_replacement_provider
+        run_metrics = RunMetrics() if diagnostics_enabled else None
+        if run_metrics is not None:
+            run_metrics.__enter__()
+            if not isinstance(ocr_provider, CachingOcrProvider):
+                processing_ocr = MeteredOcrProvider(
+                    ocr_provider, ocr_provider_name or type(ocr_provider).__name__
+                )
+            if not isinstance(text_replacement_provider, CachingTextReplacementProvider):
+                processing_replacement = MeteredTextReplacementProvider(
+                    text_replacement_provider,
+                    text_replacement_provider_name or type(text_replacement_provider).__name__,
+                )
         if failure_context is not None:
-            processing_ocr = ContextualOcrProvider(ocr_provider, failure_context)
+            processing_ocr = ContextualOcrProvider(processing_ocr, failure_context)
             processing_replacement = ContextualTextReplacementProvider(
-                text_replacement_provider, failure_context
+                processing_replacement, failure_context
             )
+        document_started = perf_counter()
         cache_scope = source_cache_scope(source_path)
         cache_scope.__enter__()
         try:
@@ -412,50 +433,37 @@ def replace_input_folder(
             cause_types = exception_cause_types(error)
             if cause_types:
                 document_diagnostics[-1]["exception_cause_types"] = cause_types
-            if diagnostics_enabled:
-                _write_document_diagnostic(
-                    output_root,
-                    source_path,
-                    relative_source_path,
-                    destination,
-                    _diagnostic_options(
-                        source_language,
-                        target_language,
-                        document_text_layout,
-                        include_patterns,
-                        ocr_provider,
-                        text_replacement_provider,
-                    ),
-                    _document_totals_since(counts_before, result),
-                    document_diagnostics,
-                    result,
-                )
             continue
         else:
             progress_entry["status"] = "completed"
             progress_entry["progress"] = 100
             reserved_paths.add(destination)
             result.processed_files += 1
-            if diagnostics_enabled and document_diagnostics:
-                _write_document_diagnostic(
-                    output_root,
-                    source_path,
-                    relative_source_path,
-                    destination,
-                    _diagnostic_options(
-                        source_language,
-                        target_language,
-                        document_text_layout,
-                        include_patterns,
-                        ocr_provider,
-                        text_replacement_provider,
-                    ),
-                    _document_totals_since(counts_before, result),
-                    document_diagnostics,
-                    result,
-                )
         finally:
             cache_scope.__exit__(None, None, None)
+            document_seconds = perf_counter() - document_started
+            if run_metrics is not None:
+                run_metrics.__exit__(None, None, None)
+                cache_path = source_path.with_name(f"{source_path.name}{CACHE_FILENAME_SUFFIX}")
+                inventory: list[dict[str, object]] | None = None
+                if cache_path.is_file():
+                    try:
+                        inventory = inspect_cache(cache_path)
+                    except CacheInspectionError:
+                        pass
+                _write_document_diagnostic(
+                    output_root, source_path, relative_source_path, destination,
+                    _diagnostic_options(
+                        source_language, target_language, document_text_layout,
+                        include_patterns, ocr_provider, text_replacement_provider,
+                    ),
+                    _document_totals_since(counts_before, result), document_diagnostics, result,
+                    run_activity={
+                        "document_processing_seconds": document_seconds,
+                        "providers": run_metrics.report(document_seconds),
+                    },
+                    cache_inventory=inventory,
+                )
             if display is not None:
                 display.complete_overall_source(completed_sources)
                 display.clear_current()
@@ -553,15 +561,15 @@ def _write_document_diagnostic(
     totals: Mapping[str, int],
     entries: list[dict[str, object]],
     result: FolderReplacementResult,
+    run_activity: dict[str, object] | None = None,
+    cache_inventory: list[dict[str, object]] | None = None,
 ) -> None:
     """Write one local JSON sidecar beside a document's intended output path."""
     intended_output = destination or output_root / relative_source_path
     sidecar = intended_output.with_name(f"{intended_output.name}.diagnostics.json")
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     output_path = intended_output.relative_to(output_root).as_posix()
-    sidecar.write_text(
-        json.dumps(
-            {
+    diagnostic: dict[str, object] = {
                 "schema_version": 1,
                 "source_path": relative_source_path.as_posix(),
                 "source_absolute_path": source_path.resolve().as_posix(),
@@ -569,7 +577,14 @@ def _write_document_diagnostic(
                 "options": dict(options),
                 "totals": dict(totals),
                 "entries": entries,
-            },
+            }
+    if run_activity is not None:
+        diagnostic["run_activity"] = run_activity
+    if cache_inventory is not None:
+        diagnostic["cache_inventory"] = cache_inventory
+    sidecar.write_text(
+        json.dumps(
+            diagnostic,
             ensure_ascii=False,
             indent=2,
         )

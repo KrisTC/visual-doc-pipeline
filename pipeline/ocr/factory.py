@@ -99,7 +99,7 @@ class OcrProviderFactory:
             return provider
         if not isinstance(identity, str) or not identity.strip():
             return provider
-        return CachingOcrProvider(provider, f"{name}:{identity}")
+        return CachingOcrProvider(provider, f"{name}:{identity}", name)
 
     @property
     def provider_names(self) -> tuple[str, ...]:

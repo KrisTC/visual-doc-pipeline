@@ -534,7 +534,9 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
             )
 
             self.assertEqual(1, result.replaced_native_text_items)
-            self.assertEqual([], result.diagnostic_sidecars)
+            # Verifies FR-2026-10-21-01's metrics-only debug sidecar.
+            self.assertEqual(1, len(result.diagnostic_sidecars))
+            self.assertEqual([], json.loads(result.diagnostic_sidecars[0].read_text("utf-8"))["entries"])
             output = PdfReader(output_root / "document.pdf")
             self.assertIn("# \u00A0#", output.pages[0].extract_text())
             fonts = cast(DictionaryObject, cast(DictionaryObject, output.pages[0]["/Resources"])["/Font"])
@@ -952,7 +954,9 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
             )
             self.assertGreaterEqual(font_size, 16.0)
             self.assertLess(font_size, 20.0)
-            self.assertFalse((output_root / "document.pdf.diagnostics.json").exists())
+            # Verifies FR-2026-10-21-01's metrics-only debug sidecar.
+            report = json.loads((output_root / "document.pdf.diagnostics.json").read_text("utf-8"))
+            self.assertEqual([], report["entries"])
 
     # Verifies FR-2026-08-30-05.
     def test_basic_layout_pdf_widens_past_a_non_intersecting_form_background(self) -> None:
@@ -1163,7 +1167,10 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
                 places=4,
             )
             distant_report = output_root / "distant-curve.pdf.diagnostics.json"
-            self.assertFalse(distant_report.exists())
+            # Verifies FR-2026-10-21-01's metrics-only debug sidecar.
+            distant_metrics = json.loads(distant_report.read_text(encoding="utf-8"))
+            self.assertEqual([], distant_metrics["entries"])
+            self.assertIn("run_activity", distant_metrics)
 
             blocking_report = json.loads((
                 output_root / "blocking-curve.pdf.diagnostics.json"
@@ -1297,8 +1304,13 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
                 diagnostics_enabled=True,
             )
 
+            # Verifies FR-2026-10-21-01: successful debug files still have metrics sidecars.
             for filename in ("successful.pdf", "already-fitting.pdf"):
-                self.assertFalse((output_root / f"{filename}.diagnostics.json").exists())
+                report = json.loads(
+                    (output_root / f"{filename}.diagnostics.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual([], report["entries"])
+                self.assertIn("run_activity", report)
             multiline_report = json.loads(
                 (output_root / "multiline.pdf.diagnostics.json").read_text(encoding="utf-8")
             )

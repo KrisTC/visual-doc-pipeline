@@ -1640,3 +1640,122 @@ deterministic matching, malformed-font fallback, absence behaviour, and that
 portable Noto output is unchanged.
 
 ---
+
+## FR-2026-10-21-01
+
+| Property | Value |
+|----------|-------|
+| Title | Report per-provider OCR and text-replacement cache and run metrics |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-21 |
+| Related Requirements | FR-2026-08-27-06, FR-2026-08-27-10, FR-2026-08-27-11, SR-2026-08-27-01, SR-2026-10-21-01 |
+
+### Description
+
+The project shall provide a local development command accepting one existing
+`<source filename>.plugin-cache.sqlite3` file and reporting counts of distinct
+successful cached results grouped by result kind and provider name. For each
+text-replacement provider it shall also report the sum of input characters for
+entries whose input length is known; for each OCR provider it shall report the
+number of cached OCR image results. For each provider kind it shall also report
+the count of entries with a known provider-call duration and their total,
+minimum, maximum, and average elapsed seconds. A character shall be one Python
+string code point in the exact provider input, including filename inputs. These
+counts describe unique cache entries, not the number of provider calls, cache
+hits, encountered images, or necessarily changed strings. The command shall
+not print cache paths, request or result text, keys, provider identities or
+configuration, or document-specific details.
+
+The existing `provider_result_cache` table shall retain its composite primary
+key (`result_kind`, `cache_key`) and its `result_json` value unchanged. An
+in-place schema migration shall add nullable columns for the provider's public
+plugin name, the elapsed provider-call duration in seconds, and, for text
+replacement, the input character count. New cache rows shall populate these
+columns alongside `result_json`; no additional table, key change, or result
+re-encoding is required. On a successful hit of
+an older row, the cache shall populate any missing metadata columns from the
+current provider and request without rerunning the provider, replacing
+`result_json`, or changing the cache key or hit conditions. A duration shall
+be measured with a monotonic clock around a successful underlying provider
+call, excluding cache lookup, rendering, and other pipeline work. It shall
+remain unknown for legacy rows and shall never be backfilled or overwritten
+on a cache hit. Existing rows shall remain usable after migration.
+
+The command and debug cache-inventory snapshot shall calculate per-provider
+counts, input-character totals, and known-duration statistics by aggregating
+these columns in SQLite, without reading `result_json` or reconstructing
+request input. Legacy rows not subsequently hit shall be counted as
+unattributed, separately for OCR and
+text replacement; their input character total shall remain unknown, not zero
+or estimated from the output. Totals shall distinguish known input characters
+from the number of rows with unknown input length, and known durations from
+the number of rows with unknown duration. The duration average shall divide
+the known total by the count of rows with known duration; when none are known,
+minimum, maximum, and average shall be unavailable rather than zero. Invalid
+metadata shall not be displayed as a provider name or included in known totals.
+
+For every processed source file in a `--debug` folder-replacement run, its
+per-document `.diagnostics.json` shall include per-provider successful OCR
+and text-replacement call counts from that run, and input character totals for
+successful text-replacement calls, including hits when caching is enabled.
+For each provider it shall also include the count, total, minimum, maximum,
+and average elapsed seconds for successful underlying calls made in that run;
+cache hits shall contribute no provider-call duration. The sidecar shall
+record the document's elapsed processing wall time, including output-filename
+replacement but excluding diagnostic writing, and each provider's share as
+its total measured call seconds divided by that document time. The share
+shall be unavailable when the document time is zero or no call was measured.
+The timing and percentage shall not claim to account for cache hits, failed
+calls, or non-provider work; overlapping calls may produce shares that sum to
+more than 100 percent. These run counts shall also be available when
+`PIPELINE_PLUGIN_CACHE` is
+disabled, without creating or writing a cache. If a cache file already exists,
+the same sidecar shall additionally contain a read-only snapshot of its
+per-provider unique-entry counts, known input character totals, known-duration
+statistics, and legacy unknown/unattributed counts, regardless of whether
+provider caching is enabled. The snapshot shall be taken after the source's
+cache scope closes,
+so writes and backfills from that run are included. The two sets of counts
+shall be clearly identified as run activity versus cache inventory. The
+sidecar shall be written even when the document has no other reportable
+issue; existing diagnostic fields and issue entries shall remain intact.
+Runs without `--debug` shall retain the existing
+diagnostic-sidecar behaviour.
+
+Inspection of an absent, locked, unreadable, malformed, or unsupported cache
+shall not create or modify it or prevent normal document processing. The
+development command shall fail with a content-free error rather than report
+fabricated counts; a debug sidecar shall omit unavailable cache inventory or
+mark it unavailable, while retaining its per-run counts. Read-only inspection
+shall not access cached result text, invoke providers, or transmit data
+externally. Metrics collected during normal folder processing shall not copy
+cached result text into the new metrics fields; existing provider behaviour
+shall remain unchanged. The read-only security boundary for inspection with
+caching disabled is
+specified by SR-2026-10-21-01.
+
+### Rationale
+
+Per-provider metrics make expensive provider work visible without exposing
+cached content. Timing highlights whether translation or OCR dominates a
+document's processing time and whether a batch translation interface merits
+investigation. Backfilling on cache hits lets existing sidecars gradually
+gain useful attribution without invalidating or recomputing cached results;
+historical provider latency cannot be reconstructed from a cache hit.
+
+### Verification
+
+Automated tests shall use only synthetic provider requests and caches. They
+shall verify counts by kind and provider, Unicode input length, filename
+inputs, repeated cache hits, preservation and backfill of legacy keys and
+results, unknown legacy totals, malformed metadata, missing or locked caches,
+timing totals and extrema for new calls, unknown timing for legacy rows and
+hits, percentage denominator and zero-duration handling, and debug sidecars
+with caching both enabled and disabled. They shall verify
+that the new metrics fields and command output contain no cache content,
+paths, keys, or provider configuration and that inspection never creates a
+cache. Existing diagnostic fields remain governed by FR-2026-08-27-06.
+
+---

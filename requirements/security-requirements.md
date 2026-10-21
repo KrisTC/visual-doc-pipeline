@@ -365,3 +365,37 @@ Container mounts make host data and executable extensions available to the pipel
 Automated tests shall use synthetic mounts, configuration, and plugins. They shall verify non-root execution, credential precedence, no credential copying or logging, read-only-mount documentation, no startup dependency installation, and that mounted plugin code is described as trusted rather than sandboxed.
 
 ---
+
+## SR-2026-10-21-01
+
+| Property | Value |
+|----------|-------|
+| Title | Permit explicit read-only aggregate inspection of local provider caches |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-21 |
+| Related Requirements | SR-2026-08-27-01, FR-2026-08-27-06, FR-2026-08-27-10, FR-2026-10-21-01 |
+
+### Description
+
+The developer cache-metrics command and an explicitly debug-enabled folder
+replacement may read aggregate metadata from an existing cache even when
+`PIPELINE_PLUGIN_CACHE=1` is absent. This is an exception only to
+SR-2026-08-27-01's opt-in cache-access and per-result validation rules:
+inspection shall be read-only, shall not access cached result text, keys, or
+provider configuration, and shall not create or modify a cache. Missing or
+malformed caches and invalid metadata shall not disclose cache contents or
+paths. Provider-result lookups and writes remain opt-in under
+SR-2026-08-27-01. Confidential-sample restrictions remain unchanged.
+
+### Rationale
+
+Reading existing metrics is distinct from enabling provider-result caching.
+
+### Verification
+
+Synthetic tests shall verify read-only inspection with caching disabled,
+no cache creation or content disclosure, and unchanged cache opt-in behaviour.
+
+---

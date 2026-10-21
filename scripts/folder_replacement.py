@@ -134,7 +134,7 @@ def _argument_parser(
     command_options.add_argument(
         "--debug",
         action="store_true",
-        help="Write per-document diagnostic JSON sidecars for reportable issues.",
+        help="Write per-document diagnostic JSON sidecars with document metrics.",
     )
 
     parser.add_argument_group(
@@ -280,6 +280,8 @@ def main(
         xlsx_translation_mode=parsed_arguments.xlsx_translation_mode,
         include_patterns=include_patterns,
         diagnostics_enabled=parsed_arguments.debug,
+        ocr_provider_name=parsed_arguments.ocr,
+        text_replacement_provider_name=parsed_arguments.text_replacement,
     )
     print(
         "Folder replacement complete: "
