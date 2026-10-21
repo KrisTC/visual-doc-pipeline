@@ -35,6 +35,19 @@ See the current CLI surface with:
 ./run.sh scripts/folder_replacement.py --help
 ```
 
+Inspect aggregate counts and known provider-call timings from an existing
+source-adjacent cache (without enabling caching or reading cached results):
+
+```sh
+./run.sh scripts/cache_metrics.py INPUT_FILE.plugin-cache.sqlite3
+```
+
+The JSON output separates unattributed legacy rows (`provider_name: null`)
+from named providers. Unknown input lengths and durations remain unknown.
+With `--debug`, folder replacement also writes per-document run activity and,
+when an existing cache is available, a separate cache-inventory snapshot.
+Keep cache sidecars and diagnostics derived from confidential sources local.
+
 ## Checks
 
 Validate the dependency policy:

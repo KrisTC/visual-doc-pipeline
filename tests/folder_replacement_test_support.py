@@ -66,6 +66,7 @@ from pipeline.bounded_text_layout import (
 from pipeline.portable_bullet_overrides import LegacyBulletOverride
 from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
+from pipeline.ocr.provider import OcrProvider
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
     TextReplacementProvider,
@@ -517,7 +518,7 @@ class FolderReplacementTestCase(unittest.TestCase):
         self,
         input_root: Path,
         output_root: Path,
-        ocr_provider: _EmptyOcrProvider,
+        ocr_provider: OcrProvider,
         replacement_provider: TextReplacementProvider,
         *,
         show_progress: bool = False,

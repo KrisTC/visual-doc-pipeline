@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, closing
 from contextvars import ContextVar, Token
 import hashlib
 import json
@@ -11,7 +11,10 @@ import math
 import os
 from pathlib import Path
 import sqlite3
+from time import perf_counter
 from typing import TYPE_CHECKING, cast
+
+from pipeline.provider_metrics import record_run_call
 
 if TYPE_CHECKING:
     from pipeline.ocr.models import OcrRequest, OcrResult
@@ -74,8 +77,21 @@ class _SourceCacheSession:
                 connection.execute(
                     "CREATE TABLE IF NOT EXISTS provider_result_cache ("
                     "result_kind TEXT NOT NULL, cache_key TEXT NOT NULL, result_json TEXT NOT NULL, "
+                    "provider_name TEXT, input_characters INTEGER, provider_seconds REAL, "
                     "PRIMARY KEY (result_kind, cache_key))"
                 )
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(provider_result_cache)")
+                }
+                for name, column_type in (
+                    ("provider_name", "TEXT"),
+                    ("input_characters", "INTEGER"),
+                    ("provider_seconds", "REAL"),
+                ):
+                    if name not in columns:
+                        connection.execute(
+                            f"ALTER TABLE provider_result_cache ADD COLUMN {name} {column_type}"
+                        )
             except sqlite3.Error:
                 if connection is not None:
                     connection.close()
@@ -137,12 +153,67 @@ def source_cache_scope(source_path: Path) -> AbstractContextManager[None]:
     return _SourceCacheScope(source_path)
 
 
+class CacheInspectionError(Exception):
+    """The local cache inventory could not be safely inspected."""
+
+
+def inspect_cache(cache_path: Path) -> list[dict[str, object]]:
+    """Aggregate existing cache metadata without opening a writable connection."""
+    if not cache_path.name.endswith(CACHE_FILENAME_SUFFIX) or not cache_path.is_file():
+        raise CacheInspectionError("Cache inventory unavailable.")
+    try:
+        with closing(sqlite3.connect(f"{cache_path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.1)) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(provider_result_cache)")
+            }
+            if not {"result_kind", "cache_key", "result_json"} <= columns:
+                raise CacheInspectionError("Cache inventory unavailable.")
+            name = "provider_name" if "provider_name" in columns else "NULL"
+            characters = "input_characters" if "input_characters" in columns else "NULL"
+            seconds = "provider_seconds" if "provider_seconds" in columns else "NULL"
+            rows = connection.execute(
+                "WITH metadata AS (SELECT result_kind, "
+                f"CASE WHEN typeof({name}) = 'text' AND length({name}) BETWEEN 1 AND 128 "
+                f"AND {name} NOT GLOB '*[^a-zA-Z0-9_]*' THEN {name} ELSE NULL END AS name, "
+                f"CASE WHEN result_kind = 'text_replacement' AND typeof({characters}) = 'integer' "
+                f"AND {characters} BETWEEN 0 AND 1000000000 THEN {characters} ELSE NULL END AS chars, "
+                f"CASE WHEN typeof({seconds}) IN ('real', 'integer') "
+                f"AND {seconds} BETWEEN 0 AND 1000000000 THEN {seconds} ELSE NULL END AS secs "
+                "FROM provider_result_cache WHERE result_kind IN ('ocr', 'text_replacement')) "
+                "SELECT result_kind, name, COUNT(*), COUNT(chars), COALESCE(SUM(chars), 0), "
+                "COUNT(secs), COALESCE(SUM(secs), 0), MIN(secs), MAX(secs) "
+                "FROM metadata GROUP BY result_kind, name ORDER BY result_kind, name"
+            ).fetchall()
+        return [
+            {
+                "result_kind": kind,
+                "provider_name": name,
+                "cached_results": count,
+                "known_input_count": known_characters,
+                "unknown_input_count": count - known_characters if kind == "text_replacement" else None,
+                "known_input_characters": character_total if kind == "text_replacement" else None,
+                "duration_count": known_seconds,
+                "unknown_duration_count": count - known_seconds,
+                "duration_total_seconds": duration_total,
+                "duration_min_seconds": duration_min,
+                "duration_max_seconds": duration_max,
+                "duration_average_seconds": duration_total / known_seconds if known_seconds else None,
+            }
+            for kind, name, count, known_characters, character_total,
+                known_seconds, duration_total, duration_min, duration_max in rows
+        ]
+    except (sqlite3.Error, OSError, ValueError):
+        raise CacheInspectionError("Cache inventory unavailable.") from None
+
+
 class CachingOcrProvider:
     """Delegate OCR while reusing normalized results in the active source cache."""
 
-    def __init__(self, provider: OcrProvider, cache_identity: str) -> None:
+    def __init__(self, provider: OcrProvider, cache_identity: str, provider_name: str | None = None) -> None:
         self._provider = provider
         self._cache_identity = cache_identity
+        self.provider_name = provider_name or cache_identity.partition(":")[0]
 
     @property
     def wrapped_provider(self) -> OcrProvider:
@@ -170,20 +241,25 @@ class CachingOcrProvider:
         if _active_cache_session() is None:
             return self._provider.recognize(request)
         cache_key = _ocr_cache_key(self._cache_identity, request)
-        cached = _read_result("ocr", cache_key, _ocr_result_from_payload)
+        cached = _read_result("ocr", cache_key, _ocr_result_from_payload, self.provider_name, None)
         if cached is not None:
+            record_run_call("ocr", self.provider_name, None, None)
             return cast("OcrResult", cached)
+        started = perf_counter()
         result = self._provider.recognize(request)
-        _write_result("ocr", cache_key, _ocr_result_payload(result))
+        elapsed = perf_counter() - started
+        record_run_call("ocr", self.provider_name, None, elapsed)
+        _write_result("ocr", cache_key, _ocr_result_payload(result), self.provider_name, None, elapsed)
         return result
 
 
 class CachingTextReplacementProvider:
     """Delegate replacement while reusing normalized results in the active cache."""
 
-    def __init__(self, provider: TextReplacementProvider, cache_identity: str) -> None:
+    def __init__(self, provider: TextReplacementProvider, cache_identity: str, provider_name: str | None = None) -> None:
         self._provider = provider
         self._cache_identity = cache_identity
+        self.provider_name = provider_name or cache_identity.partition(":")[0]
 
     @property
     def wrapped_provider(self) -> TextReplacementProvider:
@@ -195,11 +271,16 @@ class CachingTextReplacementProvider:
         if _active_cache_session() is None:
             return self._provider.replace(request)
         cache_key = _text_replacement_cache_key(self._cache_identity, request)
-        cached = _read_result("text_replacement", cache_key, _text_result_from_payload)
+        input_characters = len(request.text)
+        cached = _read_result("text_replacement", cache_key, _text_result_from_payload, self.provider_name, input_characters)
         if cached is not None:
+            record_run_call("text_replacement", self.provider_name, input_characters, None)
             return cast("TextReplacementResult", cached)
+        started = perf_counter()
         result = self._provider.replace(request)
-        _write_result("text_replacement", cache_key, _text_result_payload(result))
+        elapsed = perf_counter() - started
+        record_run_call("text_replacement", self.provider_name, input_characters, elapsed)
+        _write_result("text_replacement", cache_key, _text_result_payload(result), self.provider_name, input_characters, elapsed)
         return result
 
 
@@ -243,7 +324,8 @@ def _cache_key(value: object) -> str:
 
 
 def _read_result(
-    result_kind: str, cache_key: str | None, decoder: Callable[[object], object]
+    result_kind: str, cache_key: str | None, decoder: Callable[[object], object],
+    provider_name: str, input_characters: int | None,
 ) -> object | None:
     session = _active_cache_session()
     if session is None or cache_key is None:
@@ -266,13 +348,23 @@ def _read_result(
                 (result_kind, cache_key),
             )
             return None
+        connection.execute(
+            "UPDATE provider_result_cache SET provider_name = COALESCE(provider_name, ?), "
+            "input_characters = COALESCE(input_characters, ?) "
+            "WHERE result_kind = ? AND cache_key = ? "
+            "AND (provider_name IS NULL OR (input_characters IS NULL AND ? IS NOT NULL))",
+            (provider_name, input_characters, result_kind, cache_key, input_characters),
+        )
         return result
     except sqlite3.Error:
         session.disable()
         return None
 
 
-def _write_result(result_kind: str, cache_key: str | None, payload: object) -> None:
+def _write_result(
+    result_kind: str, cache_key: str | None, payload: object,
+    provider_name: str, input_characters: int | None, provider_seconds: float,
+) -> None:
     session = _active_cache_session()
     if session is None or cache_key is None:
         return
@@ -285,9 +377,13 @@ def _write_result(result_kind: str, cache_key: str | None, payload: object) -> N
         if connection is None:
             return
         connection.execute(
-            "INSERT INTO provider_result_cache (result_kind, cache_key, result_json) VALUES (?, ?, ?) "
-            "ON CONFLICT(result_kind, cache_key) DO UPDATE SET result_json = excluded.result_json",
-            (result_kind, cache_key, encoded),
+            "INSERT INTO provider_result_cache "
+            "(result_kind, cache_key, result_json, provider_name, input_characters, provider_seconds) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(result_kind, cache_key) DO UPDATE SET "
+            "result_json = excluded.result_json, provider_name = excluded.provider_name, "
+            "input_characters = excluded.input_characters, provider_seconds = excluded.provider_seconds",
+            (result_kind, cache_key, encoded, provider_name, input_characters, provider_seconds),
         )
     except (sqlite3.Error, TypeError, ValueError, RecursionError):
         session.disable()

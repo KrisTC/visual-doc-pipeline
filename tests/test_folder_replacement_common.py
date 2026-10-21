@@ -39,6 +39,7 @@ from pipeline.folder_replacement import (
     replace_input_folder,
 )
 from pipeline.folder_replacement.processor import ProgressFactory, ProgressReporter
+from pipeline.provider_cache import CACHE_FILENAME_SUFFIX, CachingOcrProvider, CachingTextReplacementProvider
 from pipeline.folder_replacement.docx import _docx_ocr_backgrounds
 from pipeline.folder_replacement.pptx import _pptx_ocr_backgrounds
 from pipeline.folder_replacement.pdf import (
@@ -91,6 +92,62 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementCommonTests(FolderReplacementTestCase):
+    # Verifies FR-2026-10-21-01 and SR-2026-10-21-01.
+    def test_debug_run_without_cache_does_not_create_a_cache(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {}, clear=True):
+            root = Path(directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            source = input_root / "sample.png"
+            self._write_png(source)
+            self._run(
+                input_root, root / "output", _CountingOcrProvider(),
+                _RecordingReplacementProvider(), diagnostics_enabled=True,
+            )
+            self.assertFalse(source.with_name(f"{source.name}{CACHE_FILENAME_SUFFIX}").exists())
+            report = json.loads((root / "output/sample.png.diagnostics.json").read_text("utf-8"))
+            self.assertNotIn("cache_inventory", report)
+            self.assertEqual(2, len(report["run_activity"]["providers"]))
+
+    # Verifies FR-2026-10-21-01 and SR-2026-10-21-01.
+    def test_debug_provider_metrics_with_and_without_cache_opt_in(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            source = input_root / "sample.png"
+            self._write_png(source)
+            cache_path = source.with_name(f"{source.name}{CACHE_FILENAME_SUFFIX}")
+            ocr = _CountingOcrProvider()
+            replacement = _RecordingReplacementProvider()
+            cached_ocr = CachingOcrProvider(ocr, "synthetic:v1", "synthetic_ocr")
+            cached_replacement = CachingTextReplacementProvider(
+                replacement, "synthetic:v1", "synthetic_replacement"
+            )
+            with patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+                self._run(input_root, root / "first", cached_ocr, cached_replacement, diagnostics_enabled=True)
+                self._run(input_root, root / "second", cached_ocr, cached_replacement, diagnostics_enabled=True)
+            first = json.loads((root / "first/sample.png.diagnostics.json").read_text("utf-8"))
+            second = json.loads((root / "second/sample.png.diagnostics.json").read_text("utf-8"))
+            self.assertTrue(cache_path.is_file())
+            self.assertEqual([], first["entries"])
+            self.assertEqual(1, ocr.calls)
+            self.assertEqual(1, len(replacement.requests))
+            self.assertEqual(first["cache_inventory"], second["cache_inventory"])
+            first_run = first["run_activity"]["providers"]
+            second_run = second["run_activity"]["providers"]
+            self.assertEqual([1, 1], [entry["duration_count"] for entry in first_run])
+            self.assertEqual([0, 0], [entry["duration_count"] for entry in second_run])
+            self.assertEqual(1, second_run[1]["successful_calls"])
+            self.assertEqual(len(source.name), second_run[1]["input_characters"])
+            self.assertIsNone(second_run[1]["document_time_share_percent"])
+            with patch.dict("os.environ", {}, clear=True):
+                self._run(input_root, root / "third", ocr, replacement, diagnostics_enabled=True)
+            third = json.loads((root / "third/sample.png.diagnostics.json").read_text("utf-8"))
+            self.assertEqual(second["cache_inventory"], third["cache_inventory"])
+            self.assertEqual([1, 1], [entry["duration_count"] for entry in third["run_activity"]["providers"]])
+            self.assertEqual(1, third["run_activity"]["providers"][1]["successful_calls"])
+
     # Verifies FR-2026-09-04-02.
     def test_preserves_transparent_paletted_png_alpha_for_standalone_and_docx_media(self) -> None:
         class _TransparentPaletteOcrProvider(_EmptyOcrProvider):
