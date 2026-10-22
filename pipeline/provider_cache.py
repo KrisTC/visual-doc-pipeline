@@ -19,7 +19,12 @@ from pipeline.provider_metrics import record_run_call
 if TYPE_CHECKING:
     from pipeline.ocr.models import OcrRequest, OcrResult
     from pipeline.ocr.provider import LocalContractTestSkip, OcrProvider
-    from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+    from pipeline.text_replacement.models import (
+        BatchLimits,
+        TextReplacementItem,
+        TextReplacementRequest,
+        TextReplacementResult,
+    )
     from pipeline.text_replacement.provider import TextReplacementProvider
 
 
@@ -87,6 +92,7 @@ class _SourceCacheSession:
                     ("provider_name", "TEXT"),
                     ("input_characters", "INTEGER"),
                     ("provider_seconds", "REAL"),
+                    ("batch_items", "INTEGER"),
                 ):
                     if name not in columns:
                         connection.execute(
@@ -172,6 +178,7 @@ def inspect_cache(cache_path: Path) -> list[dict[str, object]]:
             name = "provider_name" if "provider_name" in columns else "NULL"
             characters = "input_characters" if "input_characters" in columns else "NULL"
             seconds = "provider_seconds" if "provider_seconds" in columns else "NULL"
+            batch_items = "batch_items" if "batch_items" in columns else "NULL"
             rows = connection.execute(
                 "WITH metadata AS (SELECT result_kind, "
                 f"CASE WHEN typeof({name}) = 'text' AND length({name}) BETWEEN 1 AND 128 "
@@ -179,10 +186,13 @@ def inspect_cache(cache_path: Path) -> list[dict[str, object]]:
                 f"CASE WHEN result_kind = 'text_replacement' AND typeof({characters}) = 'integer' "
                 f"AND {characters} BETWEEN 0 AND 1000000000 THEN {characters} ELSE NULL END AS chars, "
                 f"CASE WHEN typeof({seconds}) IN ('real', 'integer') "
-                f"AND {seconds} BETWEEN 0 AND 1000000000 THEN {seconds} ELSE NULL END AS secs "
+                f"AND {seconds} BETWEEN 0 AND 1000000000 THEN {seconds} ELSE NULL END AS secs, "
+                f"CASE WHEN result_kind = 'text_replacement' AND typeof({batch_items}) = 'integer' "
+                f"AND {batch_items} BETWEEN 1 AND 1000000 THEN {batch_items} ELSE NULL END AS items "
                 "FROM provider_result_cache WHERE result_kind IN ('ocr', 'text_replacement')) "
                 "SELECT result_kind, name, COUNT(*), COUNT(chars), COALESCE(SUM(chars), 0), "
-                "COUNT(secs), COALESCE(SUM(secs), 0), MIN(secs), MAX(secs) "
+                "COUNT(secs), COALESCE(SUM(secs), 0), MIN(secs), MAX(secs), "
+                "COUNT(items), COALESCE(SUM(1.0 / items), 0) "
                 "FROM metadata GROUP BY result_kind, name ORDER BY result_kind, name"
             ).fetchall()
         return [
@@ -193,6 +203,8 @@ def inspect_cache(cache_path: Path) -> list[dict[str, object]]:
                 "known_input_count": known_characters,
                 "unknown_input_count": count - known_characters if kind == "text_replacement" else None,
                 "known_input_characters": character_total if kind == "text_replacement" else None,
+                "approximate_request_count": request_total if kind == "text_replacement" else None,
+                "unknown_request_count": count - known_requests if kind == "text_replacement" else None,
                 "duration_count": known_seconds,
                 "unknown_duration_count": count - known_seconds,
                 "duration_total_seconds": duration_total,
@@ -201,7 +213,8 @@ def inspect_cache(cache_path: Path) -> list[dict[str, object]]:
                 "duration_average_seconds": duration_total / known_seconds if known_seconds else None,
             }
             for kind, name, count, known_characters, character_total,
-                known_seconds, duration_total, duration_min, duration_max in rows
+                known_seconds, duration_total, duration_min, duration_max,
+                known_requests, request_total in rows
         ]
     except (sqlite3.Error, OSError, ValueError):
         raise CacheInspectionError("Cache inventory unavailable.") from None
@@ -266,22 +279,57 @@ class CachingTextReplacementProvider:
         """Return the provider whose normalized results this proxy caches."""
         return self._provider
 
+    @property
+    def batch_limits(self) -> BatchLimits | None:
+        """Forward the wrapped provider's optional batch limits."""
+        from pipeline.text_replacement.helpers import batch_limits_of
+
+        return batch_limits_of(self._provider)
+
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        """Return a cached text-replacement result when available."""
+        """Return cached items, sending only the missing texts as one smaller request."""
         if _active_cache_session() is None:
             return self._provider.replace(request)
-        cache_key = _text_replacement_cache_key(self._cache_identity, request)
-        input_characters = len(request.text)
-        cached = _read_result("text_replacement", cache_key, _text_result_from_payload, self.provider_name, input_characters)
-        if cached is not None:
-            record_run_call("text_replacement", self.provider_name, input_characters, None)
-            return cast("TextReplacementResult", cached)
+        from pipeline.text_replacement.helpers import check_result_length
+        from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+
+        keys = [_text_replacement_cache_key(self._cache_identity, request, text) for text in request.texts]
+        items: list[TextReplacementItem | None] = []
+        for text, key in zip(request.texts, keys, strict=True):
+            cached = _read_result(
+                "text_replacement", key, _text_item_from_payload, self.provider_name, len(text)
+            )
+            items.append(cast("TextReplacementItem | None", cached))
+        hit_positions = [index for index, item in enumerate(items) if item is not None]
+        if hit_positions:
+            record_run_call(
+                "text_replacement", self.provider_name,
+                sum(len(request.texts[index]) for index in hit_positions), None,
+                texts=len(hit_positions),
+            )
+        miss_positions = [index for index, item in enumerate(items) if item is None]
+        if not miss_positions:
+            return TextReplacementResult(tuple(cast("list[TextReplacementItem]", items)))
+
+        miss_texts = tuple(request.texts[index] for index in miss_positions)
+        miss_request = TextReplacementRequest(
+            miss_texts, request.is_filename, request.source_language, request.target_language
+        )
         started = perf_counter()
-        result = self._provider.replace(request)
+        result = check_result_length(len(miss_texts), self._provider.replace(miss_request))
         elapsed = perf_counter() - started
-        record_run_call("text_replacement", self.provider_name, input_characters, elapsed)
-        _write_result("text_replacement", cache_key, _text_result_payload(result), self.provider_name, input_characters, elapsed)
-        return result
+        total_characters = sum(len(text) for text in miss_texts)
+        record_run_call(
+            "text_replacement", self.provider_name, total_characters, elapsed, texts=len(miss_texts)
+        )
+        for position, text, item in zip(miss_positions, miss_texts, result.items, strict=True):
+            items[position] = item
+            share = len(text) / total_characters if total_characters else 1 / len(miss_texts)
+            _write_result(
+                "text_replacement", keys[position], _text_item_payload(item),
+                self.provider_name, len(text), elapsed * share, batch_items=len(miss_texts),
+            )
+        return TextReplacementResult(tuple(cast("list[TextReplacementItem]", items)))
 
 
 def _ocr_cache_key(cache_identity: str, request: OcrRequest) -> str | None:
@@ -304,13 +352,13 @@ def _ocr_cache_key(cache_identity: str, request: OcrRequest) -> str | None:
 
 
 def _text_replacement_cache_key(
-    cache_identity: str, request: TextReplacementRequest
+    cache_identity: str, request: TextReplacementRequest, text: str
 ) -> str:
     return _cache_key(
         {
             "schema_version": _CACHE_SCHEMA_VERSION,
             "provider": cache_identity,
-            "text": request.text,
+            "text": text,
             "is_filename": request.is_filename,
             "source_language": request.source_language,
             "target_language": request.target_language,
@@ -364,6 +412,7 @@ def _read_result(
 def _write_result(
     result_kind: str, cache_key: str | None, payload: object,
     provider_name: str, input_characters: int | None, provider_seconds: float,
+    batch_items: int | None = None,
 ) -> None:
     session = _active_cache_session()
     if session is None or cache_key is None:
@@ -378,12 +427,14 @@ def _write_result(
             return
         connection.execute(
             "INSERT INTO provider_result_cache "
-            "(result_kind, cache_key, result_json, provider_name, input_characters, provider_seconds) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
+            "(result_kind, cache_key, result_json, provider_name, input_characters, "
+            "provider_seconds, batch_items) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(result_kind, cache_key) DO UPDATE SET "
             "result_json = excluded.result_json, provider_name = excluded.provider_name, "
-            "input_characters = excluded.input_characters, provider_seconds = excluded.provider_seconds",
-            (result_kind, cache_key, encoded, provider_name, input_characters, provider_seconds),
+            "input_characters = excluded.input_characters, provider_seconds = excluded.provider_seconds, "
+            "batch_items = excluded.batch_items",
+            (result_kind, cache_key, encoded, provider_name, input_characters, provider_seconds, batch_items),
         )
     except (sqlite3.Error, TypeError, ValueError, RecursionError):
         session.disable()
@@ -439,15 +490,15 @@ def _ocr_result_from_payload(payload: object) -> OcrResult:
     return OcrResult(tuple(items))
 
 
-def _text_result_payload(result: TextReplacementResult) -> object:
-    return {"text": result.text, "confidence": result.confidence, "extra": result.extra}
+def _text_item_payload(item: TextReplacementItem) -> object:
+    return {"text": item.text, "confidence": item.confidence, "extra": item.extra}
 
 
-def _text_result_from_payload(payload: object) -> TextReplacementResult:
-    from pipeline.text_replacement.models import TextReplacementResult
+def _text_item_from_payload(payload: object) -> TextReplacementItem:
+    from pipeline.text_replacement.models import TextReplacementItem
 
     mapping = _mapping(payload)
-    return TextReplacementResult(
+    return TextReplacementItem(
         text=_string(mapping.get("text")),
         confidence=_number(mapping.get("confidence")),
         extra=_mapping(_normalized_json_value(mapping.get("extra"))),

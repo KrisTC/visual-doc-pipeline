@@ -35,7 +35,7 @@ from pipeline.folder_replacement.xlsx import replace_xlsx_bytes, xlsx_native_tex
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import RgbColour
 from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 from pipeline.text_replacement.errors import TextReplacementProviderError
 
 
@@ -1779,7 +1779,9 @@ def _write_paragraph(element: ElementTree.Element, paragraph: BoundedTextParagra
 
 
 def _replace(text: str, provider: TextReplacementProvider, source: str, target: str) -> str:
-    return provider.replace(TextReplacementRequest(text, False, source, target)).text
+    return replace_text(
+        provider, text, is_filename=False, source_language=source, target_language=target
+    ).text
 
 
 def _classification(family: str | None) -> str:

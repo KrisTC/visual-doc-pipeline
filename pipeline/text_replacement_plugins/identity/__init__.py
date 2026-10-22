@@ -1,6 +1,7 @@
 """Deterministic text-replacement provider that preserves ordinary text."""
 
-from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement.helpers import replace_each
+from pipeline.text_replacement.models import TextReplacementItem, TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
 
 
@@ -16,8 +17,8 @@ class IdentityProvider:
     """Return the requested text unchanged for visual baseline comparisons."""
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        """Return the input without applying a replacement."""
-        return TextReplacementResult(text=request.text, confidence=1.0)
+        """Return every input text without applying a replacement."""
+        return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
 
 
 def create_provider() -> TextReplacementProvider:

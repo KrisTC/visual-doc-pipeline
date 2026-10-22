@@ -24,7 +24,7 @@ import skia  # type: ignore[import-not-found]
 
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import replace_text_region
-from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProviderFactory, replace_text
 from pipeline.provider_cache import source_cache_scope
 from scripts.colour_evaluations import EvaluationTextItem, _read_successful_text_items
 
@@ -168,13 +168,9 @@ def _render_rows(
         outputs: list[_ProviderOutput] = []
         for provider_index, provider_name in enumerate(provider_names, 1):
             provider = factory.create(provider_name)
-            replacement = provider.replace(
-                TextReplacementRequest(
-                    text=text_item.ocr_text.text,
-                    is_filename=False,
-                    source_language=source_language,
-                    target_language="en",
-                )
+            replacement = replace_text(
+                provider, text_item.ocr_text.text, is_filename=False,
+                source_language=source_language, target_language="en",
             )
             rendered_image = source_image.copy()
             replace_text_region(

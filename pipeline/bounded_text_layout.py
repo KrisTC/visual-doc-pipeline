@@ -17,7 +17,7 @@ import regex  # type: ignore[import-untyped]
 import skia  # type: ignore[import-not-found]
 
 from pipeline.portable_fonts import optional_static_typefaces
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FONT_DIRECTORY = PROJECT_ROOT / "tests" / "assets" / "fonts"
@@ -931,8 +931,9 @@ def _replace_paragraph(
     source_text = "".join(run.text for run in paragraph.runs)
     if not source_text.strip():
         return paragraph
-    replacement = provider.replace(
-        TextReplacementRequest(source_text, False, source_language, target_language)
+    replacement = replace_text(
+        provider, source_text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     )
     dominant_run = max(
         paragraph.runs,

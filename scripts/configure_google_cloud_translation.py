@@ -32,10 +32,10 @@ EU_LOCATION_HELP = (
 )
 PROBE_CODE = "\n".join(
     (
-        "from pipeline.text_replacement.models import TextReplacementRequest",
+        "from pipeline.text_replacement import replace_text",
         "from pipeline.text_replacement_plugins.google_cloud_translate import GoogleCloudTranslateProvider",
-        "result = GoogleCloudTranslateProvider().replace("
-        'TextReplacementRequest("translation configuration probe", False, "en", "fr"))',
+        "result = replace_text(GoogleCloudTranslateProvider(), 'translation configuration probe', "
+        "is_filename=False, source_language='en', target_language='fr')",
         "if not result.text:",
         '    raise RuntimeError("Google Cloud Translation returned empty probe text.")',
         f"print({PROBE_SUCCESS_MARKER!r})",

@@ -13,7 +13,7 @@ from pipeline.ocr import OcrProvider, OcrRequest
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour, opaque_rgb_for_ocr
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 
 def replace_bitmap_file(source: Path, destination: Path, ocr: OcrProvider, replacement: TextReplacementProvider, source_language: str, target_language: str, typeface: skia.Typeface) -> int:
@@ -47,7 +47,10 @@ def replace_image(image: Image.Image, ocr: OcrProvider, replacement: TextReplace
         nested_completed("OCR recognition")
     for item in detected:
         if item.confidence < TEXT_REPLACEMENT_MINIMUM_CONFIDENCE: continue
-        text = replacement.replace(TextReplacementRequest(item.text, False, source_language, target_language)).text
+        text = replace_text(
+            replacement, item.text, is_filename=False,
+            source_language=source_language, target_language=target_language,
+        ).text
         prepared.append(TextRegionReplacement(item, estimate_text_region_colours(image, item), text))
     if nested_completed is not None:
         nested_completed("process OCR results")

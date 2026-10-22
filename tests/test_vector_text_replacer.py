@@ -22,7 +22,12 @@ from pipeline.vector_text.replacer import (
     _emf_measured_source_bounds,
     _emf_unclipped_fit_contexts,
 )
-from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement import (
+    TextReplacementItem,
+    TextReplacementRequest,
+    TextReplacementResult,
+    replace_each,
+)
 
 
 def _mask(text: str) -> str:
@@ -34,7 +39,9 @@ class VectorTextReplacerTests(unittest.TestCase):
     def test_fits_svg_text_only_when_an_explicit_clip_rectangle_exists(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return TextReplacementResult("A substantially longer replacement", 1.0)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A substantially longer replacement", 1.0)
+                )
 
         result = replace_vector_text(
             b'''<svg xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="box"><rect width="40" height="20"/></clipPath></defs><text clip-path="url(#box)" font-family="Source Sans" font-size="20">old</text><text font-size="20">free</text></svg>''',
@@ -111,7 +118,7 @@ class VectorTextReplacerTests(unittest.TestCase):
     def test_fits_unclipped_emf_text_and_stops_at_a_vertical_line(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return TextReplacementResult("A considerably longer heading", 1.0)
+                return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
         source = _emf_with_unclipped_text(line_x=60)
         contexts = _emf_unclipped_fit_contexts(source, measure_source_fonts=False)
@@ -144,8 +151,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(line_x=60)
@@ -184,8 +193,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(intervening_line=True)
@@ -211,8 +220,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("One coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("One coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -263,8 +272,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(second_left=12, include_third=True)
@@ -292,8 +303,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(line_x=60, clipped=True)
@@ -321,8 +334,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A longer coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A longer coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -347,8 +360,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A longer coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A longer coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -370,8 +383,8 @@ class VectorTextReplacerTests(unittest.TestCase):
     def test_groups_mixed_bounded_and_measurement_derived_fragments(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.request = request.text
-                return TextReplacementResult("One coherent replacement", 1.0)
+                self.request = request.texts[0]
+                return replace_each(request, lambda text: TextReplacementItem("One coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -770,7 +783,7 @@ def _emf_text_rectangles(data: bytes, rectangle_offset: int) -> list[tuple[int, 
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        return TextReplacementResult("A considerably longer heading", 1.0)
+        return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
 
 def _emf_text_scales(data: bytes) -> list[tuple[float, float]]:

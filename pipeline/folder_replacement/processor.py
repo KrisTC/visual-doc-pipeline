@@ -31,7 +31,7 @@ from pipeline.provider_cache import (
 )
 from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacementProvider, RunMetrics
 from pipeline.terminal_progress import LiveProgress
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 from pipeline.vector_text import VectorReplacementResult, replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
@@ -641,13 +641,9 @@ def _destination_path(
     target_language: str,
     reserved_paths: set[Path],
 ) -> Path:
-    replacement_name = replacement_provider.replace(
-        TextReplacementRequest(
-            text=source_path.name,
-            is_filename=True,
-            source_language=source_language,
-            target_language=target_language,
-        )
+    replacement_name = replace_text(
+        replacement_provider, source_path.name, is_filename=True,
+        source_language=source_language, target_language=target_language,
     ).text
     _validate_filename(replacement_name)
     if Path(replacement_name).suffix.lower() != source_path.suffix.lower():
@@ -898,11 +894,7 @@ def _replace_native_text(
     source_language: str,
     target_language: str,
 ) -> str:
-    return replacement_provider.replace(
-        TextReplacementRequest(
-            text=text,
-            is_filename=False,
-            source_language=source_language,
-            target_language=target_language,
-        )
+    return replace_text(
+        replacement_provider, text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     ).text

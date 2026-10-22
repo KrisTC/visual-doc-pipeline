@@ -49,7 +49,7 @@ from pipeline.folder_replacement.office_xml import (
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.folder_replacement.common import NestedProgressReporter
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -1206,8 +1206,9 @@ def _replace_text_frame_source_formatting(
         for run in paragraph.runs:
             if not run.text:
                 continue
-            run.text = replacement.replace(
-                TextReplacementRequest(run.text, False, source_language, target_language)
+            run.text = replace_text(
+                replacement, run.text, is_filename=False,
+                source_language=source_language, target_language=target_language,
             ).text
             replaced += 1
     return replaced

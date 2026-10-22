@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Protocol, cast
 
 from pipeline.text_replacement.errors import TextReplacementProviderError
-from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement.helpers import replace_each
+from pipeline.text_replacement.models import TextReplacementItem, TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
 
 
@@ -79,24 +80,32 @@ class ArgosTranslateProvider:
     """Translate text locally, downloading official Argos packages when needed."""
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        """Translate one request, preserving an input filename's suffix unchanged."""
+        """Translate each text of a request, preserving an input filename's suffix unchanged."""
         source_code = _argos_language_code(request.source_language)
         target_code = _argos_language_code(request.target_language)
-        if not request.text or source_code == target_code:
-            return TextReplacementResult(text=request.text, confidence=0.0)
+        return replace_each(
+            request,
+            lambda text: self._replace_one(text, request.is_filename, source_code, target_code),
+        )
+
+    def _replace_one(
+        self, original: str, is_filename: bool, source_code: str, target_code: str
+    ) -> TextReplacementItem:
+        if not original or source_code == target_code:
+            return TextReplacementItem(original, 0.0)
 
         filename_suffix = ""
-        text = request.text
-        if request.is_filename:
-            filename = Path(request.text)
+        text = original
+        if is_filename:
+            filename = Path(original)
             filename_suffix = filename.suffix
             text = filename.stem
 
         translated = self._translate(text, source_code, target_code)
-        if request.is_filename:
+        if is_filename:
             _validate_filename_stem(translated)
             translated = f"{translated}{filename_suffix}"
-        return TextReplacementResult(text=translated, confidence=0.0)
+        return TextReplacementItem(translated, 0.0)
 
     def _translate(self, text: str, source_code: str, target_code: str) -> str:
         """Use an installed route, or install the shortest available package route."""

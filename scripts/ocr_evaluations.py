@@ -42,7 +42,7 @@ from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
-from pipeline.text_replacement import TextReplacementProviderFactory, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProviderFactory, replace_text
 from scripts.prepare_ocr_evaluation_inputs import prepare_evaluation_inputs
 from scripts.ocr_text_replacement_evaluations import _load_default_typeface
 
@@ -455,13 +455,9 @@ def _write_text_replacement_artifacts(
             updated_image = source_image.copy()
             replacements: list[TextRegionReplacement] = []
             for (_, text_item), estimate in zip(eligible_text_items, estimates, strict=True):
-                replacement = provider.replace(
-                    TextReplacementRequest(
-                        text=text_item.text,
-                        is_filename=False,
-                        source_language=evaluation_image.language,
-                        target_language="en",
-                    )
+                replacement = replace_text(
+                    provider, text_item.text, is_filename=False,
+                    source_language=evaluation_image.language, target_language="en",
                 )
                 replacements.append(
                     TextRegionReplacement(

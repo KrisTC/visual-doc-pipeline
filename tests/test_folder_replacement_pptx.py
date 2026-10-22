@@ -68,9 +68,11 @@ from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    TextReplacementItem,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    replace_each,
 )
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
@@ -85,7 +87,9 @@ from folder_replacement_test_support import (
     _MappedReplacementProvider,
     _RecordedProgress,
     _RecordingReplacementProvider,
+    _SingleTextRequest,
     _VectorOutlineOcrProvider,
+    _single_text_requests,
     _synthetic_pdf_visual_region,
 )
 
@@ -280,12 +284,12 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
     def test_pptx_table_uses_a_common_scale_and_writes_safe_fit_diagnostics(self) -> None:
         class _TableReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
+                self.requests.extend(_single_text_requests(request))
                 if request.is_filename:
-                    return TextReplacementResult(request.text, 1.0)
+                    return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
                 replacements = {
                     "header": "Header",
                     "short": "Short",
@@ -293,7 +297,7 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
                     "merged": "Merged replacement text. " * 6,
                     "fallback": "Fallback replacement",
                 }
-                return TextReplacementResult(replacements[request.text], 1.0)
+                return replace_each(request, lambda text: TextReplacementItem(replacements[text], 1.0))
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

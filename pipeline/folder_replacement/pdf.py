@@ -55,7 +55,7 @@ from pipeline.portable_bullet_overrides import (
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.runtime_assets import math_font_is_available, symbols_font_is_available
 from pipeline.text_region_colours import estimate_text_region_colours
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 
 _PDF_VECTOR_OCR_DPI = 200
@@ -518,8 +518,9 @@ def _replace_pdf_vector_outline_text(
         if colours.background_colour_confidence < _PDF_VECTOR_OCR_MINIMUM_BACKGROUND_CONFIDENCE:
             _pdf_vector_reason(reason_counts, "vector_ocr_background_unsafe")
             continue
-        replacement = replacement_provider.replace(
-            TextReplacementRequest(item.text, False, source_language, target_language)
+        replacement = replace_text(
+            replacement_provider, item.text, is_filename=False,
+            source_language=source_language, target_language=target_language,
         ).text
         if "\n" in replacement or not _pdf_static_font_supports_text(replacement):
             _pdf_vector_reason(reason_counts, "vector_ocr_replacement_unsupported")
@@ -4665,8 +4666,9 @@ def _pdf_replace_paint_spans(
     replacement_spans: list[_PdfPaintSpan] = []
     runs: list[BoundedTextRun] = []
     for span_index, span in enumerate(source_spans):
-        replacement = replacement_provider.replace(
-            TextReplacementRequest(span.text, False, source_language, target_language)
+        replacement = replace_text(
+            replacement_provider, span.text, is_filename=False,
+            source_language=source_language, target_language=target_language,
         )
         replacement_spans.append(_PdfPaintSpan(replacement.text, span.source))
         runs.append(replace(style, text=replacement.text, layout_span_id=span_index))

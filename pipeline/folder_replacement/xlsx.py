@@ -44,7 +44,16 @@ from pipeline.folder_replacement.bitmap import replace_bitmap_bytes
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND
 from pipeline.portable_fonts import static_noto_font
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement import (
+    BatchLimits,
+    TextReplacementItem,
+    TextReplacementProvider,
+    TextReplacementRequest,
+    TextReplacementResult,
+    batch_limits_of,
+    check_result_length,
+    replace_text,
+)
 
 
 _SPREADSHEET_NAMESPACE = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -1028,11 +1037,15 @@ class _NestedXlsxReplacementProvider:
         self._part = "embedded workbook"
         self._count = 0
 
+    @property
+    def batch_limits(self) -> BatchLimits | None:
+        return batch_limits_of(self._provider)
+
     def set_part(self, part: str) -> None:
         self._part = part
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        self._count += 1
+        self._count += len(request.texts)
         self._completed(f"{self._part} replacement {self._count}")
         return self._provider.replace(request)
 
@@ -1046,12 +1059,16 @@ class _CurrentXlsxReplacementProvider:
         self._part = "workbook"
         self._count = 0
 
+    @property
+    def batch_limits(self) -> BatchLimits | None:
+        return batch_limits_of(self._provider)
+
     def set_part(self, part: str) -> None:
         self._part = part
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         result = self._provider.replace(request)
-        self._count += 1
+        self._count += len(request.texts)
         self._completed(f"{self._part} replacement {self._count}")
         return result
 
@@ -1062,14 +1079,32 @@ class _XlsxTextSelectionProvider:
     def __init__(self, provider: TextReplacementProvider) -> None:
         self._provider = provider
 
+    @property
+    def batch_limits(self) -> BatchLimits | None:
+        return batch_limits_of(self._provider)
+
     def set_part(self, part: str) -> None:
         if isinstance(self._provider, (_CurrentXlsxReplacementProvider, _NestedXlsxReplacementProvider)):
             self._provider.set_part(part)
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        if not request.is_filename and not _is_xlsx_translation_candidate(request.text):
-            return TextReplacementResult(request.text, 0.0)
-        return self._provider.replace(request)
+        if request.is_filename:
+            return self._provider.replace(request)
+        eligible = [
+            index for index, text in enumerate(request.texts) if _is_xlsx_translation_candidate(text)
+        ]
+        if len(eligible) == len(request.texts):
+            return self._provider.replace(request)
+        items = [TextReplacementItem(text, 0.0) for text in request.texts]
+        if eligible:
+            forwarded = TextReplacementRequest(
+                tuple(request.texts[index] for index in eligible),
+                request.is_filename, request.source_language, request.target_language,
+            )
+            result = check_result_length(len(eligible), self._provider.replace(forwarded))
+            for index, item in zip(eligible, result.items, strict=True):
+                items[index] = item
+        return TextReplacementResult(tuple(items))
 
 
 def _set_nested_xlsx_part(provider: TextReplacementProvider, part: str) -> None:
@@ -1410,8 +1445,9 @@ def _replace_text(
     source_language: str,
     target_language: str,
 ) -> str:
-    return replacement.replace(
-        TextReplacementRequest(text, False, source_language, target_language)
+    return replace_text(
+        replacement, text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     ).text
 
 

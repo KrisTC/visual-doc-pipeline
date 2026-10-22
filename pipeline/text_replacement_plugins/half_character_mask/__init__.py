@@ -1,6 +1,7 @@
 """Deterministic text-replacement provider with half-length hash output."""
 
-from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement.helpers import replace_each
+from pipeline.text_replacement.models import TextReplacementItem, TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.text_replacement_plugins._masking import half_mask_non_whitespace_sequences
 
@@ -18,12 +19,12 @@ class HalfCharacterMaskProvider:
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Return half masks while retaining filenames and whitespace unchanged."""
-        replacement = (
-            request.text
-            if request.is_filename
-            else half_mask_non_whitespace_sequences(request.text)
+        return replace_each(
+            request,
+            lambda text: TextReplacementItem(
+                text if request.is_filename else half_mask_non_whitespace_sequences(text), 1.0
+            ),
         )
-        return TextReplacementResult(text=replacement, confidence=1.0)
 
 
 def create_provider() -> TextReplacementProvider:

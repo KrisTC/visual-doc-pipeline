@@ -54,7 +54,7 @@ from pipeline.provider_cache import source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import (
     TextReplacementProviderFactory,
-    TextReplacementRequest,
+    replace_text,
 )
 from pipeline.text_replacement.provider import TextReplacementProvider
 
@@ -1254,8 +1254,9 @@ def _replace_paragraph(
     source_text = "".join(run.text for run in paragraph.runs)
     if not source_text.strip():
         return paragraph
-    replacement = provider.replace(
-        TextReplacementRequest(source_text, False, source_language, target_language)
+    replacement = replace_text(
+        provider, source_text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     )
     dominant_run = _dominant_run(paragraph.runs)
     return replace(paragraph, runs=(replace(dominant_run, text=replacement.text),))

@@ -187,7 +187,7 @@ three-attempt limit and the transient-failure rules remain in force.
 |----------|-------|
 | Title | Translate a batch of texts in one Google Cloud Translation request |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request: batch text replacement (`docs/batch-text-replacement-plan.md`) |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-24-04, FR-2026-08-28-01, FR-2026-10-22-01, FR-2026-10-22-03, SR-2026-08-24-01, SR-2026-10-22-01 |
