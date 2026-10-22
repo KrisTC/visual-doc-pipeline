@@ -81,7 +81,7 @@ class ConfigureGoogleCloudTranslationTests(unittest.TestCase):
             self.assertIn("GOOGLE_CLOUD_PROJECT=user-managed-project\n", content)
             self.assertIn(self.setup.MANAGED_MARKER, content)
             self.assertIn('GOOGLE_APPLICATION_CREDENTIALS="', content)
-            self.assertIn(credential_file.as_posix(), content)
+            self.assertIn(credential_file.resolve().as_posix(), content)
             self.assertNotIn("GOOGLE_CLOUD_PROJECT=synthetic-project\n", content)
 
     # Verifies FR-2026-08-24-05.

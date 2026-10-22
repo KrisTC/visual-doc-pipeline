@@ -56,6 +56,7 @@ from pipeline.folder_replacement.pdf import (
 )
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
+from pipeline import bounded_text_layout
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
@@ -92,6 +93,14 @@ from folder_replacement_test_support import (
     _single_text_requests,
     _synthetic_pdf_visual_region,
 )
+
+
+class _NoSourceFaceManager:
+    """A Skia font-manager double that has no installed source faces."""
+
+    def matchFamilyStyle(self, family: str, style: skia.FontStyle) -> None:
+        return None
+
 
 class FolderReplacementPptxTests(FolderReplacementTestCase):
     # Verifies FR-2026-08-27-01.
@@ -866,13 +875,18 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             themed_run.font.size = Pt(24)
             presentation.save(str(source))
 
-            self._run(
-                input_root,
-                output_root,
-                _EmptyOcrProvider(),
-                _RecordingReplacementProvider(replacement_text="Replacement text " * 20),
-                document_text_layout="preserve-basic-layout-source-font",
-            )
+            # The host's installed fonts (the theme font resolves to Calibri on
+            # Windows) would make a source face available, so use an empty manager.
+            with patch.object(
+                bounded_text_layout, "_default_source_font_manager", return_value=_NoSourceFaceManager()
+            ):
+                self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(replacement_text="Replacement text " * 20),
+                    document_text_layout="preserve-basic-layout-source-font",
+                )
 
             output_presentation = Presentation(str(output_root / "deck.pptx"))
             output_shapes = output_presentation.slides[0].shapes
