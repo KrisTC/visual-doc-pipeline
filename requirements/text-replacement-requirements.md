@@ -97,7 +97,7 @@ This is an intentional breaking change to the provider API. `docs/text-replaceme
 
 ### Rationale
 
-Translating a large document string by string takes thousands of sequential remote requests: measured Word, PDF, PowerPoint and Excel documents needed about 6,900, 3,400, 1,800 and 220 requests, at roughly 0.11 to 0.15 seconds each, for strings averaging 11 to 26 characters. A batch `replace` lets a remote provider send many texts per request. It is the only provider method, so a new provider implements one function, and a provider that handles one text at a time uses `replace_each`. This is a breaking change to the provider API.
+Translating a large document string by string takes thousands of sequential remote requests: measured Word, PDF, PowerPoint and Excel documents needed about 6,900, 3,400, 1,800 and 220 requests, at roughly 0.11 to 0.15 seconds each, for strings averaging 11 to 26 characters. A batch `replace` lets a remote provider send many texts per request: measured against the real service, batches of 100 to 1,000 texts translated 90 to 320 times faster than single-text calls. It is the only provider method, so a new provider implements one function, and a provider that handles one text at a time uses `replace_each`. This is a breaking change to the provider API.
 
 ### Verification
 

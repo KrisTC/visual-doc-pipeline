@@ -1801,7 +1801,7 @@ For the same provider results, the output of every format shall be identical to 
 
 ### Rationale
 
-Translating each string as it is reached makes one remote request per string, because fitting, bullet mapping and rendering need the translated text. Measured documents needed about 6,900 requests (Word), 3,400 (PDF), 1,800 (PowerPoint) and 220 (Excel), about 0.11 to 0.15 seconds each. Repeating a handler with unchanged text to collect its strings would also repeat OCR, fitting and rendering, and unchanged text does not skip that work. Splitting each handler into a source-only plan step and a translation-dependent apply step lets one engine batch every unit's texts, about 30 requests for the largest measured document, without repeating expensive work or changing output.
+Translating each string as it is reached makes one remote request per string, because fitting, bullet mapping and rendering need the translated text. Measured documents needed about 6,900 requests (Word), 3,400 (PDF), 1,800 (PowerPoint) and 220 (Excel), about 0.11 to 0.15 seconds each. Repeating a handler with unchanged text to collect its strings would also repeat OCR, fitting and rendering, and unchanged text does not skip that work. Splitting each handler into a source-only plan step and a translation-dependent apply step lets one engine batch every unit's texts, about 31 requests and an estimated 5 seconds instead of about 14 minutes for the largest measured document, without repeating expensive work or changing output.
 
 ### Verification
 

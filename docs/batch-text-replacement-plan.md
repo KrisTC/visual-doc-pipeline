@@ -16,7 +16,7 @@ Cache metrics for a large Word document (content-free aggregates from a cache-me
 
 Translation time is dominated by round-trip latency, not content volume. 6,901 sequential calls carrying about 22 characters each cost an average of 0.11 s. The 10.08 s maximum equals the 10-second per-attempt deadline of FR-2026-09-03-04, so it is probably a call that hit that arbitrary deadline and was retried, not evidence that Google is slow on large inputs. Note that `provider_seconds` is wall time per `replace()` call, including retries.
 
-The same 151K characters fit in roughly 31 requests at Google's recommended 5K characters per request, or about 7 at the 1,024-item cap. The expected gain is an order of magnitude or more. This is an estimate; the first batched runs will confirm it (see the optional smoke script in Phase 0, section 7).
+The same 151K characters fit in roughly 31 requests at Google's recommended 5K characters per request, or about 7 at the 1,024-item cap. Measured batched requests (section 1.2) confirm an order-of-magnitude or larger gain: the largest document's estimated translation time falls from about 14 minutes to about 5 seconds.
 
 ### 1.1 Other file types (same measurements)
 
@@ -37,6 +37,39 @@ What the numbers show:
 - **Only DOCX shows a timeout-length call.** Its 10.08 s maximum sits at the per-attempt deadline; the others peak at 1.75–3.19 s, so they are ordinary slow calls.
 - **Caveat.** Each figure is one document's cache, covering only the runs that populated it. Treat them as examples, not benchmarks.
 
+### 1.2 Phase 0 measurements: batched versus single-text calls
+
+A throwaway script (not committed) translated 1,000 synthetic Japanese strings to English through the real Google provider. The strings are natural UI and report messages averaging 19 characters (longest 56), the same short-string profile as section 1.1. It made 134 requests and 141,558 characters in one pass, with no rate-limit waits. The baseline is 100 single-text calls through the existing provider. Each batched row sends the whole corpus.
+
+| Configuration | Requests | Texts per request | Characters per request | Total | Mean / p95 per request | Texts per second | Speed-up |
+|---|---|---|---|---|---|---|---|
+| Single text (today) | 100 | 1 | 20 | 11.8 s | 0.12 s / 0.16 s | 8.5 | 1x |
+| 100 items | 10 | 100 | 1,937 | 1.3 s | 0.13 s / 0.15 s | 746 | 88x |
+| 250 items | 4 | 250 | 4,843 | 0.8 s | 0.19 s / 0.29 s | 1,318 | 156x |
+| 500 items | 2 | 500 | 9,686 | 0.4 s | 0.21 s / 0.23 s | 2,347 | 277x |
+| 1,024 items (all 1,000) | 1 | 1,000 | 19,372 | 0.4 s | 0.36 s | 2,744 | 324x |
+| 2,500 characters | 8 | 125 | 2,422 | 1.3 s | 0.16 s / 0.22 s | 784 | 93x |
+| 5,000 characters | 4 | 250 | 4,843 | 0.7 s | 0.17 s / 0.20 s | 1,430 | 169x |
+| 10,000 characters | 2 | 500 | 9,686 | 0.4 s | 0.20 s / 0.22 s | 2,503 | 296x |
+
+What the measurements show:
+
+- **The baseline matches production.** A single-text call took 0.12 s on average, against 0.112 s in section 1.
+- **Latency is mostly a fixed cost per request.** A fit over all 131 timed requests gives about 0.12 s per request plus about 11 ms per 1,000 characters (correlation 0.71, so approximate). It predicts 0.34 s for the 19,372-character request, which took 0.36 s.
+- **Projected times for the measured document profiles.** "Today" extrapolates the 0.12 s single-call average. For Word it gives 816 s against 769 s measured in section 1, within 7%.
+
+| Document | Today (estimated) | 2,500 characters | 5,000 characters | 10,000 characters | 20,000 characters |
+|---|---|---|---|---|---|
+| DOCX | 816 s | 61 requests, 9 s | 31 requests, 5 s | 16 requests, 4 s | 8 requests, 3 s |
+| PDF | 402 s | 36 requests, 5 s | 18 requests, 3 s | 9 requests, 2 s | 5 requests, 2 s |
+| PPTX | 209 s | 9 requests, 1 s | 5 requests, 1 s | 3 requests, 1 s | 2 requests, under 1 s |
+| XLSX | 26 s | 3 requests, under 1 s | 2 requests, under 1 s | 1 request, under 1 s | 1 request, under 1 s |
+
+- **Default limits are confirmed, not changed.** Most of the gain arrives by about 5,000 characters. Doubling to 10,000 saves about 1 s on the largest document, and 20,000 about 2 s, while a request's latency rises (0.17 s to 0.36 s) and a failed request repeats more text. 5,000 is also Google's recommendation. The 1,024-item cap is not binding for typical strings: 1,000 strings of 19 characters already make 19K characters. The environment overrides (5.6) remain for tuning on real runs.
+- **A text's result does not depend on its batch neighbours or its position.** The same 100 texts translated identically in their original order and in a shuffled order within a batch (100 of 100).
+- **Batched wording can differ slightly from single-text wording.** 8 of the 100 texts differed from their single-text translation, in the 100-text batch and again in the 1,000-text batch. The differences were small, for example "Chapter 47 Acquisition of Image Data" against "Chapter 47: Acquisition of Image Data", or "failed to retrieve" against "retrieving ... failed". The meaning was unchanged in all 8. Existing per-text cache entries stay valid, so a partly cached document mixes the two wordings, which is acceptable because each text is stable. The cause (batched decoding or single-call variation) was not established.
+- **Not measured:** client thread-safety (concurrency is out of scope), requests near the 30,000-character hard limit (the largest request was about 19K), and repeat runs. One pass from one location means differences between close configurations, such as 5,000 against 10,000 characters, are within noise.
+
 ## 2. Google Cloud Translation facts
 
 Sources: the [quotas and limits page](https://docs.cloud.google.com/translate/quotas), the [translate text guide](https://docs.cloud.google.com/translate/docs/translate-text), and `TranslateTextRequest` in the [v3 proto](https://github.com/googleapis/googleapis/blob/master/google/cloud/translate/v3/translation_service.proto).
@@ -51,7 +84,7 @@ Sources: the [quotas and limits page](https://docs.cloud.google.com/translate/qu
 | `Translation.translated_text` "might be excluded" on error. | Verify every item; recover per item. |
 | `batchTranslateText` and `translateDocument` are asynchronous or file-based. `batchTranslateText` needs Cloud Storage buckets and a caller-managed long-running operation. | **Not used.** SR-2026-08-24-01 limits the provider to pre-trained `translateText`, role `roles/cloudtranslate.user`, no Google Cloud resource creation, and no new remote persistence. |
 
-Assumptions, not verified: NMT translates each `contents` element independently, so a string's output does not depend on its batch neighbours, and `TranslationServiceClient` is safe to share across threads (needed only for the optional concurrency phase). The optional Phase 0 smoke script can check both with synthetic text.
+Measured in section 1.2: a string's output does not depend on its batch neighbours or position. Not verified: `TranslationServiceClient` is safe to share across threads (needed only for the deferred concurrency phase).
 
 ## 3. Current implementation
 
@@ -572,7 +605,7 @@ Fast mode's selection runs in plan, and its large-worksheet skip diagnostics are
 
 | Phase | Work | Exit criteria |
 |---|---|---|
-| 0 | **Optional smoke script, not a gate.** A small throwaway script with synthetic sample strings (no real documents) that sends a few single and batched `translate_text` calls and compares the outputs, to check the independence assumption. Google bills per character, and batching does not change that, so the cost is only the characters the script sends; check current pricing and the free allowance first. It can be skipped: the defaults are conservative, and the environment overrides (5.6) plus the `batch_items` metric allow tuning from real runs. | If run: independence confirmed or refuted. If skipped: the risk is recorded in section 9. |
+| 0 | **Done.** A throwaway script (not committed) with synthetic Japanese strings measured single and batched `translateText` calls and the independence of results (section 1.2). | Defaults confirmed at 1,024 items, 5,000 target characters and 30,000 hard characters. Batch results are independent of neighbours and order, and differ slightly in wording from single-text results in 8 of 100 strings. |
 | 1 | **Requirements** (section 8), written with status `Proposed`. | Requirements reviewed. Each is marked `Implemented` as its phase lands. |
 | 2 | **Provider API change, done once.** New request, item and result models, the single batch `replace` on the protocol, `replace_each` and the temporary `replace_text` helper. Migrate the six provider plugins and six wrapper classes, about 25 test fakes and about 100 call sites to it (every call a batch of one, so behaviour is unchanged). Google `replace` sends real batches, with bisect, per-text recovery and environment-overridable limits; the cache does per-text lookup and write, with `batch_items`; metrics. | Existing tests green after the mechanical migration; unit tests with a mocked Google client (no live calls); batching exercised end to end with the identity provider and the recording wrapper; per-text cache compatibility test (old sidecars still hit); environment validation tests; rate-limit tests (quota responses back off and continue, other `403`s, including the daily-limit error, fail fast, the total-wait cap raises the safe error) using the mocked client and a fake clock. |
 | 3 | Engine `batching.py` (units, packing, `resolve`, `lookup`, plan-miss metric), the plan and apply convention, the driver, and plan, translate and apply progress hooks. | Property tests run on the identity provider with the recording wrapper (no Google): limits obeyed, order preserved, nested units never share a batch; three-level nesting (document, workbook, image) gives path-style unit ids, depth-first order and one shared resolve; depth limit of 6 enforced (a level-7 document is left unchanged, with a `--debug` sidecar entry only); a nested document gives the same output as the same bytes processed as a root file with the same options; progress totals and clamping tested. |
@@ -624,7 +657,7 @@ Risks:
 - **Wide mechanical change in Phase 2.** About 25 test fakes and about 100 call sites change at once. It is behaviour-neutral (batches of one) and reviewable as a pure signature change, but it is a large diff, so it should land as its own change before any handler is rewritten.
 - **Larger blast radius per request.** A failing batch is bisected; worst case adds `log2(n)` requests.
 - **Timeouts.** The deadline is now a generous 300 s (overridable), so a slow batch passes rather than failing early. The cost is that a genuinely hung connection takes up to three deadlines (15 minutes) to fail a request. This is accepted, and the override allows a shorter value.
-- **Unverified independence.** If Phase 0 is skipped and Google's output for a string does depend on its batch neighbours, output would vary with batch composition, for example between a cold run and a partly cached run. Per-text cache keys would still be consistent. The optional smoke script checks this cheaply.
+- **Wording differences from batching.** Batched translations can differ slightly in wording from single-text translations (8 of 100 in the Phase 0 sample, with the same meaning). A cache built before batching keeps its old wording for those texts, so a partly cached document mixes the two. Each text stays stable once cached, and per-text cache keys are unchanged.
 - **Memory.** The planned texts and results for a 75K-row workbook are held in memory, and so are all plans in a nested tree, including retained state such as image pixels and OCR regions until apply. This is likely tens of MB for text but could be larger for image-heavy trees; first-run metrics should confirm it.
 - **Nested/root drift.** Past special cases (the XLSX "fast" mode behind a chart) can grow into a parallel implementation. The "same functions, options only" rule in 5.4 and the root-equals-nested test in Phase 3 guard against it; any new option needs a reason in review.
 - **Untrusted nesting.** Embedded documents come from input files, so unbounded recursion could exhaust time or memory. The 6-level limit bounds depth. There is no total tree size limit, so a very wide tree is bounded only by the input file's own size and the memory risk above.
@@ -641,7 +674,7 @@ Scope:
 - Nested documents are processed to 6 levels below the root, with no tree size limit (5.4).
 - Layouts, masters, chart text and comments are translated in every PPTX mode (6.2, Phase 8 step 2).
 - Concurrency is out of scope (5.11, Phase 11).
-- Phase 0 is an optional smoke script, not a gate.
+- Phase 0 (measurement) is done (section 1.2).
 
 ## 10. Git history consulted
 
