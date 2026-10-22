@@ -324,7 +324,7 @@ Automated tests shall invoke the script as a subprocess with synthetic temporary
 
 Portable formats shall embed selected repository-owned static Noto faces. For a format without a safe portable embedding path, including ordinary EMF and WMF, the adapter shall retain the resolved source face but write the Noto-derived fitted size and explicit layout settings. This is a required best-effort mode, not a reason to retain the original size when replacement text length changes substantially.
 
-A container without an explicit finite rectangle, or for which the adapter cannot safely write an explicit fitting result, shall retain the existing `preserve-source-formatting` replacement behaviour. Free-flowing Word paragraphs, arbitrary PDF page-content text, outlined vector text, and SVG text without an explicit containing rectangle shall not opt in.
+A container without an explicit finite rectangle, or for which the adapter cannot safely write an explicit fitting result, shall retain the existing `preserve-source-formatting` replacement behaviour, except where a format requirement defines fitting without a rectangle (FR-2026-10-22-11). Free-flowing Word paragraphs, arbitrary PDF page-content text, and outlined vector text shall not opt in.
 
 ### Rationale
 
@@ -337,8 +337,7 @@ The required bounding sources and safe write rules are not yet fully specified f
 - DOCX: DrawingML text boxes can use their drawing extent; Word embedded-diagram text requires a defined mapping from the diagram's text node to its rendered shape extent.
 - XLSX: Drawing-shape text can use its DrawingML transform extent. The existing finite-grid-cell path remains separate only for bounds extraction; it uses the same fitting core.
 - PDF: AcroForm widgets and FreeText annotations have rectangles. Implemented PDF rules are defined by FR-2026-08-04-09; portable Unicode fallback is proposed by FR-2026-08-04-10.
-- SVG: ordinary `text`/`tspan` elements do not define a rectangular text field. A qualifying explicit rectangle must be identified, such as a clipping rectangle associated with the text; `foreignObject` and arbitrary HTML layout remain out of scope unless separately added.
-- EMF and WMF: text output records have an origin and may have a clipping/opaque rectangle. Only records with an explicit clipping rectangle are candidates; a record with only an origin, advances, or current font is not bounded text.
+- SVG, EMF, and WMF: the bounding sources, and fitting of text that has no bounds, are defined in vector-requirements.md. `foreignObject` and arbitrary HTML layout remain out of scope unless separately added.
 
 Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. They shall verify exact eligibility/fallback decisions, replacement through the shared core, explicit fitted output, and that every generated file remains loadable by an appropriate format parser. PDF tests shall also verify any required appearance streams and embedded-font resources.
 
@@ -1898,5 +1897,36 @@ Once strings are translated in batches, the number of requests is unknown until 
 ### Verification
 
 Automated tests shall use synthetic documents, mocked clocks, and a mocked provider. They shall verify the per-step labels and totals, a single total growth, a fully cached source with no translate step, monotonic row and `progress.json` percentages, parent totals that include nested items, a Nested row for an OCR bitmap and for a nested document above 100 texts and none below, the rate-limit label, and cleanup after a failure.
+
+---
+
+## FR-2026-10-22-11
+
+| Property | Value |
+|----------|-------|
+| Title | Fit text to its known bounds, otherwise to its measured source extent, and always translate |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following an EMF diagnosis |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02 |
+
+### Description
+
+In both fitted document-text layouts, a text that a format can safely rewrite shall be fitted and shall always be translated:
+
+1. **Known bounds.** When the source gives bounds for a text, the replacement shall be fitted into those bounds by reducing its size. A measurement of the source text shall not make a text with known bounds ineligible.
+2. **Unknown bounds.** When the source gives no bounds, the pipeline shall measure the source text at its original size with the source face, or with the committed Noto face when the source face is unavailable (FR-2026-08-27-02), and shall fit the replacement to that measured extent.
+3. **No fit.** A replacement that is larger than its bounds at the smallest permitted size is best effort and shall remain visible as overflow (FR-2026-08-03-14). A failed or inexact fit shall never leave the source text untranslated.
+
+Each format requirement defines what counts as bounds for that format, which texts it can rewrite safely, and any extension or exception to these rules. A text that its format cannot rewrite safely keeps the replacement behaviour that format defines, and is still translated.
+
+### Rationale
+
+Readers are better served by a text that is shrunk to fit and may overflow a little than by one that is not fitted or not translated. A measurement of the source estimates what the source application already knows; when the source face is not installed the Noto face is usually wider, so a measurement must not veto a fit.
+
+### Verification
+
+Automated tests shall use synthetic documents only. Each format's tests shall verify that a text with known bounds is reduced to fit them, that a text without bounds is fitted to its measured source extent with a resolved and with an unavailable source face, and that a replacement that cannot fit at the minimum size is translated and overflows.
 
 ---

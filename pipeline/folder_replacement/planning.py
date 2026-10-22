@@ -15,6 +15,8 @@ from typing import Protocol, TypeVar
 
 from pipeline.text_replacement import (
     TextReplacementItem,
+    TextReplacementRequest,
+    TextReplacementResult,
     TextUnit,
     TranslationEngine,
     rate_limit_wait_listener,
@@ -37,6 +39,19 @@ class TextPlan(Protocol):
 def child_unit_id(parent_unit_id: str, child_name: str) -> str:
     """Return the path-style identifier of a nested unit, such as ``docx/xlsx/image-1``."""
     return f"{parent_unit_id}/{child_name}"
+
+
+class LookupProvider:
+    """A provider that answers from the engine's lookup, so apply sends nothing itself."""
+
+    def __init__(self, translate: Callable[[str], TextReplacementItem]) -> None:
+        self._translate = translate
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        if request.is_filename:
+            message = "Filenames are translated outside the batching engine."
+            raise ValueError(message)
+        return TextReplacementResult(tuple(self._translate(text) for text in request.texts))
 
 
 def enter_nested(

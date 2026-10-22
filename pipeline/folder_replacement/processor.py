@@ -12,7 +12,6 @@ from time import perf_counter
 from typing import Protocol
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
-from PIL import Image
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
@@ -32,7 +31,7 @@ from pipeline.provider_cache import (
 from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacementProvider, RunMetrics
 from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
-from pipeline.vector_text import VectorReplacementResult, replace_vector_text
+from pipeline.vector_text import VectorReplacementResult
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
@@ -42,10 +41,10 @@ from pipeline.folder_replacement.bitmap import (
     apply_bitmap,
     plan_bitmap_file,
     replace_bitmap_bytes as _process_bitmap_bytes,
-    replace_image as _process_bitmap_image,
     save_bitmap_file,
 )
 from pipeline.folder_replacement.planning import PhaseProgress, plan_and_apply
+from pipeline.folder_replacement.vector import apply_vector, plan_vector, replace_vector_bytes
 from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
@@ -348,24 +347,22 @@ def replace_input_folder(
                         container_kind="vector_graphic",
                         operation="text_replacement",
                     )
-                vector_result = replace_vector_text(
+                vector_plan = plan_vector(
                     source_path.read_bytes(),
                     extension,
-                    lambda text: _replace_native_text(
-                        text, processing_replacement, source_language, target_language
-                    ),
+                    processing_ocr,
                     source_language,
-                    lambda image: _replace_image_text(
-                        image,
-                        processing_ocr,
-                        processing_replacement,
-                        source_language,
-                        target_language,
-                        typeface,
-                    ),
+                    target_language,
                     document_text_layout=document_text_layout,
-                    replacement_provider=processing_replacement,
-                    target_language=target_language,
+                    diagnostics=document_diagnostics if diagnostics_enabled else None,
+                )
+                work_completed("Planning vector graphic 1 of 1")
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                vector_result = plan_and_apply(
+                    vector_plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_vector(vector_plan, translate, typeface),
+                    phase_progress,
                 )
                 temporary_destination.write_bytes(vector_result.data)
                 result.replaced_native_text_items += vector_result.replaced_text_items
@@ -374,7 +371,7 @@ def replace_input_folder(
                     _append_vector_diagnostics(document_diagnostics, vector_result, None)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     result.retained_vector_graphics += 1
-                work_completed("vector graphic")
+                work_completed("Applying vector graphic 1 of 1")
             elif extension == ".pdf":
                 if failure_context is not None:
                     failure_context.set_location(
@@ -698,10 +695,8 @@ def _source_work_total(
 ) -> int:
     """Return the native-text plus embedded-raster work units for one source file."""
     extension = source_path.suffix.lower()
-    if extension in BITMAP_EXTENSIONS:
+    if extension in BITMAP_EXTENSIONS or extension in VECTOR_EXTENSIONS:
         return 2
-    if extension in VECTOR_EXTENSIONS:
-        return 1
     if extension == ".docx":
         with ZipFile(source_path) as archive:
             return 4 + sum(
@@ -724,17 +719,6 @@ def _source_work_total(
 def _make_progress_bar(total: int, label: str) -> ProgressReporter:
     """Create the standard terminal bar for one source file."""
     raise RuntimeError("A Rich live display is required when no test progress factory is supplied.")
-
-
-def _replace_image_text(
-    image: Image.Image,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-) -> int:
-    return _process_bitmap_image(image, ocr_provider, replacement_provider, source_language, target_language, typeface)
 
 
 def _replace_office_file(
@@ -810,24 +794,15 @@ def _replace_office_file(
                         package_part=entry.filename,
                         item_index=vector_graphic_index,
                     )
-                vector_result = replace_vector_text(
+                vector_result = replace_vector_bytes(
                     data,
                     Path(entry.filename).suffix,
-                    lambda text: _replace_native_text(
-                        text, replacement_provider, source_language, target_language
-                    ),
+                    ocr_provider,
+                    replacement_provider,
                     source_language,
-                    lambda image: _replace_image_text(
-                        image,
-                        ocr_provider,
-                        replacement_provider,
-                        source_language,
-                        target_language,
-                        typeface,
-                    ),
+                    target_language,
+                    typeface,
                     document_text_layout=document_text_layout,
-                    replacement_provider=replacement_provider,
-                    target_language=target_language,
                 )
                 data = vector_result.data
                 native_items += vector_result.replaced_text_items
