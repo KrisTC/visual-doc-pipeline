@@ -12,6 +12,7 @@ from pipeline.text_replacement import (
     TextReplacementRequest,
     TextReplacementResult,
     batch_limits_of,
+    cached_flags_of,
 )
 from pipeline.text_replacement.errors import TextReplacementProviderRequestError
 
@@ -100,6 +101,9 @@ class ContextualTextReplacementProvider:
     @property
     def batch_limits(self) -> BatchLimits | None:
         return batch_limits_of(self.wrapped_provider)
+
+    def cached_flags(self, request: TextReplacementRequest) -> tuple[bool, ...] | None:
+        return cached_flags_of(self.wrapped_provider, request)
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         self.context.record_text_replacement(request)

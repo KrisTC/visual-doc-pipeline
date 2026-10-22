@@ -37,6 +37,8 @@ class RunMetrics(AbstractContextManager["RunMetrics"]):
     def __init__(self) -> None:
         self._totals: dict[tuple[str, str], _CallTotals] = {}
         self._token: Token[RunMetrics | None] | None = None
+        self.unique_texts = 0
+        self.plan_misses = 0
 
     def __enter__(self) -> RunMetrics:
         self._token = _RUN_METRICS.set(self)
@@ -103,6 +105,20 @@ def record_run_rate_limit_wait(kind: str, name: str, seconds: float) -> None:
     metrics = _RUN_METRICS.get()
     if metrics is not None:
         metrics.record_rate_limit_wait(kind, name, seconds)
+
+
+def record_run_unique_texts(count: int) -> None:
+    """Record how many distinct texts a translation engine resolved."""
+    metrics = _RUN_METRICS.get()
+    if metrics is not None:
+        metrics.unique_texts += count
+
+
+def record_run_plan_miss() -> None:
+    """Record one lookup that the plan did not cover."""
+    metrics = _RUN_METRICS.get()
+    if metrics is not None:
+        metrics.plan_misses += 1
 
 
 class MeteredOcrProvider:

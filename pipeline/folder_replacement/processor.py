@@ -31,7 +31,7 @@ from pipeline.provider_cache import (
 )
 from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacementProvider, RunMetrics
 from pipeline.terminal_progress import LiveProgress
-from pipeline.text_replacement import TextReplacementProvider, replace_text
+from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
 from pipeline.vector_text import VectorReplacementResult, replace_vector_text
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
@@ -39,10 +39,13 @@ from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
 from pipeline.folder_replacement.pptx import replace_pptx_file
 from pipeline.folder_replacement.xlsx import replace_xlsx_file, xlsx_native_text_request_total
 from pipeline.folder_replacement.bitmap import (
+    apply_bitmap,
+    plan_bitmap_file,
     replace_bitmap_bytes as _process_bitmap_bytes,
-    replace_bitmap_file as _process_bitmap_file,
     replace_image as _process_bitmap_image,
+    save_bitmap_file,
 )
+from pipeline.folder_replacement.planning import PhaseProgress, plan_and_apply
 from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
@@ -255,6 +258,7 @@ def replace_input_folder(
                 xlsx_translation_mode=xlsx_translation_mode,
             )
             completed_work = 0
+            reported_progress = 0
             if show_progress:
                 if display is not None:
                     progress = display.start_current(
@@ -271,12 +275,12 @@ def replace_input_folder(
             print(f"Processing: {relative_source_path}")
 
             def work_completed(label: str) -> None:
-                nonlocal completed_work
+                nonlocal completed_work, reported_progress
                 completed_work += 1
                 file_progress = min(
-                    100, int(completed_work * 100 / source_work_total)
+                    99, int(completed_work * 100 / source_work_total)
                 )
-                progress_entry["progress"] = file_progress
+                progress_entry["progress"] = max(reported_progress, file_progress)
                 if progress is not None:
                     progress.set_postfix_str(label)
                     progress.update()
@@ -284,9 +288,22 @@ def replace_input_folder(
                         display.set_overall_from_current(completed_sources)
                 if display is not None:
                     file_progress, progress_entry["eta_seconds"] = display.current_state()
-                    progress_entry["progress"] = file_progress
+                file_progress = max(reported_progress, min(99, file_progress))
+                reported_progress = file_progress
+                progress_entry["progress"] = file_progress
                 update_overall_state(file_progress)
                 publish_progress()
+
+            def set_work_label(label: str) -> None:
+                if progress is not None:
+                    progress.set_postfix_str(label)
+
+            def grow_work_total(count: int) -> None:
+                nonlocal source_work_total
+                source_work_total += count
+                set_total = getattr(progress, "set_total", None)
+                if callable(set_total):
+                    set_total(source_work_total)
 
             if failure_context is not None:
                 failure_context.set_location(
@@ -312,17 +329,18 @@ def replace_input_folder(
                         container_kind="bitmap_file",
                         operation="ocr",
                     )
-                image_regions = _replace_bitmap_file(
-                    source_path,
-                    temporary_destination,
-                    processing_ocr,
-                    processing_replacement,
-                    source_language,
-                    target_language,
-                    typeface,
+                plan = plan_bitmap_file(source_path, processing_ocr, source_language)
+                work_completed("Planning image 1 of 1")
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                image_regions = plan_and_apply(
+                    plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_bitmap(plan, translate, typeface, target_language),
+                    phase_progress,
                 )
+                save_bitmap_file(plan, temporary_destination)
                 result.replaced_image_regions += image_regions
-                work_completed("bitmap")
+                work_completed("Applying image 1 of 1")
             elif extension in VECTOR_EXTENSIONS:
                 if failure_context is not None:
                     failure_context.set_location(
@@ -460,6 +478,8 @@ def replace_input_folder(
                     _document_totals_since(counts_before, result), document_diagnostics, result,
                     run_activity={
                         "document_processing_seconds": document_seconds,
+                        "unique_texts": run_metrics.unique_texts,
+                        "plan_misses": run_metrics.plan_misses,
                         "providers": run_metrics.report(document_seconds),
                     },
                     cache_inventory=inventory,
@@ -679,7 +699,7 @@ def _source_work_total(
     """Return the native-text plus embedded-raster work units for one source file."""
     extension = source_path.suffix.lower()
     if extension in BITMAP_EXTENSIONS:
-        return 1
+        return 2
     if extension in VECTOR_EXTENSIONS:
         return 1
     if extension == ".docx":
@@ -704,18 +724,6 @@ def _source_work_total(
 def _make_progress_bar(total: int, label: str) -> ProgressReporter:
     """Create the standard terminal bar for one source file."""
     raise RuntimeError("A Rich live display is required when no test progress factory is supplied.")
-
-
-def _replace_bitmap_file(
-    source: Path,
-    destination: Path,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-) -> int:
-    return _process_bitmap_file(source, destination, ocr_provider, replacement_provider, source_language, target_language, typeface)
 
 
 def _replace_image_text(

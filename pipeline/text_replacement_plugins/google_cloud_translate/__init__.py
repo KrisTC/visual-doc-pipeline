@@ -16,7 +16,7 @@ from typing import Protocol, cast
 
 from pipeline.provider_metrics import record_run_rate_limit_wait
 from pipeline.text_replacement.errors import TextReplacementProviderError, TextReplacementProviderRequestError
-from pipeline.text_replacement.helpers import check_result_length
+from pipeline.text_replacement.helpers import check_result_length, notify_rate_limit_wait
 from pipeline.text_replacement.models import (
     BatchLimits,
     TextReplacementItem,
@@ -254,6 +254,7 @@ class GoogleCloudTranslateProvider:
                         waits, wait, len(texts),
                     )
                     record_run_rate_limit_wait("text_replacement", _PROVIDER_NAME, wait)
+                    notify_rate_limit_wait(wait)
                     self._sleep(wait)
                     continue
                 attempts += 1

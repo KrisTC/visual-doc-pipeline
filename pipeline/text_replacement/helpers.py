@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 from pipeline.text_replacement.errors import TextReplacementProviderError
 from pipeline.text_replacement.models import (
@@ -12,6 +14,27 @@ from pipeline.text_replacement.models import (
     TextReplacementResult,
 )
 from pipeline.text_replacement.provider import TextReplacementProvider
+
+_RATE_LIMIT_WAIT_LISTENER: ContextVar[Callable[[float], None] | None] = ContextVar(
+    "text_replacement_rate_limit_wait_listener", default=None
+)
+
+
+@contextmanager
+def rate_limit_wait_listener(listener: Callable[[float], None]) -> Iterator[None]:
+    """Call ``listener(seconds)`` whenever a provider starts a rate-limit wait."""
+    token = _RATE_LIMIT_WAIT_LISTENER.set(listener)
+    try:
+        yield
+    finally:
+        _RATE_LIMIT_WAIT_LISTENER.reset(token)
+
+
+def notify_rate_limit_wait(seconds: float) -> None:
+    """Tell the active listener, if any, that a rate-limit wait is starting."""
+    listener = _RATE_LIMIT_WAIT_LISTENER.get()
+    if listener is not None:
+        listener(seconds)
 
 
 def replace_each(
@@ -39,6 +62,17 @@ def batch_limits_of(provider: object) -> BatchLimits | None:
     """Return a provider's optional batch limits."""
     limits = getattr(provider, "batch_limits", None)
     return limits if isinstance(limits, BatchLimits) else None
+
+
+def cached_flags_of(provider: object, request: TextReplacementRequest) -> tuple[bool, ...] | None:
+    """Return which request texts a provider already holds, or None when it cannot say."""
+    probe = getattr(provider, "cached_flags", None)
+    if not callable(probe):
+        return None
+    flags = probe(request)
+    if isinstance(flags, tuple) and len(flags) == len(request.texts):
+        return flags
+    return None
 
 
 def replace_text(

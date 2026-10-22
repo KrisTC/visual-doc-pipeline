@@ -286,6 +286,11 @@ class CachingTextReplacementProvider:
 
         return batch_limits_of(self._provider)
 
+    def cached_flags(self, request: TextReplacementRequest) -> tuple[bool, ...]:
+        """Report which request texts are already cached, without reading or recording anything."""
+        keys = [_text_replacement_cache_key(self._cache_identity, request, text) for text in request.texts]
+        return _cached_keys_present(keys)
+
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Return cached items, sending only the missing texts as one smaller request."""
         if _active_cache_session() is None:
@@ -330,6 +335,27 @@ class CachingTextReplacementProvider:
                 self.provider_name, len(text), elapsed * share, batch_items=len(miss_texts),
             )
         return TextReplacementResult(tuple(cast("list[TextReplacementItem]", items)))
+
+
+def _cached_keys_present(keys: list[str]) -> tuple[bool, ...]:
+    absent = tuple(False for _ in keys)
+    session = _active_cache_session()
+    if session is None:
+        return absent
+    connection = session.connection()
+    if connection is None:
+        return absent
+    try:
+        return tuple(
+            connection.execute(
+                "SELECT 1 FROM provider_result_cache WHERE result_kind = ? AND cache_key = ?",
+                ("text_replacement", key),
+            ).fetchone() is not None
+            for key in keys
+        )
+    except sqlite3.Error:
+        session.disable()
+        return absent
 
 
 def _ocr_cache_key(cache_identity: str, request: OcrRequest) -> str | None:
