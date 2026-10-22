@@ -221,7 +221,8 @@ final package output. It shall calculate that total before processing using the
 same selection rules, advance an item only after the corresponding work
 completes, and not report 100% while a remaining fast-mode stage is running.
 The active-operation label shall identify the active worksheet or package stage
-without exposing source text.
+without exposing source text. FR-2026-10-22-07 supersedes this paragraph's
+request-count work items with plan, translate, and apply work items.
 
 When diagnostics are enabled, the source diagnostic sidecar shall contain one
 safe `xlsx_fast_mode_worksheet_skipped` entry for every large worksheet skipped

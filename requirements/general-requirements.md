@@ -81,6 +81,8 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
+FR-2026-10-22-07 supersedes this requirement's work-item definition (one native-text item and one item per embedded bitmap) with plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling remain in force.
+
 The active-task text shall show the current native-text, embedded-image, or
 PDF-vector work item. Existing one-line per-file failure reporting shall remain
 visible without stopping later work. A failure shall reset the current-task and
@@ -1503,7 +1505,10 @@ supersedes the terminal-renderer and progress-row-cardinality clauses of
 FR-2026-08-02-01, FR-2026-08-03-04, FR-2026-08-04-14,
 FR-2026-09-02-02, and SR-2026-08-21-02. Their task-specific work totals,
 eligibility rules, and failure handling remain in force unless this requirement
-expressly changes them.
+expressly changes them. FR-2026-10-22-07 further supersedes the Nested row's
+embedded-workbook definition (one advance per native-text replacement request,
+counted before translation) and the Current row's work-item model for folder
+replacement.
 
 ---
 
@@ -1757,5 +1762,141 @@ with caching both enabled and disabled. They shall verify
 that the new metrics fields and command output contain no cache content,
 paths, keys, or provider configuration and that inspection never creates a
 cache. Existing diagnostic fields remain governed by FR-2026-08-27-06.
+
+---
+
+## FR-2026-10-22-04
+
+| Property | Value |
+|----------|-------|
+| Title | Process each source as plan, translate, and apply steps with a shared translation engine |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request: batch text replacement (`docs/batch-text-replacement-plan.md`) |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-27-10, FR-2026-10-22-01, FR-2026-10-22-02, FR-2026-10-22-05, FR-2026-10-22-06, FR-2026-10-22-07 |
+
+### Description
+
+Folder replacement shall process each source file in three steps, so that translation can be sent in batches while keeping the output unchanged.
+
+1. **Plan** performs only the work that depends on the source: parsing, merging runs and spans, grouping by emphasis, OCR, colour estimation, and building the ordered list of texts to translate, while retaining the state that apply needs. It shall not fit, render, or write output, shall not call a text-replacement provider, and shall have no side effect outside its own plan object.
+2. **Translate** is performed by a translation engine shared by every format. It resolves every planned text through the text-replacement provider.
+3. **Apply** performs everything that needs the translated text, including post-processing, measuring, fitting, writing, and rendering, in the order the handlers use. For each item it shall request the translation of the exact text that plan stored. It shall not build a new text to translate, so plan and apply cannot drift apart.
+
+Every format handler, namely bitmap, vector (SVG, EMF, WMF), PDF, DOCX, PPTX, XLSX, and the shared Office package stage, shall provide an explicit plan function and an explicit apply function. Handlers shall not build provider requests: the engine builds them.
+
+The engine shall exist once per top-level source file, matching the source cache scope of FR-2026-08-27-10, and shall own that run's source and target language tags. Handlers shall give the engine each unit's ordered texts, where a unit is a part of the source that is packed and attributed together (for example one document's XML parts, one PDF page's native spans, or one image's OCR items). The driver shall then resolve the engine once, before any apply step of that source starts. During resolution the engine shall, for each unit in order:
+
+- deduplicate texts, skipping a text already resolved by an earlier unit of the same source;
+- pack the remaining texts into batches in document order, closing a batch at the provider's `batch_limits` maximum item count or target character count, sending a text larger than the target character count alone, and rejecting with a safe diagnostic a text larger than the hard maximum character count; a provider with no limits has none applied;
+- send each batch as one text-replacement request with `is_filename` false and the run's language pair, so a provider never receives mixed language pairs;
+- keep the results only in memory, apart from the provider-result cache.
+
+A batch shall never contain texts of more than one unit. A unit larger than one batch shall be split across several batches. The translation of a text that apply asks for but plan did not list shall be requested by a single-text call and counted as a plan miss, so output remains correct although slower. Automated tests on synthetic documents shall require zero plan misses.
+
+Output filenames shall continue to be translated by one-text requests with `is_filename` true, outside the engine and before the output path is determined (FR-2026-08-03-03).
+
+For the same provider results, the output of every format shall be identical to the output of unbatched, per-text translation. Where another requirement states that each paragraph, run group, or text item is replaced by one text-replacement request, that statement defines the granularity of translated texts, not the number of provider calls: each such text is still translated independently as its own element of a batch. A provider failure for a batch shall fail the source file through the existing per-source failure isolation.
+
+### Rationale
+
+Translating each string as it is reached makes one remote request per string, because fitting, bullet mapping and rendering need the translated text. Measured documents needed about 6,900 requests (Word), 3,400 (PDF), 1,800 (PowerPoint) and 220 (Excel), about 0.11 to 0.15 seconds each. Repeating a handler with unchanged text to collect its strings would also repeat OCR, fitting and rendering, and unchanged text does not skip that work. Splitting each handler into a source-only plan step and a translation-dependent apply step lets one engine batch every unit's texts, about 30 requests for the largest measured document, without repeating expensive work or changing output.
+
+### Verification
+
+Automated tests shall use synthetic documents, the `identity` and mask providers, and a test-only recording wrapper that counts requests and can set small `batch_limits`. They shall verify limits obeyed, order preserved, deduplication, batches not spanning units, a unit split into several batches, a plan miss counted and still translated correctly, zero plan misses for each format's synthetic documents, output identical to per-text translation using the mask providers, and that plan calls no provider and writes no output. Google shall be exercised only through a mocked client.
+
+---
+
+## FR-2026-10-22-05
+
+| Property | Value |
+|----------|-------|
+| Title | Process nested documents recursively with the same plan and apply functions |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-06, FR-2026-09-04-01, FR-2026-10-22-04, FR-2026-10-22-07 |
+
+### Description
+
+A document embedded in another document shall be processed by the same plan and apply functions as a root document of its type, and embedded documents may themselves contain embedded documents. A Word document with an embedded workbook that contains images is one example. Nested document types include a Word chart's embedded workbook, bitmaps and vector graphics under an Office `media` directory, images inside an embedded workbook, PDF raster image XObjects, and raster images inside SVG, EMF, and WMF files. There shall be no separate nested implementation for any type.
+
+A parent shall plan and apply only its direct children through the child type's public plan and apply entry points. A parent's plan shall retain its children's plans and list their units after its own, depth first, with the parent before its children. A parent's apply shall apply each child at the point where the parent's format processes the nested document and embed the returned bytes. The engine and its single resolution step of FR-2026-10-22-04 cover the whole tree of a top-level source file, so deduplication works across levels. Each nested document shall be its own unit with its own batches and a unique path-style identifier below its parent's, for example `docx/xlsx/image-1`.
+
+A handler shall not know its depth and shall not contain a branch for being nested. A parent may change a child's behaviour only by passing explicit keyword-only options that the child's entry point documents and a root caller could also pass, such as the `fast` mode and chart formulae that a Word chart's workbook uses (FR-2026-09-03-06). Work that exists only because of the embedding, such as rebuilding a chart's string cache from the translated workbook or replacing a package part, shall be done by the parent after the child's apply returns.
+
+Processing shall go at most 6 levels below the root file, where the root is level 0 and its embedded documents are level 1. This limit is hard-coded. An embedded document at level 7 or deeper shall be left unchanged, exactly as in the source, and the source shall not fail. When `--debug` is set, the source's diagnostic sidecar shall record one safe `nested_document_depth_limit_exceeded` entry for each such document, identifying its package part name and depth and never its content. Runs without `--debug` shall write nothing extra for this case. There shall be no limit on the total size or number of embedded documents in a tree other than this depth limit.
+
+### Rationale
+
+Embedded documents come from untrusted input, so recursion needs a bound: 6 levels covers realistic nesting such as a Word document containing a workbook that contains images. One implementation per type keeps behaviour, fallbacks and diagnostics identical between a root file and the same type nested in another document, and keeps each format's logic in one place. Treating each nested document as its own unit lets a 75,000-row embedded workbook be batched on its own instead of being mixed into its parent's batches.
+
+### Verification
+
+Automated tests shall use synthetic documents. They shall verify a three-level tree (document, workbook, image) with path-style unit ids, depth-first unit order, one shared resolution, and deduplication across levels; that a nested document's output equals the output of the same bytes processed as a root file with the same options; that a level-7 document is left unchanged without failing the source; and that the depth-limit diagnostic appears only with `--debug` and contains no content.
+
+---
+
+## FR-2026-10-22-06
+
+| Property | Value |
+|----------|-------|
+| Title | Cache batched text-replacement results per text and report request metrics |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-27-10, FR-2026-08-27-11, FR-2026-10-21-01, FR-2026-10-22-01, FR-2026-10-22-03, FR-2026-10-22-04, SR-2026-08-27-01, SR-2026-10-21-01 |
+
+### Description
+
+The text-replacement caching proxy shall implement the batch `replace` of FR-2026-10-22-01 while keeping the per-text cache semantics of FR-2026-08-27-10. It shall derive each text's key exactly as before, so the cache schema version and key derivation are unchanged and existing cache sidecars continue to hit. It shall read all of a request's keys in one transaction rather than one round trip per text, forward only the misses to the wrapped provider as one smaller request in the original order, merge the results back into request order, and store each successful item under its own per-text key. A request whose texts are all hits shall make no provider call. A failed request, or a wrapped result whose length differs from the forwarded text count, shall store nothing and shall raise the provider error.
+
+The existing `provider_result_cache` table shall gain one nullable `batch_items INTEGER` column, added by the same in-place migration pattern as FR-2026-10-21-01, that records the number of texts in the provider request that produced the row. It shall remain unknown for existing rows and shall not be backfilled on a hit. For a row produced by a batched request, the stored provider-call duration shall be the request's elapsed time apportioned across its texts by character share, so per-text durations still sum to the measured call time. The cache-metrics command and the debug cache-inventory snapshot shall additionally report an approximate provider request count, computed by aggregation in SQLite as the sum over rows with known `batch_items` of one divided by `batch_items`, together with the number of rows whose `batch_items` is unknown. Their existing per-string figures shall be retained and labelled so that per-string averages are not read as call latency. FR-2026-10-21-01's rules that inspection reads no result text, creates or modifies no cache, and reports no paths, keys, text, or document-specific detail apply unchanged (SR-2026-10-21-01).
+
+The per-document `--debug` diagnostic sidecar's run activity shall additionally report the number of texts requested, the number of unique texts, cache hits, remote requests, plan misses (FR-2026-10-22-04), the character count and elapsed duration of each remote request, and the number of rate-limit waits and total wait seconds (FR-2026-10-22-03). Cache hits shall contribute no provider-call duration, and these fields shall contain no text.
+
+### Rationale
+
+Per-text keys mean a partly cached document sends only its new texts, existing caches stay valid, and batch composition never changes a result. Cached results are read in one transaction instead of thousands of round trips. Recording `batch_items` and the request count lets cache metrics report real request counts: the measured per-string durations (0.11 to 0.15 seconds on average) are shares of batched requests and would otherwise be misread as the latency of separate calls.
+
+### Verification
+
+Automated tests shall use synthetic requests, mocked providers, and caches. They shall verify that a pre-existing sidecar still hits, partial-hit forwarding and merge order, an all-hit request making no call, nothing cached on failure or wrong length, the migration and unknown `batch_items` for old rows, apportioned durations, the request-count and unknown-count reporting, run-metric fields with caching enabled and disabled, and that no output contains text, keys, or paths.
+
+---
+
+## FR-2026-10-22-07
+
+| Property | Value |
+|----------|-------|
+| Title | Report plan, translate, and apply progress for each source |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-04, FR-2026-09-03-01, FR-2026-09-04-01, FR-2026-10-22-03, FR-2026-10-22-04, FR-2026-10-22-05 |
+
+### Description
+
+For each source file, folder-replacement progress shall cover the plan, translate, and apply steps of FR-2026-10-22-04 on the one Current row, with an active-operation label for the step (for example, planning page 3 of 40, translating batch 4 of 31, and applying page 3 of 40). It shall retain FR-2026-08-03-04's 100-unit overall share for each source and the `progress.json` shape, and these rules replace its work-item definition:
+
+- Plan and apply shall each advance once per work item that the handler already counts (a part, slide, sheet block, page, or image). Their totals are known before the step starts.
+- Translate shall advance once per batch sent. Its total is the number of batches remaining after deduplication and cache hits, known when planning finishes, and a fully cached source has none. The Current row's total therefore grows once, when that count is known. The displayed percentage, the overall share, and the `progress.json` percentage shall never move backwards, and none shall reach 100 before the source completes.
+- Nested documents shall add their plan and apply items to the parent's total when the parent's plan discovers them, so the parent's Current row counts the whole tree.
+- While a rate-limit wait of FR-2026-10-22-03 is in progress, the active-operation label shall be "Waiting for translation quota".
+
+A nested document shall additionally have its own Nested row, as FR-2026-09-03-01 defines it, only when it is a bitmap that needs OCR or when its plan contains more than 100 texts. This threshold is hard-coded. All other nested documents shall be counted only in their parent's Current row. The Nested row is a closer view of work already counted in the parent's row, not extra work. It shall show that document's plan items, translate batches, and apply items, identify the document part without exposing text, and show at most one nested document at a time. An OCR-backed bitmap shall keep the three OCR-stage labels of FR-2026-09-03-01. This requirement supersedes the embedded-workbook rule of one advance per replacement request counted before translation, in FR-2026-09-03-01, and the equivalent standalone fast-mode rule of FR-2026-09-04-01.
+
+### Rationale
+
+Once strings are translated in batches, the number of requests is unknown until planning finishes, so a request count can no longer be the unit of progress. Planning is also long-running work: OCR alone took 33 to 73 seconds in measured Word, PDF and PowerPoint documents. Showing each step keeps OCR, translation and rendering visible, and clamping avoids a bar that moves backwards when the batch total becomes known.
+
+### Verification
+
+Automated tests shall use synthetic documents, mocked clocks, and a mocked provider. They shall verify the per-step labels and totals, a single total growth, a fully cached source with no translate step, monotonic row and `progress.json` percentages, parent totals that include nested items, a Nested row for an OCR bitmap and for a nested document above 100 texts and none below, the rate-limit label, and cleanup after a failure.
 
 ---
