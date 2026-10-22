@@ -149,6 +149,27 @@ def apply_vector(
     )
 
 
+def append_vector_diagnostics(
+    diagnostics: list[dict[str, object]],
+    vector_result: VectorReplacementResult,
+    package_part: str | None,
+) -> None:
+    """Attach vector-local diagnostic locations to their source-document report."""
+    for entry in vector_result.diagnostics:
+        diagnostic = dict(entry)
+        location: dict[str, object] = {}
+        location_value = diagnostic.get("location")
+        if isinstance(location_value, dict):
+            location = {
+                key: value for key, value in location_value.items() if isinstance(key, str)
+            }
+        if package_part is not None:
+            location["package_part"] = package_part
+        if location:
+            diagnostic["location"] = location
+        diagnostics.append(diagnostic)
+
+
 def replace_vector_bytes(
     data: bytes,
     extension: str,

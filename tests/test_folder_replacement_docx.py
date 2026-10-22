@@ -278,13 +278,14 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
             )
             self.assertEqual(1, len(nested_progress.started))
             self.assertTrue(nested_progress.started[0][0].startswith("chart1.xml: chart.xlsx"))
-            self.assertEqual(3, nested_progress.started[0][1])
-            self.assertEqual("replacement request", nested_progress.started[0][2])
+            self.assertEqual(4, nested_progress.started[0][1])
+            self.assertEqual("work item", nested_progress.started[0][2])
             self.assertEqual(
                 [
-                    "xl/worksheets/sheet1.xml replacement 1",
-                    "xl/worksheets/sheet1.xml replacement 2",
-                    "xl/worksheets/sheet1.xml replacement 3",
+                    "Planning part 1 of 2",
+                    "Planning part 2 of 2",
+                    "Applying part 1 of 2",
+                    "Applying part 2 of 2",
                 ],
                 nested_progress.advanced,
             )

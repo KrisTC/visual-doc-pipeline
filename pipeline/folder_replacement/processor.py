@@ -36,7 +36,7 @@ from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import replace_docx_file
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
 from pipeline.folder_replacement.pptx import replace_pptx_file
-from pipeline.folder_replacement.xlsx import replace_xlsx_file, xlsx_native_text_request_total
+from pipeline.folder_replacement.xlsx import apply_xlsx, plan_xlsx, xlsx_work_item_total
 from pipeline.folder_replacement.bitmap import (
     apply_bitmap,
     plan_bitmap_file,
@@ -44,7 +44,12 @@ from pipeline.folder_replacement.bitmap import (
     save_bitmap_file,
 )
 from pipeline.folder_replacement.planning import PhaseProgress, plan_and_apply
-from pipeline.folder_replacement.vector import apply_vector, plan_vector, replace_vector_bytes
+from pipeline.folder_replacement.vector import (
+    append_vector_diagnostics,
+    apply_vector,
+    plan_vector,
+    replace_vector_bytes,
+)
 from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
@@ -368,7 +373,7 @@ def replace_input_folder(
                 result.replaced_native_text_items += vector_result.replaced_text_items
                 result.replaced_image_regions += vector_result.replaced_image_regions
                 if diagnostics_enabled:
-                    _append_vector_diagnostics(document_diagnostics, vector_result, None)
+                    append_vector_diagnostics(document_diagnostics, vector_result, None)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     result.retained_vector_graphics += 1
                 work_completed("Applying vector graphic 1 of 1")
@@ -404,15 +409,37 @@ def replace_input_folder(
                         xlsx_translation_mode=xlsx_translation_mode,
                     )
                 elif extension == ".xlsx":
-                    office_handler = replace_xlsx_file
-                    native_items, image_regions, retained_vectors = office_handler(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
-                        nested_progress=display,
+                    phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                    workbook_plan = plan_xlsx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
                         xlsx_translation_mode=xlsx_translation_mode,
                         diagnostics=document_diagnostics if diagnostics_enabled else None,
+                        progress=phase_progress,
+                        nested_progress=display,
+                        failure_context=failure_context,
                     )
+                    workbook_result = plan_and_apply(
+                        workbook_plan,
+                        TranslationEngine(processing_replacement, source_language, target_language),
+                        lambda translate: apply_xlsx(
+                            workbook_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                        ),
+                        phase_progress,
+                    )
+                    temporary_destination.write_bytes(workbook_result.data)
+                    native_items = workbook_result.native_items
+                    image_regions = workbook_result.image_regions
+                    retained_vectors = workbook_result.retained_vectors
+                    for media_part, media_vector in workbook_result.vector_results:
+                        if diagnostics_enabled:
+                            append_vector_diagnostics(document_diagnostics, media_vector, media_part)
+                        if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
+                            print(f"Retained vector without editable text: {source_path}", file=sys.stderr)
                 else:
                     native_items, image_regions, retained_vectors = replace_pptx_file(
                         source_path, temporary_destination, processing_ocr, processing_replacement,
@@ -611,27 +638,6 @@ def _write_document_diagnostic(
     result.diagnostic_sidecars.append(sidecar)
 
 
-def _append_vector_diagnostics(
-    diagnostics: list[dict[str, object]],
-    vector_result: VectorReplacementResult,
-    package_part: str | None,
-) -> None:
-    """Attach vector-local diagnostic locations to their source-document report."""
-    for entry in vector_result.diagnostics:
-        diagnostic = dict(entry)
-        location: dict[str, object] = {}
-        location_value = diagnostic.get("location")
-        if isinstance(location_value, dict):
-            location = {
-                key: value for key, value in location_value.items() if isinstance(key, str)
-            }
-        if package_part is not None:
-            location["package_part"] = package_part
-        if location:
-            diagnostic["location"] = location
-        diagnostics.append(diagnostic)
-
-
 def _validate_roots(input_root: Path, output_root: Path) -> None:
     if not input_root.is_dir():
         raise ValueError(f"Input root does not exist or is not a directory: {input_root}")
@@ -704,10 +710,11 @@ def _source_work_total(
                 for name in archive.namelist()
             )
     if extension in OFFICE_DOCUMENT_EXTENSIONS:
-        if extension == ".xlsx" and xlsx_translation_mode == "fast":
-            return xlsx_native_text_request_total(
-                source_path.read_bytes(), document_text_layout, xlsx_translation_mode
-            ) + 2
+        if extension == ".xlsx":
+            with ZipFile(source_path) as archive:
+                return 2 * xlsx_work_item_total(
+                    archive.namelist(), document_text_layout, xlsx_translation_mode
+                )
         with ZipFile(source_path) as archive:
             return 1 + sum(
                 _is_office_bitmap_part(name) or _is_office_vector_part(name)
@@ -808,7 +815,7 @@ def _replace_office_file(
                 native_items += vector_result.replaced_text_items
                 image_regions += vector_result.replaced_image_regions
                 if diagnostics is not None:
-                    _append_vector_diagnostics(diagnostics, vector_result, entry.filename)
+                    append_vector_diagnostics(diagnostics, vector_result, entry.filename)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     retained_vectors += 1
                     print(f"Retained vector without editable text: {source}", file=sys.stderr)

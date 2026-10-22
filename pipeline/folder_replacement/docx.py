@@ -31,7 +31,8 @@ from pipeline.folder_replacement.office_xml import (
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.folder_replacement.common import NestedProgressReporter
-from pipeline.folder_replacement.xlsx import replace_xlsx_bytes, xlsx_native_text_request_total
+from pipeline.folder_replacement.planning import PhaseProgress
+from pipeline.folder_replacement.xlsx import replace_xlsx_bytes, xlsx_work_item_total
 from pipeline.ocr import OcrProvider
 from pipeline.ocr.image_preparation import RgbColour
 from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
@@ -72,6 +73,19 @@ _CODE_PAGE_CHARSETS = (
     (6, "A4"), (7, "A5"), (8, "CC"), (16, "A2"),
 )
 _DYNAMIC_NUMERIC_FIELD_KINDS = frozenset({"PAGE", "NUMPAGES", "SECTION", "SECTIONPAGES"})
+
+
+class _NestedPhaseProgress(PhaseProgress):
+    """Advance a nested row once per plan and apply item; translate batches leave it alone."""
+
+    def batch_finished(self, number: int, total: int) -> None:
+        return None
+
+
+def _nested_phase_progress(nested_progress: NestedProgressReporter) -> PhaseProgress:
+    return _NestedPhaseProgress(
+        nested_progress.advance_nested, lambda _label: None, lambda _extra: None
+    )
 
 
 def replace_docx_file(
@@ -382,23 +396,24 @@ def _replace_docx_charts(
             if workbook_data is None:
                 try:
                     chart_formulae = _chart_displayed_string_formulae(chart_root)
-                    request_total = xlsx_native_text_request_total(
-                        parts[workbook_part], document_text_layout, "fast", chart_formulae
-                    )
+                    with ZipFile(BytesIO(parts[workbook_part])) as workbook_archive:
+                        request_total = 2 * xlsx_work_item_total(
+                            workbook_archive.namelist(), document_text_layout, "fast"
+                        )
                     if nested_progress is not None:
                         if request_total:
                             nested_progress.start_nested(
                                 f"{Path(chart_part).name}: {Path(workbook_part).name}",
                                 request_total,
-                                "replacement request",
+                                "work item",
                             )
                     workbook_data, workbook_count = replace_xlsx_bytes(
                         parts[workbook_part], provider, source_language, target_language,
                         document_text_layout,
-                        nested_completed=(
+                        progress=(
                             None
                             if nested_progress is None or not request_total
-                            else nested_progress.advance_nested
+                            else _nested_phase_progress(nested_progress)
                         ),
                         xlsx_translation_mode="fast",
                         fast_chart_formulae=chart_formulae,
