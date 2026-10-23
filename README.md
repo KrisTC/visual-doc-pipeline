@@ -158,6 +158,8 @@ for the mount and credential model.
   behaviour, layout modes, and known limits.
 - [Local development](docs/development.md) — environment setup, checks, Windows
   CUDA configuration, and evaluation workflows.
+- [Release process](docs/release-process.md) — changelog preparation, tagging, and
+  the release workflow.
 - [Project background](docs/project-background.md) — the problem this project is
   intended to solve and its original motivation.
 - [Changelog](CHANGELOG.md) — release history and delivered capabilities.
