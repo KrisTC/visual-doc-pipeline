@@ -1072,7 +1072,7 @@ def _replace_pdf_dictionary_text(
         if not callable(set_value):
             continue
         set_value(
-            key,
+            NameObject(key),
             TextStringObject(
                 _replace_native_text(
                     str(value), replacement_provider, source_language, target_language

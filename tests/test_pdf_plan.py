@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-
+from typing import cast
 import skia  # type: ignore[import-not-found]
 from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (
@@ -168,6 +168,35 @@ def _pdf_bytes(*, annotated: bool = True, form_field: bool = True) -> bytes:
     return output.getvalue()
 
 
+def _dictionary_text_pdf() -> bytes:
+    """Build a one-page PDF with a non-FreeText annotation and a text-field widget."""
+    writer = PdfWriter()
+    page = writer.add_blank_page(200, 200)
+    note = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Annot"),
+        NameObject("/Subtype"): NameObject("/Text"),
+        NameObject("/Rect"): ArrayObject([NumberObject(10), NumberObject(150), NumberObject(30), NumberObject(170)]),
+        NameObject("/Contents"): TextStringObject("note text"),
+    }))
+    widget = writer._add_object(DictionaryObject({
+        NameObject("/Type"): NameObject("/Annot"),
+        NameObject("/Subtype"): NameObject("/Widget"),
+        NameObject("/FT"): NameObject("/Tx"),
+        NameObject("/T"): TextStringObject("field name"),
+        NameObject("/V"): TextStringObject("field value"),
+        NameObject("/Rect"): ArrayObject([NumberObject(50), NumberObject(100), NumberObject(190), NumberObject(130)]),
+        NameObject("/DA"): TextStringObject("/Helv 12 Tf 0 g"),
+    }))
+    page[NameObject("/Annots")] = ArrayObject([note, widget])
+    writer._root_object[NameObject("/AcroForm")] = DictionaryObject({
+        NameObject("/Fields"): ArrayObject([widget]),
+        NameObject("/DA"): TextStringObject("/Helv 12 Tf 0 g"),
+    })
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
 def _run_batched(
     source: Path,
     destination: Path,
@@ -207,6 +236,37 @@ class PdfPlanTests(unittest.TestCase):
                     self.assertIn("Inside form", texts)
                     self.assertIn("annotation text", texts)
                     self.assertIn("field value", texts)
+
+    # Verifies FR-2026-08-03-03's replacement of annotation and AcroForm text values in every layout mode.
+    def test_annotation_and_form_field_text_is_translated_in_every_layout(self) -> None:
+        for layout in LAYOUTS:
+            with self.subTest(layout=layout), TemporaryDirectory() as directory:
+                source = Path(directory) / "source.pdf"
+                source.write_bytes(_dictionary_text_pdf())
+                destination = Path(directory) / "out.pdf"
+
+                _run_batched(source, destination, layout, _RegionOcr("outlined"))
+                page = PdfReader(destination).pages[0]
+                annotations = cast(ArrayObject, page["/Annots"])
+                annotation_dictionaries = [cast(DictionaryObject, item.get_object()) for item in annotations]
+                self.assertEqual("note text translated", str(annotation_dictionaries[0]["/Contents"]))
+                self.assertIn("field value translated", str(annotation_dictionaries[1]["/V"]))
+
+    # Verifies FR-2026-10-22-04's plan-miss rule for the dictionary text of annotations and fields.
+    def test_dictionary_text_has_no_plan_miss_in_source_formatting_mode(self) -> None:
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.pdf"
+            source.write_bytes(_dictionary_text_pdf())
+
+            engine, provider, _counts = _run_batched(
+                source, Path(directory) / "out.pdf", LAYOUTS[0], _RegionOcr("outlined")
+            )
+
+            self.assertEqual(0, engine.plan_misses)
+            self.assertEqual(1, len(provider.requests))
+            self.assertEqual(
+                {"note text", "field value", "field name"}, set(provider.requests[0])
+            )
 
     # Verifies FR-2026-10-22-05's path-style identifiers for pages, form fields and images.
     def test_units_have_path_style_identifiers(self) -> None:
