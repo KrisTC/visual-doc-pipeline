@@ -77,6 +77,28 @@ class GenerateChangelogDraftTests(unittest.TestCase):
             (root / "CHANGELOG.md").write_text("# Changelog\n", encoding="utf-8")
             self.assertFalse(generate_changelog_draft.changelog_is_empty(root))
 
+    # Verifies TR-2026-09-11-03: Git output is decoded as UTF-8 regardless of the platform locale.
+    def test_run_git_decodes_output_as_utf8(self) -> None:
+        with patch.object(generate_changelog_draft.subprocess, "run") as run:
+            run.return_value.stdout = "output"
+            generate_changelog_draft.run_git(Path("."), "show", "HEAD:file")
+
+        self.assertEqual("utf-8", run.call_args.kwargs["encoding"])
+
+    # Verifies TR-2026-09-11-03: Git object paths use forward slashes on every platform.
+    def test_reads_requirement_files_with_posix_git_paths(self) -> None:
+        calls: list[tuple[str, ...]] = []
+
+        def fake_run_git(_root: Path, *arguments: str) -> str:
+            calls.append(arguments)
+            return "requirements/example.md\n" if arguments[0] == "ls-tree" else "contents"
+
+        with patch.object(generate_changelog_draft, "run_git", fake_run_git):
+            files = generate_changelog_draft.requirement_files_at_revision(Path("."), "v0.1.0")
+
+        self.assertEqual({Path("requirements/example.md"): "contents"}, files)
+        self.assertIn(("show", "v0.1.0:requirements/example.md"), calls)
+
     # Verifies TR-2026-09-11-03: additions, updates, and deletions use the right revision.
     def test_classifies_requirement_changes(self) -> None:
         old = generate_changelog_draft.Requirement("TR-2026-01-01-01", "Old", "Proposed", "KrisTC", "Old rationale.")
