@@ -1806,7 +1806,7 @@ cache. Existing diagnostic fields remain governed by FR-2026-08-27-06.
 |----------|-------|
 | Title | Process each source as plan, translate, and apply steps with a shared translation engine |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request: batch text replacement (`docs/batch-text-replacement-plan.md`) |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-27-10, FR-2026-10-22-01, FR-2026-10-22-02, FR-2026-10-22-05, FR-2026-10-22-06, FR-2026-10-22-07 |
@@ -1850,7 +1850,7 @@ Automated tests shall use synthetic documents, the `identity` and mask providers
 |----------|-------|
 | Title | Process nested documents recursively with the same plan and apply functions |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-03-03, FR-2026-09-03-06, FR-2026-09-04-01, FR-2026-10-22-04, FR-2026-10-22-07 |
@@ -1910,7 +1910,7 @@ Automated tests shall use synthetic requests, mocked providers, and caches. They
 |----------|-------|
 | Title | Report plan, translate, and apply progress for each source |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-03-04, FR-2026-09-03-01, FR-2026-09-04-01, FR-2026-10-22-03, FR-2026-10-22-04, FR-2026-10-22-05 |

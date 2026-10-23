@@ -2024,8 +2024,9 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
             )
 
             self.assertEqual(5, result.replaced_native_text_items)
+            # The five identical texts are batched as one unique request (FR-2026-10-22-04).
             self.assertEqual(
-                ["A"] * 5,
+                ["A"],
                 [request.text for request in provider.requests if not request.is_filename],
             )
 
@@ -3200,18 +3201,19 @@ class FolderReplacementPdfTests(FolderReplacementTestCase):
 
             self.assertEqual(1, result.processed_files)
             self.assertEqual(1, len(progress_bars))
-            self.assertEqual(5, progress_bars[0].total)
+            self.assertEqual(6, progress_bars[0].total)
             self.assertEqual(
                 [
-                    "native text page 1/2",
-                    "native text page 2/2",
-                    "native form fields",
-                    "vector OCR page 1/2",
-                    "vector OCR page 2/2",
+                    "Planning page 1 of 3",
+                    "Planning page 2 of 3",
+                    "Planning form fields 3 of 3",
+                    "Applying page 1 of 3",
+                    "Applying page 2 of 3",
+                    "Applying form fields 3 of 3",
                 ],
                 progress_bars[0].postfixes,
             )
-            self.assertEqual(5, progress_bars[0].updates)
+            self.assertEqual(6, progress_bars[0].updates)
 
 
 

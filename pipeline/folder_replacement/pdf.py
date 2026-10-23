@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field, replace
 from io import BytesIO
 import math
 from pathlib import Path
@@ -16,6 +16,7 @@ from PIL import Image
 import pypdfium2 as pdfium  # type: ignore[import-untyped]
 from pypdf import PdfReader, PdfWriter
 from pypdf._cmap import get_encoding
+from pypdf._page import ImageFile
 from pypdf.generic import (
     ArrayObject,
     ByteStringObject,
@@ -40,11 +41,18 @@ from pipeline.bounded_text_layout import (
     fitted_text_lines,
     noto_typefaces,
     replace_and_fit_text_box,
+    replace_paragraphs,
 )
-from pipeline.folder_replacement.bitmap import replace_image as _process_bitmap_image
+from pipeline.folder_replacement.bitmap import BitmapPlan, apply_bitmap, plan_bitmap
 from pipeline.folder_replacement.common import (
     TEXT_REPLACEMENT_MINIMUM_CONFIDENCE,
     replace_native_text,
+)
+from pipeline.folder_replacement.planning import (
+    ListingProvider,
+    LookupProvider,
+    PhaseProgress,
+    child_unit_id,
 )
 from pipeline.ocr import BoundingPolygon, OcrProvider, OcrRequest, OcrText, PixelPoint
 from pipeline.portable_bullet_overrides import (
@@ -55,7 +63,13 @@ from pipeline.portable_bullet_overrides import (
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.runtime_assets import math_font_is_available, symbols_font_is_available
 from pipeline.text_region_colours import estimate_text_region_colours
-from pipeline.text_replacement import TextReplacementProvider, replace_text
+from pipeline.text_region_colours.models import TextRegionColourEstimate
+from pipeline.text_replacement import (
+    TextReplacementItem,
+    TextReplacementProvider,
+    TextUnit,
+    replace_text,
+)
 
 
 _PDF_VECTOR_OCR_DPI = 200
@@ -95,21 +109,76 @@ def _replace_native_text(
     return replace_native_text(text, replacement_provider, source_language, target_language)
 
 
-def _replace_image_text(
-    image: Image.Image,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-) -> int:
-    return _process_bitmap_image(
-        image, ocr_provider, replacement_provider, source_language, target_language, typeface
-    )
+PDF_UNIT_ID = "pdf"
+
+
+@dataclass(slots=True)
+class _PdfVectorPlan:
+    """The OCR regions of one page's vector-only pixels that need replacement text.
+
+    The rendered page is not kept (it can be tens of megapixels); each region keeps the
+    colours estimated from it.
+    """
+
+    page_index: int
+    detected: int = 0
+    accepted: int = 0
+    reason_counts: dict[str, int] = field(default_factory=dict)
+    retained_region_details: list[dict[str, object]] = field(default_factory=list)
+    regions: list[tuple[OcrText, TextRegionColourEstimate]] = field(default_factory=list)
+
+    @property
+    def texts(self) -> tuple[str, ...]:
+        return tuple(item.text for item, _colours in self.regions)
+
+
+@dataclass(slots=True)
+class PdfPlan:
+    """A PDF's texts, its images' OCR plans, and its vector-only pages' OCR plans.
+
+    Each page is one unit holding its native text, its annotations' text and its
+    vector-only OCR text. Form fields that belong to no page are one more unit, and
+    each embedded raster image is a nested unit.
+    """
+
+    source: Path
+    layout: str
+    source_language: str
+    target_language: str
+    page_texts: list[tuple[str, ...]]
+    form_field_texts: tuple[str, ...]
+    images: dict[int, BitmapPlan]
+    image_sizes: dict[int, tuple[int, int]]
+    vector_pages: dict[int, _PdfVectorPlan]
+    unit_id: str = PDF_UNIT_ID
+
+    def units(self) -> Iterator[TextUnit]:
+        """Yield each page's unit, the form-field unit, then each image's unit."""
+        for page_index, texts in enumerate(self.page_texts, start=1):
+            yield TextUnit(child_unit_id(self.unit_id, f"page-{page_index}"), texts)
+        yield TextUnit(child_unit_id(self.unit_id, "form-fields"), self.form_field_texts)
+        for bitmap in self.images.values():
+            yield from bitmap.units()
+
+
+def _pdf_unique_images(writer: PdfWriter) -> list[tuple[int, ImageFile]]:
+    """Return each embedded raster image once, in page order, with its object number."""
+    images: list[tuple[int, ImageFile]] = []
+    seen: set[int] = set()
+    for page in writer.pages:
+        for image_file in page.images:
+            reference = image_file.indirect_reference
+            if reference is None:
+                raise ValueError("A PDF contains an inline image that cannot be replaced safely.")
+            if reference.idnum in seen:
+                continue
+            seen.add(reference.idnum)
+            images.append((reference.idnum, image_file))
+    return images
 
 
 def pdf_work_total(source: Path) -> int:
-    """Return the native, embedded-raster, and per-page vector-review work units."""
+    """Return the plan and apply work units: each page, the form fields and each image."""
     reader = PdfReader(source)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
@@ -123,26 +192,170 @@ def pdf_work_total(source: Path) -> int:
                 inline_image_count += 1
             else:
                 image_references.add(reference.idnum)
-    return 2 * len(reader.pages) + 1 + len(image_references) + inline_image_count
+    return 2 * _pdf_work_item_total(len(reader.pages), len(image_references) + inline_image_count)
 
 
-def replace_pdf_file(
+def _pdf_work_item_total(page_count: int, image_count: int) -> int:
+    """Return how many items the plan step, and again the apply step, advance through."""
+    return page_count + 1 + image_count
+
+
+def plan_pdf(
     source: Path,
-    destination: Path,
     ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
     source_language: str,
     target_language: str,
-    typeface: skia.Typeface,
-    work_completed: Callable[[str], None],
     *,
     document_text_layout: str = "preserve-source-formatting",
-    diagnostics: list[dict[str, object]] | None = None,
-) -> tuple[int, int]:
+    unit_id: str = PDF_UNIT_ID,
+    progress: PhaseProgress | None = None,
+) -> PdfPlan:
+    """List the PDF's texts and run OCR once per image and vector-only page.
+
+    No provider is called, and nothing is fitted or written to the output: the document
+    is read into a private writer that is discarded.
+    """
     reader = PdfReader(source)
     writer = PdfWriter()
     writer.clone_document_from_reader(reader)
     _promote_direct_image_xobjects(writer)
+    image_files = _pdf_unique_images(writer)
+    page_count = len(writer.pages)
+    total = _pdf_work_item_total(page_count, len(image_files))
+    position = 0
+
+    def advance(noun: str) -> None:
+        nonlocal position
+        position += 1
+        if progress is not None:
+            progress.plan_item(position, total, noun)
+
+    # The render omits decodable text and images, so it is the same before and after
+    # translation; building it first lets each page's OCR follow its text.
+    vector_render_document = _pdf_vector_render_document(writer, keep_undecodable_text=True)
+    seen_forms: set[int] = set()
+    seen_annotations: set[int] = set()
+    undecodable_candidates: list[_PdfUndecodableCandidate] = []
+    page_texts: list[tuple[str, ...]] = []
+    vector_pages: dict[int, _PdfVectorPlan] = {}
+    for page_index, page in enumerate(writer.pages, start=1):
+        listing = ListingProvider()
+        _replace_pdf_content_text(
+            page,
+            writer,
+            listing,
+            source_language,
+            target_language,
+            seen_forms,
+            static_font=document_text_layout == "preserve-basic-layout",
+            source_font=document_text_layout == "preserve-basic-layout-source-font",
+            visual_layout=document_text_layout in {
+                "preserve-basic-layout", "preserve-basic-layout-source-font"
+            },
+            page_index=page_index,
+            container_kind="pdf_page_content",
+            undecodable_candidates=undecodable_candidates,
+            list_only=True,
+        )
+        _replace_pdf_annotations(
+            page,
+            writer,
+            listing,
+            source_language,
+            target_language,
+            seen_forms,
+            seen_annotations,
+            document_text_layout,
+            list_only=True,
+        )
+        texts = list(listing.texts)
+        if page_index in vector_render_document.pages_with_vector_paint:
+            vector_plan = _plan_pdf_vector_outline_text(
+                page, vector_render_document.data, page_index, ocr_provider, source_language
+            )
+            vector_pages[page_index] = vector_plan
+            texts.extend(vector_plan.texts)
+        page_texts.append(tuple(texts))
+        advance("page")
+    form_listing = ListingProvider()
+    acro_form = writer._root_object.get("/AcroForm")
+    if acro_form is not None:
+        _replace_pdf_form_fields(
+            acro_form.get_object(),
+            writer,
+            form_listing,
+            source_language,
+            target_language,
+            seen_forms,
+            seen_annotations,
+            document_text_layout,
+            list_only=True,
+        )
+    advance("form fields")
+    images: dict[int, BitmapPlan] = {}
+    image_sizes: dict[int, tuple[int, int]] = {}
+    for image_number, (reference_number, image_file) in enumerate(image_files, start=1):
+        if image_file.image is None:
+            raise ValueError("Could not decode an embedded PDF image.")
+        image = image_file.image.copy()
+        bitmap = plan_bitmap(
+            image,
+            ocr_provider,
+            source_language,
+            unit_id=child_unit_id(unit_id, f"image-{image_number}"),
+        )
+        image_sizes[reference_number] = image.size
+        # Apply decodes the image again, so a large scanned document's pixels are not
+        # held between plan and apply.
+        bitmap.image = Image.new("1", (1, 1))
+        images[reference_number] = bitmap
+        advance("image")
+    return PdfPlan(
+        source,
+        document_text_layout,
+        source_language,
+        target_language,
+        page_texts,
+        tuple(form_listing.texts),
+        images,
+        image_sizes,
+        vector_pages,
+        unit_id,
+    )
+
+
+def apply_pdf(
+    plan: PdfPlan,
+    translate: Callable[[str], TextReplacementItem],
+    typeface: skia.Typeface,
+    destination: Path,
+    *,
+    progress: PhaseProgress | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+) -> tuple[int, int]:
+    """Write the engine's translations into the PDF and return (native items, image regions).
+
+    The output is identical to translating each text with its own provider call: text is
+    still encoded, fitted and written here, from the translated text.
+    """
+    document_text_layout = plan.layout
+    source_language, target_language = plan.source_language, plan.target_language
+    replacement_provider = LookupProvider(translate)
+    reader = PdfReader(plan.source)
+    writer = PdfWriter()
+    writer.clone_document_from_reader(reader)
+    _promote_direct_image_xobjects(writer)
+    image_files = _pdf_unique_images(writer)
+    page_count = len(writer.pages)
+    total = _pdf_work_item_total(page_count, len(image_files))
+    position = 0
+
+    def advance(noun: str) -> None:
+        nonlocal position
+        position += 1
+        if progress is not None:
+            progress.apply_item(position, total, noun)
+
     native_items = 0
     seen_forms: set[int] = set()
     seen_annotations: set[int] = set()
@@ -175,7 +388,7 @@ def replace_pdf_file(
             seen_annotations,
             document_text_layout,
         )
-        work_completed(f"native text page {page_index}/{len(writer.pages)}")
+        advance("page")
     acro_form = writer._root_object.get("/AcroForm")
     if acro_form is not None:
         native_items += _replace_pdf_form_fields(
@@ -188,48 +401,27 @@ def replace_pdf_file(
             seen_annotations,
             document_text_layout,
         )
-    work_completed("native form fields")
+    advance("form fields")
     image_regions = 0
-    seen_images: set[int] = set()
-    embedded_image_index = 0
-    for page in writer.pages:
-        for image_file in page.images:
-            reference = image_file.indirect_reference
-            if reference is None:
-                raise ValueError("A PDF contains an inline image that cannot be replaced safely.")
-            if reference.idnum in seen_images:
-                continue
-            seen_images.add(reference.idnum)
-            if image_file.image is None:
-                raise ValueError("Could not decode an embedded PDF image.")
-            replacement_image = image_file.image.copy()
-            image_regions += _replace_image_text(
-                replacement_image,
-                ocr_provider,
-                replacement_provider,
-                source_language,
-                target_language,
-                typeface,
-            )
-            image_file.replace(replacement_image)
-            embedded_image_index += 1
-            work_completed(f"embedded image {embedded_image_index}")
-    vector_render_document = _pdf_vector_render_document(writer, keep_undecodable_text=True)
+    for reference_number, image_file in image_files:
+        planned = plan.images.get(reference_number)
+        if planned is None:
+            raise RuntimeError("A PDF image was not in the plan.")
+        if image_file.image is None:
+            raise ValueError("Could not decode an embedded PDF image.")
+        replacement_image = image_file.image.copy()
+        if replacement_image.size != plan.image_sizes[reference_number]:
+            raise RuntimeError("A PDF image differs from its plan.")
+        planned.image = replacement_image
+        image_regions += apply_bitmap(planned, translate, typeface, target_language)
+        image_file.replace(replacement_image)
+        advance("image")
     for page_index, page in enumerate(writer.pages, start=1):
-        if page_index in vector_render_document.pages_with_vector_paint:
-            image_regions += _replace_pdf_vector_outline_text(
-                page,
-                writer,
-                vector_render_document.data,
-                page_index,
-                ocr_provider,
-                replacement_provider,
-                source_language,
-                target_language,
-                diagnostics,
-                undecodable_candidates,
+        vector_plan = plan.vector_pages.get(page_index)
+        if vector_plan is not None:
+            image_regions += _apply_pdf_vector_outline_text(
+                page, writer, vector_plan, translate, diagnostics
             )
-        work_completed(f"vector OCR page {page_index}/{len(writer.pages)}")
     with destination.open("wb") as output_file:
         writer.write(output_file)
     return native_items, image_regions
@@ -456,20 +648,16 @@ def _pdf_text_showing_operation_is_undecodable(
     )
 
 
-def _replace_pdf_vector_outline_text(
+def _plan_pdf_vector_outline_text(
     page: object,
-    writer: PdfWriter,
     vector_render_document: bytes,
     page_index: int,
     ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
     source_language: str,
-    target_language: str,
-    diagnostics: list[dict[str, object]] | None,
-    undecodable_candidates: list[_PdfUndecodableCandidate],
-) -> int:
-    """OCR vector-only page pixels and append safe page-space PDF replacements."""
-    reason_counts: dict[str, int] = {}
+) -> _PdfVectorPlan:
+    """OCR vector-only page pixels and keep the regions that are safe to replace."""
+    plan = _PdfVectorPlan(page_index)
+    reason_counts = plan.reason_counts
     page_width, page_height = _pdf_vector_page_size(page)
     scale = _PDF_VECTOR_OCR_DPI / 72.0
     width_pixels = math.ceil(page_width * scale)
@@ -479,34 +667,30 @@ def _replace_pdf_vector_outline_text(
         or width_pixels * height_pixels > _PDF_VECTOR_OCR_MAXIMUM_PIXELS
     ):
         _pdf_vector_reason(reason_counts, "vector_ocr_page_size_limit")
-        _record_pdf_vector_summary(diagnostics, page_index, 0, 0, 0, reason_counts)
-        return 0
+        return plan
     rotation = _pdf_float(getattr(page, "get", lambda _key, _default=None: None)("/Rotate") or 0)
     if rotation % 360.0 != 0.0:
         _pdf_vector_reason(reason_counts, "vector_ocr_page_rotation_unsupported")
-        _record_pdf_vector_summary(diagnostics, page_index, 0, 0, 0, reason_counts)
-        return 0
+        return plan
     document = pdfium.PdfDocument(vector_render_document)
     try:
         rendered = document[page_index - 1].render(scale=scale, may_draw_forms=False).to_pil().convert("RGB")
     finally:
         document.close()
     detected = ocr_provider.recognize(OcrRequest(rendered, source_language)).text_items
-    accepted = 0
-    replacements: list[tuple[OcrText, str]] = []
-    retained_region_details: list[dict[str, object]] = []
+    plan.detected = len(detected)
     for item in detected:
         if item.confidence < TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:
             _pdf_vector_reason(reason_counts, "vector_ocr_confidence_below_threshold")
             continue
-        accepted += 1
+        plan.accepted += 1
         baseline_angle = _pdf_vector_baseline_angle(item.bounding_polygon)
         if (
             baseline_angle is None
             or abs(baseline_angle) > _PDF_VECTOR_OCR_UPRIGHT_TOLERANCE_DEGREES
         ):
             _pdf_vector_reason(reason_counts, "vector_ocr_polygon_orientation_unsupported")
-            retained_region_details.append({
+            plan.retained_region_details.append({
                 "reason_code": "vector_ocr_polygon_orientation_unsupported",
                 "detected_text": item.text,
                 "baseline_angle_degrees": (
@@ -518,31 +702,45 @@ def _replace_pdf_vector_outline_text(
         if colours.background_colour_confidence < _PDF_VECTOR_OCR_MINIMUM_BACKGROUND_CONFIDENCE:
             _pdf_vector_reason(reason_counts, "vector_ocr_background_unsafe")
             continue
-        replacement = replace_text(
-            replacement_provider, item.text, is_filename=False,
-            source_language=source_language, target_language=target_language,
-        ).text
+        plan.regions.append((item, colours))
+    return plan
+
+
+def _apply_pdf_vector_outline_text(
+    page: object,
+    writer: PdfWriter,
+    vector_plan: _PdfVectorPlan,
+    translate: Callable[[str], TextReplacementItem],
+    diagnostics: list[dict[str, object]] | None,
+) -> int:
+    """Append safe page-space PDF replacements for a page's planned OCR regions."""
+    page_index = vector_plan.page_index
+    reason_counts = dict(vector_plan.reason_counts)
+    replacements: list[tuple[OcrText, TextRegionColourEstimate, str]] = []
+    for item, colours in vector_plan.regions:
+        replacement = translate(item.text).text
         if "\n" in replacement or not _pdf_static_font_supports_text(replacement):
             _pdf_vector_reason(reason_counts, "vector_ocr_replacement_unsupported")
             continue
-        replacements.append((item, replacement))
+        replacements.append((item, colours, replacement))
     if not replacements:
         _record_pdf_vector_summary(
             diagnostics,
             page_index,
-            len(detected),
-            accepted,
+            vector_plan.detected,
+            vector_plan.accepted,
             0,
             reason_counts,
-            retained_region_details,
+            vector_plan.retained_region_details,
         )
         return 0
+    page_height = _pdf_vector_page_size(page)[1]
+    scale = _PDF_VECTOR_OCR_DPI / 72.0
     font_name, font_reference = _pdf_embedded_noto_font(writer, "sans-serif", False)
     _pdf_add_font_resource(page, font_name, font_reference)
     overlay: list[tuple[list[object], bytes]] = []
     written = 0
-    for item, replacement in replacements:
-        colours = estimate_text_region_colours(rendered, item)
+    for item, colours, replacement in replacements:
         operations = _pdf_vector_overlay_operations(
             item.bounding_polygon,
             replacement,
@@ -579,11 +777,11 @@ def _replace_pdf_vector_outline_text(
     _record_pdf_vector_summary(
         diagnostics,
         page_index,
-        len(detected),
-        accepted,
+        vector_plan.detected,
+        vector_plan.accepted,
         written,
         reason_counts,
-        retained_region_details,
+        vector_plan.retained_region_details,
     )
     return written
 
@@ -754,6 +952,8 @@ def _replace_pdf_annotations(
     seen_forms: set[int],
     seen_annotations: set[int],
     document_text_layout: str,
+    *,
+    list_only: bool = False,
 ) -> int:
     annotations = getattr(page, "get", lambda _key, _default=None: None)("/Annots")
     if annotations is None:
@@ -771,6 +971,7 @@ def _replace_pdf_annotations(
                 annotation, "/Contents", replacement_provider, source_language, target_language, writer,
                 embed_noto=document_text_layout == "preserve-basic-layout",
                 measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+                list_only=list_only,
             )
             continue
         replaced_items += _replace_pdf_dictionary_text(
@@ -785,6 +986,7 @@ def _replace_pdf_annotations(
                 source_language,
                 target_language,
                 seen_forms,
+                list_only=list_only,
             )
     return replaced_items
 
@@ -798,6 +1000,8 @@ def _replace_pdf_form_fields(
     seen_forms: set[int],
     seen_annotations: set[int],
     document_text_layout: str,
+    *,
+    list_only: bool = False,
 ) -> int:
     get_object = getattr(field, "get_object", None)
     dictionary = get_object() if callable(get_object) else field
@@ -814,6 +1018,7 @@ def _replace_pdf_form_fields(
             dictionary, "/V", replacement_provider, source_language, target_language, writer,
             embed_noto=document_text_layout == "preserve-basic-layout",
             measure_source_fonts=document_text_layout == "preserve-basic-layout-source-font",
+            list_only=list_only,
         )
     else:
         replaced_items = _replace_pdf_dictionary_text(
@@ -828,6 +1033,7 @@ def _replace_pdf_form_fields(
             source_language,
             target_language,
             seen_forms,
+            list_only=list_only,
         )
     children = dictionary.get("/Kids")
     if children is None:
@@ -843,6 +1049,7 @@ def _replace_pdf_form_fields(
                 seen_forms,
                 seen_annotations,
                 document_text_layout,
+                list_only=list_only,
             )
     return replaced_items
 
@@ -900,6 +1107,7 @@ def _replace_pdf_bounded_dictionary_text(
     *,
     embed_noto: bool,
     measure_source_fonts: bool,
+    list_only: bool = False,
 ) -> int:
     """Fit a form/FreeText value and make its portable-size setting explicit.
 
@@ -907,6 +1115,8 @@ def _replace_pdf_bounded_dictionary_text(
     identify a stable text rectangle.  Widget viewers use ``/DA`` to generate
     an appearance when an existing appearance is stale, so we retain its
     selected source face while supplying the Noto-measured size.
+
+    With ``list_only`` the value is only requested from the provider, not fitted.
     """
     get_value = getattr(dictionary, "get", None)
     set_value = getattr(dictionary, "__setitem__", None)
@@ -923,6 +1133,9 @@ def _replace_pdf_bounded_dictionary_text(
                               None, (BoundedTextRun(str(source_text), face, "sans-serif", size,
                                                     False, False, "none", None),)),),
     )
+    if list_only:
+        replace_paragraphs(box, replacement_provider, source_language, target_language)
+        return 0
     fitted = replace_and_fit_text_box(
         box, replacement_provider, source_language, target_language, noto_typefaces(),
         preserve_source_font_family=True,
@@ -1100,6 +1313,8 @@ def _replace_pdf_appearance_streams(
     source_language: str,
     target_language: str,
     seen_forms: set[int],
+    *,
+    list_only: bool = False,
 ) -> int:
     values = getattr(appearance, "values", None)
     if not callable(values):
@@ -1116,6 +1331,7 @@ def _replace_pdf_appearance_streams(
                 source_language,
                 target_language,
                 seen_forms,
+                list_only=list_only,
             )
         elif hasattr(appearance_entry, "values"):
             replaced_items += _replace_pdf_appearance_streams(
@@ -1125,6 +1341,7 @@ def _replace_pdf_appearance_streams(
                 source_language,
                 target_language,
                 seen_forms,
+                list_only=list_only,
             )
     return replaced_items
 
@@ -1144,7 +1361,13 @@ def _replace_pdf_content_text(
     diagnostics: list[dict[str, object]] | None = None,
     container_kind: str = "pdf_page_content",
     undecodable_candidates: list[_PdfUndecodableCandidate] | None = None,
+    list_only: bool = False,
 ) -> int:
+    """Replace a content stream's text, or with ``list_only`` only request it.
+
+    A listing run reads the same text the replacing run would, but adds no fonts and
+    fits and writes nothing, so a plan can list a page without changing it.
+    """
     get_contents = getattr(content_owner, "get_contents", None)
     replace_contents = getattr(content_owner, "replace_contents", None)
     contents = get_contents() if callable(get_contents) else content_owner
@@ -1155,7 +1378,9 @@ def _replace_pdf_content_text(
     static_font_reference: object | None = None
     fitted_static_fonts: dict[str, tuple[str, object]] = {}
     fallback_font_name: str | None = None
-    if visual_layout:
+    if list_only:
+        pass
+    elif visual_layout:
         static_font_name, static_font_reference = _pdf_embedded_noto_font(
             writer, "sans-serif", False
         )
@@ -1187,7 +1412,7 @@ def _replace_pdf_content_text(
         if resources is not None and resources.get_object().get("/XObject") is not None
         else None
     )
-    if visual_layout and fitted_static_fonts:
+    if visual_layout and (list_only or fitted_static_fonts):
         content_bounds = _pdf_content_bounds(content_owner)
         can_widen_single_lines = (
             content_bounds is not None
@@ -1209,6 +1434,7 @@ def _replace_pdf_content_text(
             content_bounds=content_bounds,
             can_widen_single_lines=can_widen_single_lines,
             undecodable_candidates=undecodable_candidates,
+            list_only=list_only,
         )
     else:
         replaced_items = _replace_pdf_operations(
@@ -1252,6 +1478,7 @@ def _replace_pdf_content_text(
             diagnostics=diagnostics,
             container_kind="pdf_form_xobject",
             undecodable_candidates=undecodable_candidates,
+            list_only=list_only,
         )
     return replaced_items
 
@@ -1454,6 +1681,7 @@ def _replace_pdf_fitted_operations(
     content_bounds: tuple[float, float, float, float] | None = None,
     can_widen_single_lines: bool = False,
     undecodable_candidates: list[_PdfUndecodableCandidate] | None = None,
+    list_only: bool = False,
 ) -> int:
     """Replace eligible page text as visual lines or paragraph-like blocks.
 
@@ -1942,6 +2170,11 @@ def _replace_pdf_fitted_operations(
 
     prepared_replacements: list[tuple[_PdfVisualRegion, list[tuple[list[object], bytes]]]] = []
     for region in candidate_regions:
+        if list_only:
+            _pdf_list_region_texts(
+                region, replacement_provider, source_language, target_language, font_resources
+            )
+            continue
         expansion_reason: str | None = None
         expansion_blocker_kind: str | None = None
         expansion_blocker_location: tuple[float, float] | None = None
@@ -2049,6 +2282,9 @@ def _replace_pdf_fitted_operations(
             )
             continue
         prepared_replacements.append((region, replacement))
+
+    if list_only:
+        return 0
 
     if not prepared_replacements:
         for scope in actual_text_scopes.values():
@@ -4803,6 +5039,46 @@ def _pdf_source_font_resource_name(item: _PdfShownText) -> str | None:
     return str(item.current_font[0]) if item.current_font is not None else None
 
 
+def _pdf_region_text_box(
+    region: _PdfVisualRegion, font_resources: dict[str, object]
+) -> BoundedTextBox:
+    return BoundedTextBox(
+        round(region.width / region.horizontal_stretch * 12_700), round(region.height * 12_700), 0, 0, 0, 0, None,
+        (BoundedTextParagraph(
+            region.alignment, None, None, None, None, 0, None, None, None, None, None,
+            (BoundedTextRun(
+                region.text,
+                _pdf_source_font_family(region.anchor.current_font, font_resources),
+                "sans-serif",
+                region.font_size,
+                False,
+                False,
+                "none",
+                None,
+            ),),
+        ),),
+    )
+
+
+def _pdf_list_region_texts(
+    region: _PdfVisualRegion,
+    replacement_provider: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    font_resources: dict[str, object],
+) -> None:
+    """Request the texts a region's replacement needs, without fitting or serializing it."""
+    if _pdf_restore_source_text_state(region.anchor) is None:
+        return
+    _pdf_replace_paint_spans(
+        _pdf_region_text_box(region, font_resources),
+        region,
+        replacement_provider,
+        source_language,
+        target_language,
+    )
+
+
 def _pdf_fitted_region_operations(
     region: _PdfVisualRegion,
     replacement_provider: TextReplacementProvider,
@@ -4823,22 +5099,7 @@ def _pdf_fitted_region_operations(
     restore_operations = _pdf_restore_source_text_state(region.anchor)
     if restore_operations is None:
         return None
-    box = BoundedTextBox(
-        round(region.width / region.horizontal_stretch * 12_700), round(region.height * 12_700), 0, 0, 0, 0, None,
-        (BoundedTextParagraph(
-            region.alignment, None, None, None, None, 0, None, None, None, None, None,
-            (BoundedTextRun(
-                region.text,
-                _pdf_source_font_family(region.anchor.current_font, font_resources),
-                "sans-serif",
-                region.font_size,
-                False,
-                False,
-                "none",
-                None,
-            ),),
-        ),),
-    )
+    box = _pdf_region_text_box(region, font_resources)
     replacement_box, replacement_spans = _pdf_replace_paint_spans(
         box,
         region,

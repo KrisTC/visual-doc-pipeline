@@ -85,8 +85,10 @@ def replace_text(
 ) -> TextReplacementItem:
     """Replace one text as a batch of one.
 
-    This is a temporary convenience for handlers that are not yet converted to
-    plan and apply steps. It is not part of the provider API.
+    Use this for a text that is inherently alone (a filename, or an apply-step
+    lookup that the plan missed). Handlers list their texts in the plan step and
+    reach the provider through the translation engine. It is not part of the
+    provider API.
     """
     request = TextReplacementRequest((text,), is_filename, source_language, target_language)
     return check_result_length(1, provider.replace(request)).items[0]

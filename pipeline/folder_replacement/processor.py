@@ -34,7 +34,7 @@ from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
 from pipeline.vector_text import VectorReplacementResult
 from pipeline.folder_replacement.docx import DocxResult, apply_docx, docx_work_item_total, plan_docx
-from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
+from pipeline.folder_replacement.pdf import apply_pdf, pdf_work_total, plan_pdf
 from pipeline.folder_replacement.pptx import PptxResult, apply_pptx, plan_pptx, pptx_work_item_total
 from pipeline.folder_replacement.xlsx import XlsxResult, apply_xlsx, plan_xlsx, xlsx_work_item_total
 from pipeline.folder_replacement.bitmap import (
@@ -407,17 +407,24 @@ def replace_input_folder(
                         container_kind="pdf_document",
                         operation="text_replacement",
                     )
-                native_items, image_regions = replace_pdf_file(
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                pdf_diagnostics = document_diagnostics if diagnostics_enabled else None
+                pdf_plan = plan_pdf(
                     source_path,
-                    temporary_destination,
                     processing_ocr,
-                    processing_replacement,
                     source_language,
                     target_language,
-                    typeface,
-                    work_completed,
                     document_text_layout=document_text_layout,
-                    diagnostics=document_diagnostics if diagnostics_enabled else None,
+                    progress=phase_progress,
+                )
+                native_items, image_regions = plan_and_apply(
+                    pdf_plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_pdf(
+                        pdf_plan, translate, typeface, temporary_destination,
+                        progress=phase_progress, diagnostics=pdf_diagnostics,
+                    ),
+                    phase_progress,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
