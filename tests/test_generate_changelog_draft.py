@@ -79,7 +79,7 @@ class GenerateChangelogDraftTests(unittest.TestCase):
 
     # Verifies TR-2026-09-11-03: Git output is decoded as UTF-8 regardless of the platform locale.
     def test_run_git_decodes_output_as_utf8(self) -> None:
-        with patch.object(generate_changelog_draft.subprocess, "run") as run:
+        with patch("subprocess.run") as run:
             run.return_value.stdout = "output"
             generate_changelog_draft.run_git(Path("."), "show", "HEAD:file")
 
