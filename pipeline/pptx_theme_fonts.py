@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import posixpath
 import unicodedata
+from typing import BinaryIO
 import xml.etree.ElementTree as ElementTree
 from zipfile import ZipFile
 
@@ -46,7 +47,7 @@ class PptxThemeFonts:
         return None
 
 
-def pptx_themes_by_slide(source: Path) -> tuple[PptxThemeFonts | None, ...]:
+def pptx_themes_by_slide(source: Path | BinaryIO) -> tuple[PptxThemeFonts | None, ...]:
     """Return each slide's reachable theme without following external targets."""
     with ZipFile(source) as archive:
         parts = frozenset(archive.namelist())

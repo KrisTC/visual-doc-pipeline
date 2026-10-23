@@ -26,9 +26,12 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    PortableTextUnsupportedError,
     SourceTypefaceReference,
+    bounded_text_box_text,
     noto_typefaces,
     replace_and_fit_text_box,
+    unsupported_text_diagnostic,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, resolve_theme_typefaces, theme_fonts_from_xml
 from pipeline.folder_replacement.office_xml import (
@@ -328,6 +331,7 @@ def apply_xlsx(
     *,
     progress: PhaseProgress | None = None,
     failure_context: FailureContext | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> XlsxResult:
     """Write the engine's translations into the workbook and return the new package.
 
@@ -381,6 +385,7 @@ def apply_xlsx(
             failure_context=failure_context,
             selected_cells=None if plan.selection is None else plan.selection.cells,
             part_completed=lambda name: ticker.tick(name, "part"),
+            diagnostics=diagnostics,
         )
         changed.update(cell_changes)
         native_items += cell_items
@@ -481,7 +486,7 @@ def replace_xlsx_bytes(
     engine = TranslationEngine(replacement, source_language, target_language)
     result = plan_and_apply(
         plan, engine,
-        lambda translate: apply_xlsx(plan, translate, typeface, progress=progress),
+        lambda translate: apply_xlsx(plan, translate, typeface, progress=progress, diagnostics=diagnostics),
         progress,
     )
     return result.data, result.native_items
@@ -905,6 +910,7 @@ def _replace_xlsx_cell_parts(
     failure_context: FailureContext | None = None,
     selected_cells: dict[str, frozenset[str]] | None = None,
     part_completed: Callable[[str], None] | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, bytes], int]:
     shared_strings = _shared_strings(parts.get("xl/sharedStrings.xml"))
     theme = _workbook_theme(parts)
@@ -939,6 +945,8 @@ def _replace_xlsx_cell_parts(
             measure_source_fonts,
             table_headers.get(name, frozenset()),
             None if selected_cells is None else selected_cells.get(name, frozenset()),
+            part_name=name,
+            diagnostics=diagnostics,
         )
         changed_parts[name] = updated
         replacements += count
@@ -957,6 +965,7 @@ def _replace_xlsx_cell_parts(
         updated, count = _replace_drawing(
             data, replacement, source_language, target_language, typefaces,
             preserve_source_font_family, measure_source_fonts, theme,
+            part_name=name, diagnostics=diagnostics,
         )
         changed_parts[name] = updated
         replacements += count
@@ -1014,6 +1023,9 @@ def _replace_worksheet(
     measure_source_fonts: bool,
     table_headers: frozenset[str],
     selected_cells: frozenset[str] | None = None,
+    *,
+    part_name: str = "",
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[bytes, int]:
     try:
         root = ElementTree.fromstring(data)
@@ -1066,15 +1078,25 @@ def _replace_worksheet(
                 ),
             ),
         )
-        fitted = replace_and_fit_text_box(
-            text_box,
-            replacement,
-            source_language,
-            target_language,
-            typefaces,
-            preserve_source_font_family=preserve_source_font_family,
-            measure_source_fonts=measure_source_fonts,
-        )
+        try:
+            fitted = replace_and_fit_text_box(
+                text_box,
+                replacement,
+                source_language,
+                target_language,
+                typefaces,
+                preserve_source_font_family=preserve_source_font_family,
+                measure_source_fonts=measure_source_fonts,
+            )
+        except PortableTextUnsupportedError as error:
+            # FR-2026-08-27-09: keep this cell as it was; neighbouring cells still change.
+            if diagnostics is not None:
+                diagnostics.append(
+                    unsupported_text_diagnostic(
+                        error, text, "xlsx_cell", package_part=part_name, cell=cell.get("r")
+                    )
+                )
+            continue
         explicit_runs = fitted.text_box.paragraphs[0].runs
         explicit_run = explicit_runs[0]
         if len(explicit_runs) == 1:
@@ -1188,6 +1210,9 @@ def _replace_drawing(
     preserve_source_font_family: bool,
     measure_source_fonts: bool = False,
     theme: PptxThemeFonts | None = None,
+    *,
+    part_name: str = "",
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[bytes, int]:
     """Fit SpreadsheetDrawing shape text against its ``a:xfrm/a:ext`` box."""
     try:
@@ -1216,11 +1241,24 @@ def _replace_drawing(
             _int_attribute(body_properties, "rIns", 91_440), _int_attribute(body_properties, "bIns", 45_720),
             None, paragraphs,
         )
-        fitted = replace_and_fit_text_box(
-            box, provider, source_language, target_language, typefaces,
-            preserve_source_font_family=preserve_source_font_family,
-            measure_source_fonts=measure_source_fonts,
-        )
+        try:
+            fitted = replace_and_fit_text_box(
+                box, provider, source_language, target_language, typefaces,
+                preserve_source_font_family=preserve_source_font_family,
+                measure_source_fonts=measure_source_fonts,
+            )
+        except PortableTextUnsupportedError as error:
+            # FR-2026-08-27-09: keep this shape as it was, and do not let the generic
+            # pass below translate it without fitting.
+            fitted_text.update(body.iter(_a_tag("t")))
+            if diagnostics is not None:
+                diagnostics.append(
+                    unsupported_text_diagnostic(
+                        error, bounded_text_box_text(box), "xlsx_drawing_shape",
+                        package_part=part_name,
+                    )
+                )
+            continue
         for element in body.iter(_a_tag("t")):
             fitted_text.add(element)
         for destination, explicit in zip(body.findall("a:p", _NS), fitted.text_box.paragraphs, strict=True):

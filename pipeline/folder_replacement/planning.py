@@ -54,6 +54,19 @@ class LookupProvider:
         return TextReplacementResult(tuple(self._translate(text) for text in request.texts))
 
 
+class ListingProvider:
+    """Record each requested text and return it unchanged, so planning sends nothing."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        self.texts.extend(request.texts)
+        return TextReplacementResult(
+            tuple(TextReplacementItem(text, 1.0) for text in request.texts)
+        )
+
+
 def enter_nested(
     depth: int, package_part: str, diagnostics: list[dict[str, object]] | None
 ) -> int | None:

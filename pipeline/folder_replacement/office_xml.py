@@ -63,6 +63,19 @@ def office_xml_texts(data: bytes) -> tuple[str, ...]:
     )
 
 
+def drawing_diagram_xml_texts(data: bytes) -> tuple[str, ...]:
+    """List, in document order, the texts ``replace_drawing_diagram_xml_text`` requests."""
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError:
+        return ()
+    return tuple(
+        element.text
+        for element in root.iter()
+        if element.text is not None and _is_drawing_diagram_text_element(element.tag)
+    )
+
+
 def replace_drawing_diagram_xml_text(
     data: bytes,
     replacement_provider: TextReplacementProvider,

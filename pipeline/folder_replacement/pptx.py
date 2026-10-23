@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from io import BytesIO
 import os
 from pathlib import Path
 import posixpath
-from typing import Protocol, cast
+from typing import BinaryIO, Protocol, cast
 import xml.etree.ElementTree as ElementTree
-from zipfile import ZIP_DEFLATED, ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -33,23 +34,49 @@ from pipeline.bounded_text_layout import (
     DEFAULT_FONT_SIZE_POINTS,
     EMU_PER_PIXEL,
     FittedTextBox,
+    PortableTextUnsupportedError,
     SourceTypefaceReference,
+    bounded_text_box_text,
     fitted_text_lines,
     noto_typefaces,
     replace_and_fit_text_box,
+    replace_paragraphs,
     source_occupied_text_box,
     trim_trailing_empty_paragraphs,
+    unsupported_text_diagnostic,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, pptx_themes_by_slide, resolve_theme_typefaces
 from pipeline.ocr import OcrProvider
-from pipeline.ocr.image_preparation import RgbColour
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.folder_replacement.office_xml import (
+    drawing_diagram_xml_texts,
+    office_xml_texts,
     replace_drawing_diagram_xml_text,
     replace_office_xml_text,
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
-from pipeline.folder_replacement.common import NestedProgressReporter
-from pipeline.text_replacement import TextReplacementProvider, replace_text
+from pipeline.folder_replacement.common import NestedProgressReporter, is_office_bitmap_part
+from pipeline.folder_replacement.office_package import (
+    OfficeMediaPlan,
+    apply_office_media,
+    is_office_media_part,
+    plan_office_media,
+)
+from pipeline.folder_replacement.planning import (
+    ListingProvider,
+    LookupProvider,
+    PhaseProgress,
+    WorkTicker,
+    plan_and_apply,
+)
+from pipeline.vector_text import VectorReplacementResult
+from pipeline.text_replacement import (
+    TextReplacementItem,
+    TextReplacementProvider,
+    TextUnit,
+    TranslationEngine,
+    replace_text,
+)
 
 
 _DRAWING_NAMESPACE = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -103,90 +130,343 @@ _RELATIONSHIPS_NAMESPACE = "http://schemas.openxmlformats.org/package/2006/relat
 _PRESENTATION_NAMESPACE = "http://schemas.openxmlformats.org/presentationml/2006/main"
 
 
-def replace_pptx_file(
-    source: Path,
-    destination: Path,
-    ocr: OcrProvider,
-    replacement: TextReplacementProvider,
+PPTX_UNIT_ID = "pptx"
+_SOURCE_FORMATTING_LAYOUT = "preserve-source-formatting"
+_FITTED_LAYOUTS = frozenset({"preserve-basic-layout", "preserve-basic-layout-source-font"})
+
+
+@dataclass(slots=True)
+class PptxPlan:
+    """A parsed PowerPoint package with its own texts and its media's plans.
+
+    ``texts`` is the presentation's own unit: every text the apply step requests from a
+    slide, table, SmartArt data part, speaker note, or other XML part (layouts, masters,
+    charts, comments). Each embedded image and vector graphic is a nested unit of this one.
+    """
+
+    entries: list[tuple[ZipInfo, bytes]]
+    layout: str
+    source_language: str
+    target_language: str
+    texts: tuple[str, ...]
+    media: list[OfficeMediaPlan]
+    smartart_parts: frozenset[str]
+    smartart_data_parts: frozenset[str]
+    unit_id: str = PPTX_UNIT_ID
+
+    @property
+    def parts(self) -> dict[str, bytes]:
+        return {entry.filename: payload for entry, payload in self.entries}
+
+    def units(self) -> Iterator[TextUnit]:
+        """Yield the presentation's own unit, then its media's units."""
+        yield TextUnit(self.unit_id, self.texts)
+        for media in self.media:
+            yield from media.units()
+
+
+@dataclass(slots=True)
+class PptxResult:
+    """The translated PowerPoint package and what was replaced in it."""
+
+    data: bytes
+    native_items: int = 0
+    image_regions: int = 0
+    vector_results: list[tuple[str, VectorReplacementResult]] = field(default_factory=list)
+
+    @property
+    def retained_vectors(self) -> int:
+        return sum(
+            not result.has_editable_text and not result.has_embedded_bitmaps
+            for _part, result in self.vector_results
+        )
+
+
+def _pptx_text_parts(names: Iterable[str]) -> list[str]:
+    """Return the XML parts whose text is a plan and apply work item, in package order."""
+    return [name for name in names if name.endswith(".xml")]
+
+
+def _pptx_media_parts(names: Iterable[str]) -> list[str]:
+    return [name for name in names if is_office_media_part(name)]
+
+
+def pptx_work_item_total(names: Iterable[str]) -> int:
+    """Return how many items the plan step, and again the apply step, advance through.
+
+    The count comes from part names alone, so a source's progress total is known before
+    anything is parsed.
+    """
+    names = tuple(names)
+    return len(_pptx_text_parts(names)) + len(_pptx_media_parts(names))
+
+
+def plan_pptx(
+    data: bytes,
+    ocr: OcrProvider | None,
     source_language: str,
     target_language: str,
-    typeface: skia.Typeface,
-    completed: Callable[[str], None],
-    document_text_layout: str = "preserve-source-formatting",
-    failure_context: FailureContext | None = None,
-    nested_progress: NestedProgressReporter | None = None,
+    *,
+    document_text_layout: str = _SOURCE_FORMATTING_LAYOUT,
+    unit_id: str = PPTX_UNIT_ID,
+    depth: int = 0,
     diagnostics: list[dict[str, object]] | None = None,
-) -> tuple[int, int, int]:
-    """Replace PPTX content, optionally fitting bounded slide text frames."""
-    from pipeline.folder_replacement.processor import _replace_office_file
+    progress: PhaseProgress | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+    failure_context: FailureContext | None = None,
+) -> PptxPlan:
+    """List the presentation's texts and plan its media; no provider is called.
 
+    ``ocr`` is None when media must be left unchanged. Nothing is fitted or written:
+    slide text frames are read from a private parse that is discarded.
+    """
+    if document_text_layout != _SOURCE_FORMATTING_LAYOUT and document_text_layout not in _FITTED_LAYOUTS:
+        raise ValueError(f"Unsupported document text layout mode: {document_text_layout!r}")
     if failure_context is not None:
         failure_context.set_location(
             stage="pptx_package_analysis",
             container_kind="pptx_document",
             operation="read",
         )
-    smartart_parts, smartart_data_parts = _reachable_smartart_parts(source)
-    ocr_backgrounds = _pptx_ocr_backgrounds(source)
-    if document_text_layout == "preserve-source-formatting":
-        native_items, image_regions, retained_vectors = _replace_office_file(
-            source,
-            destination,
-            ocr,
-            replacement,
-            source_language,
-            target_language,
-            typeface,
-            completed,
-            document_text_layout=document_text_layout,
-            skip_native_xml_part=smartart_parts.__contains__,
-            ocr_backgrounds=ocr_backgrounds,
-            failure_context=failure_context,
-            nested_progress=nested_progress,
-            diagnostics=diagnostics,
-        )
-        native_items += _replace_smartart_data_parts(
-            destination,
-            smartart_data_parts,
-            replacement,
-            source_language,
-            target_language,
-            failure_context,
-        )
-        return native_items, image_regions, retained_vectors
-    if document_text_layout not in {
-        "preserve-basic-layout",
-        "preserve-basic-layout-source-font",
-    }:
-        raise ValueError(f"Unsupported document text layout mode: {document_text_layout!r}")
-    preserve_source_font_family = document_text_layout == "preserve-basic-layout-source-font"
-    slide_themes = pptx_themes_by_slide(source) if preserve_source_font_family else ()
+    with ZipFile(BytesIO(data)) as archive:
+        entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
+    parts = {entry.filename: payload for entry, payload in entries}
+    names = tuple(parts)
+    smartart_parts, smartart_data_parts = _reachable_smartart_parts(BytesIO(data))
+    ocr_backgrounds = _pptx_ocr_backgrounds(BytesIO(data))
+    text_parts = frozenset(_pptx_text_parts(names))
+    media_parts = frozenset(_pptx_media_parts(names))
+    total = len(text_parts) + len(media_parts)
+    position = 0
 
-    # Preserve the established embedded bitmap and vector paths before python-pptx
-    # rewrites supported slide text frames.
-    native_items, image_regions, retained_vectors = _replace_office_file(
-        source,
-        destination,
-        ocr,
-        replacement,
-        source_language,
-        target_language,
-        typeface,
-        completed,
-        document_text_layout=document_text_layout,
-        replace_native_xml=False,
-        ocr_backgrounds=ocr_backgrounds,
-        failure_context=failure_context,
-        nested_progress=nested_progress,
-        diagnostics=diagnostics,
+    def advance(noun: str) -> None:
+        nonlocal position
+        position += 1
+        if progress is not None:
+            progress.plan_item(position, total, noun)
+
+    fitted = document_text_layout in _FITTED_LAYOUTS
+    listing = ListingProvider()
+    if fitted:
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="pptx_plan",
+                container_kind="pptx_document",
+                operation="plan",
+            )
+        _list_slide_text(
+            data, listing, source_language, target_language,
+            document_text_layout == "preserve-basic-layout-source-font",
+        )
+    media: list[OfficeMediaPlan] = []
+    bitmap_number = vector_number = 0
+    for name in names:
+        if name in text_parts:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="pptx_plan",
+                    container_kind="pptx_package_part",
+                    operation="plan",
+                    package_part=name,
+                )
+            if name in smartart_data_parts:
+                listing.texts.extend(drawing_diagram_xml_texts(parts[name]))
+            elif name in smartart_parts:
+                pass
+            elif not fitted or not _is_slide_part(name):
+                listing.texts.extend(office_xml_texts(parts[name]))
+            advance("part")
+        elif name in media_parts:
+            is_bitmap = is_office_bitmap_part(name)
+            if is_bitmap:
+                bitmap_number += 1
+            else:
+                vector_number += 1
+            if ocr is not None:
+                planned = plan_office_media(
+                    name, parts[name], ocr, source_language, target_language,
+                    parent_unit_id=unit_id,
+                    media_number=bitmap_number if is_bitmap else vector_number,
+                    depth=depth,
+                    diagnostics=diagnostics,
+                    document_text_layout=document_text_layout,
+                    nested_progress=nested_progress,
+                    failure_context=failure_context,
+                    ocr_background=ocr_backgrounds.get(name, DEFAULT_OCR_BACKGROUND),
+                )
+                if planned is not None:
+                    media.append(planned)
+            advance("image" if is_bitmap else "vector graphic")
+    if failure_context is not None:
+        # A batch spans many parts, so a translation failure names none of them.
+        failure_context.set_location(
+            stage="pptx_batch_translation",
+            container_kind="pptx_document",
+            operation="text_replacement",
+        )
+    return PptxPlan(
+        entries, document_text_layout, source_language, target_language,
+        tuple(listing.texts), media, smartart_parts, smartart_data_parts, unit_id,
     )
-    native_items += _replace_smartart_data_parts(
-        destination,
-        smartart_data_parts,
-        replacement,
-        source_language,
-        target_language,
-        failure_context,
+
+
+def _list_slide_text(
+    data: bytes,
+    listing: ListingProvider,
+    source_language: str,
+    target_language: str,
+    preserve_source_font_family: bool,
+) -> None:
+    """Request every slide text frame and table cell, without fitting or writing."""
+    presentation = Presentation(BytesIO(data))
+    slide_themes = (
+        pptx_themes_by_slide(BytesIO(data)) if preserve_source_font_family else ()
+    )
+    for slide_index, slide in enumerate(presentation.slides):
+        _replace_slide_text_frames(
+            slide.shapes,
+            slide.slide_layout,
+            listing,
+            source_language,
+            target_language,
+            {},
+            preserve_source_font_family,
+            slide_themes[slide_index] if slide_index < len(slide_themes) else None,
+            slide_index,
+            None,
+            list_only=True,
+        )
+
+
+def apply_pptx(
+    plan: PptxPlan,
+    translate: Callable[[str], TextReplacementItem],
+    typeface: skia.Typeface | None,
+    *,
+    progress: PhaseProgress | None = None,
+    failure_context: FailureContext | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+) -> PptxResult:
+    """Write the engine's translations into the package and return the new presentation.
+
+    Output is identical to translating each text with its own provider call. Slide text
+    frames and table cells are still fitted here, from the translated text.
+    """
+    parts = plan.parts
+    names = tuple(parts)
+    layout = plan.layout
+    source_language, target_language = plan.source_language, plan.target_language
+    provider = LookupProvider(translate)
+    text_parts = _pptx_text_parts(names)
+    media_parts = _pptx_media_parts(names)
+    media_by_part = {item.part: item for item in plan.media}
+    ticker = WorkTicker(
+        (*text_parts, *media_parts),
+        None if progress is None else lambda position, total, noun: progress.apply_item(position, total, noun),
+    )
+    fitted = layout in _FITTED_LAYOUTS
+    changed: dict[str, bytes] = {}
+    native_items = image_regions = 0
+    vector_results: list[tuple[str, VectorReplacementResult]] = []
+    for name in names:
+        if name in media_parts:
+            planned = media_by_part.get(name)
+            if planned is not None:
+                if typeface is None:
+                    message = "A typeface is required to render a document's planned media."
+                    raise ValueError(message)
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="embedded_bitmap" if is_office_bitmap_part(name) else "embedded_vector",
+                        container_kind="embedded_bitmap" if is_office_bitmap_part(name) else "embedded_vector",
+                        operation="render" if is_office_bitmap_part(name) else "text_replacement",
+                        package_part=name,
+                    )
+                outcome = apply_office_media(planned, translate, typeface, target_language)
+                changed[name] = outcome.data
+                native_items += outcome.native_items
+                image_regions += outcome.image_regions
+                if outcome.vector_result is not None:
+                    vector_results.append((name, outcome.vector_result))
+            ticker.tick(name, "image" if is_office_bitmap_part(name) else "vector graphic")
+        elif name in plan.smartart_data_parts:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="pptx_smartart",
+                    container_kind="pptx_smartart_data",
+                    operation="text_replacement",
+                    package_part=name,
+                )
+            updated, count = replace_drawing_diagram_xml_text(
+                parts[name], provider, source_language, target_language
+            )
+            changed[name] = updated
+            native_items += count
+            ticker.tick(name, "part")
+        elif (
+            name in text_parts
+            and name not in plan.smartart_parts
+            and not (fitted and (_is_slide_part(name) or _is_speaker_note_part(name)))
+        ):
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="native_xml",
+                    container_kind="office_xml",
+                    operation="text_replacement",
+                    package_part=name,
+                )
+            updated, count = replace_office_xml_text(
+                parts[name], provider, source_language, target_language
+            )
+            if count:
+                changed[name] = updated
+                native_items += count
+            ticker.tick(name, "part")
+    package = _pack_pptx(plan.entries, changed, failure_context)
+    if fitted:
+        package, fitted_items = _apply_fitted_slide_text(
+            package, plan, provider, diagnostics, failure_context
+        )
+        native_items += fitted_items
+        package, note_items = _replace_speaker_note_parts(
+            package, provider, source_language, target_language, failure_context
+        )
+        native_items += note_items
+    for name in (*text_parts, *media_parts):
+        ticker.tick(name, "part")
+    return PptxResult(package, native_items, image_regions, vector_results)
+
+
+def _pack_pptx(
+    entries: Sequence[tuple[ZipInfo, bytes]],
+    changed: dict[str, bytes],
+    failure_context: FailureContext | None,
+) -> bytes:
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="office_package_write",
+                    container_kind="office_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
+            archive.writestr(entry, changed.get(entry.filename, payload))
+    return output.getvalue()
+
+
+def _apply_fitted_slide_text(
+    package: bytes,
+    plan: PptxPlan,
+    provider: TextReplacementProvider,
+    diagnostics: list[dict[str, object]] | None,
+    failure_context: FailureContext | None,
+) -> tuple[bytes, int]:
+    """Fit and write every slide text frame and table cell into the package."""
+    preserve_source_font_family = plan.layout == "preserve-basic-layout-source-font"
+    slide_themes = (
+        pptx_themes_by_slide(BytesIO(package)) if preserve_source_font_family else ()
     )
     if failure_context is not None:
         failure_context.set_location(
@@ -194,8 +474,9 @@ def replace_pptx_file(
             container_kind="pptx_document",
             operation="read",
         )
-    presentation = Presentation(str(destination))
+    presentation = Presentation(BytesIO(package))
     layout_typefaces = noto_typefaces()
+    native_items = 0
     for slide_index, slide in enumerate(presentation.slides):
         if failure_context is not None:
             failure_context.set_location(
@@ -208,9 +489,9 @@ def replace_pptx_file(
         native_items += _replace_slide_text_frames(
             slide.shapes,
             slide.slide_layout,
-            replacement,
-            source_language,
-            target_language,
+            provider,
+            plan.source_language,
+            plan.target_language,
             layout_typefaces,
             preserve_source_font_family,
             slide_themes[slide_index] if slide_index < len(slide_themes) else None,
@@ -223,21 +504,54 @@ def replace_pptx_file(
             container_kind="pptx_document",
             operation="write",
         )
-    presentation.save(str(destination))
+    output = BytesIO()
+    presentation.save(output)
     if diagnostics is not None:
-        _refresh_written_table_fit_diagnostics(destination, diagnostics)
-    native_items += _replace_speaker_note_parts(
-        destination,
-        replacement,
-        source_language,
-        target_language,
-        failure_context,
+        _refresh_written_table_fit_diagnostics(output, diagnostics)
+    return output.getvalue(), native_items
+
+
+def replace_pptx_file(
+    source: Path,
+    destination: Path,
+    ocr: OcrProvider,
+    replacement: TextReplacementProvider,
+    source_language: str,
+    target_language: str,
+    typeface: skia.Typeface,
+    completed: Callable[[str], None],
+    document_text_layout: str = _SOURCE_FORMATTING_LAYOUT,
+    failure_context: FailureContext | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+) -> tuple[int, int, int]:
+    """Plan, translate and apply one PowerPoint presentation with its own engine."""
+    progress = PhaseProgress(completed, lambda _label: None, lambda _extra: None)
+    plan = plan_pptx(
+        source.read_bytes(), ocr, source_language, target_language,
+        document_text_layout=document_text_layout,
+        diagnostics=diagnostics,
+        progress=progress,
+        nested_progress=nested_progress,
+        failure_context=failure_context,
     )
-    completed("native text layout")
-    return native_items, image_regions, retained_vectors
+    engine = TranslationEngine(replacement, source_language, target_language)
+    result = plan_and_apply(
+        plan, engine,
+        lambda translate: apply_pptx(
+            plan, translate, typeface,
+            progress=progress,
+            failure_context=failure_context,
+            diagnostics=diagnostics,
+        ),
+        progress,
+    )
+    destination.write_bytes(result.data)
+    return result.native_items, result.image_regions, result.retained_vectors
 
 
-def _pptx_ocr_backgrounds(source: Path) -> dict[str, RgbColour]:
+
+def _pptx_ocr_backgrounds(source: Path | BinaryIO) -> dict[str, RgbColour]:
     """Return unambiguous direct solid slide backgrounds for embedded images."""
     with ZipFile(source) as archive:
         parts = frozenset(archive.namelist())
@@ -312,7 +626,7 @@ def _slide_background_colour(archive: ZipFile, slide_part: str) -> RgbColour | N
     return red, green, blue
 
 
-def _reachable_smartart_parts(source: Path) -> tuple[frozenset[str], frozenset[str]]:
+def _reachable_smartart_parts(source: Path | BinaryIO) -> tuple[frozenset[str], frozenset[str]]:
     """Find reachable SmartArt package parts and their canonical data parts."""
     with ZipFile(source) as archive:
         archive_parts = frozenset(archive.namelist())
@@ -370,76 +684,13 @@ def _relationship_target_part_name(source_part: str | None, target: str) -> str 
     return normalized
 
 
-def _replace_smartart_data_parts(
-    presentation_path: Path,
-    data_parts: frozenset[str],
-    replacement: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    failure_context: FailureContext | None = None,
-) -> int:
-    """Replace only canonical SmartArt labels, not generated diagram drawings."""
-    if not data_parts:
-        return 0
-    if failure_context is not None:
-        failure_context.set_location(
-            stage="pptx_smartart_read",
-            container_kind="pptx_document",
-            operation="read",
-        )
-    temporary_path = presentation_path.with_name(f".{presentation_path.name}.smartart.tmp")
-    replaced_items = 0
-    try:
-        with (
-            ZipFile(presentation_path) as source_archive,
-            ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
-        ):
-            for entry in source_archive.infolist():
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="pptx_smartart_read",
-                        container_kind="pptx_package_part",
-                        operation="read",
-                        package_part=entry.filename,
-                    )
-                data = source_archive.read(entry.filename)
-                if entry.filename in data_parts:
-                    if failure_context is not None:
-                        failure_context.set_location(
-                            stage="pptx_smartart",
-                            container_kind="pptx_smartart_data",
-                            operation="text_replacement",
-                            package_part=entry.filename,
-                        )
-                    data, replaced = replace_drawing_diagram_xml_text(
-                        data,
-                        replacement,
-                        source_language,
-                        target_language,
-                    )
-                    replaced_items += replaced
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="pptx_smartart_write",
-                        container_kind="pptx_package_part",
-                        operation="write",
-                        package_part=entry.filename,
-                    )
-                destination_archive.writestr(entry, data)
-        os.replace(temporary_path, presentation_path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
-    return replaced_items
-
-
 def _replace_speaker_note_parts(
-    presentation_path: Path,
+    package: bytes,
     replacement: TextReplacementProvider,
     source_language: str,
     target_language: str,
     failure_context: FailureContext | None = None,
-) -> int:
+) -> tuple[bytes, int]:
     """Directly replace editable text in PPTX speaker-note slide parts."""
     if failure_context is not None:
         failure_context.set_location(
@@ -447,54 +698,37 @@ def _replace_speaker_note_parts(
             container_kind="pptx_document",
             operation="read",
         )
-    with ZipFile(presentation_path) as archive:
-        note_parts = frozenset(
-            entry.filename for entry in archive.infolist() if _is_speaker_note_part(entry.filename)
-        )
+    with ZipFile(BytesIO(package)) as source_archive:
+        entries = [(entry, source_archive.read(entry.filename)) for entry in source_archive.infolist()]
+    note_parts = {entry.filename for entry, _data in entries if _is_speaker_note_part(entry.filename)}
     if not note_parts:
-        return 0
+        return package, 0
 
-    temporary_path = presentation_path.with_name(f".{presentation_path.name}.notes.tmp")
     replaced_items = 0
-    try:
-        with (
-            ZipFile(presentation_path) as source_archive,
-            ZipFile(temporary_path, "w", ZIP_DEFLATED) as destination_archive,
-        ):
-            for entry in source_archive.infolist():
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as destination_archive:
+        for entry, data in entries:
+            if entry.filename in note_parts:
                 if failure_context is not None:
                     failure_context.set_location(
-                        stage="pptx_notes_read",
-                        container_kind="pptx_package_part",
-                        operation="read",
+                        stage="pptx_speaker_notes",
+                        container_kind="pptx_speaker_notes",
+                        operation="text_replacement",
                         package_part=entry.filename,
                     )
-                data = source_archive.read(entry.filename)
-                if entry.filename in note_parts:
-                    if failure_context is not None:
-                        failure_context.set_location(
-                            stage="pptx_speaker_notes",
-                            container_kind="pptx_speaker_notes",
-                            operation="text_replacement",
-                            package_part=entry.filename,
-                        )
-                    data, replaced = replace_office_xml_text(
-                        data, replacement, source_language, target_language
-                    )
-                    replaced_items += replaced
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="pptx_notes_write",
-                        container_kind="pptx_package_part",
-                        operation="write",
-                        package_part=entry.filename,
-                    )
-                destination_archive.writestr(entry, data)
-        os.replace(temporary_path, presentation_path)
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
-    return replaced_items
+                data, replaced = replace_office_xml_text(
+                    data, replacement, source_language, target_language
+                )
+                replaced_items += replaced
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="pptx_notes_write",
+                    container_kind="pptx_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
+            destination_archive.writestr(entry, data)
+    return output.getvalue(), replaced_items
 
 
 def _is_speaker_note_part(part_name: str) -> bool:
@@ -514,7 +748,10 @@ def _replace_slide_text_frames(
     theme: PptxThemeFonts | None,
     slide_index: int,
     diagnostics: list[dict[str, object]] | None,
+    *,
+    list_only: bool = False,
 ) -> int:
+    """Fit and write every text frame, or with ``list_only`` only request its texts."""
     replaced = 0
     for shape_index, shape in enumerate(shapes):
         if shape.shape_type == MSO_SHAPE_TYPE.GROUP:
@@ -529,6 +766,7 @@ def _replace_slide_text_frames(
                 theme,
                 slide_index,
                 diagnostics,
+                list_only=list_only,
             )
             continue
         if shape.shape_type == MSO_SHAPE_TYPE.TABLE:
@@ -543,6 +781,7 @@ def _replace_slide_text_frames(
                 slide_index,
                 shape_index,
                 diagnostics,
+                list_only=list_only,
             )
             continue
         if not shape.has_text_frame:
@@ -554,7 +793,9 @@ def _replace_slide_text_frames(
             text_shape, slide_layout, theme if preserve_source_font_family else None
         )
         text_box = trim_trailing_empty_paragraphs(raw_text_box)
-        _trim_trailing_empty_text_frame(text_shape.text_frame)
+        if list_only:
+            replace_paragraphs(text_box, replacement, source_language, target_language)
+            continue
         explicit_no_autofit = _has_explicit_no_autofit(text_shape.text_frame)
         fit_box = (
             source_occupied_text_box(
@@ -563,18 +804,33 @@ def _replace_slide_text_frames(
             if explicit_no_autofit
             else text_box
         )
-        fitted = replace_and_fit_text_box(
-            fit_box,
-            replacement,
-            source_language,
-            target_language,
-            typefaces,
-            preserve_source_font_family=preserve_source_font_family,
-            measure_source_fonts=preserve_source_font_family,
-            source_content_height_safety_factor=(
-                _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR if explicit_no_autofit else None
-            ),
-        )
+        try:
+            fitted = replace_and_fit_text_box(
+                fit_box,
+                replacement,
+                source_language,
+                target_language,
+                typefaces,
+                preserve_source_font_family=preserve_source_font_family,
+                measure_source_fonts=preserve_source_font_family,
+                source_content_height_safety_factor=(
+                    _NO_AUTOFIT_NOTO_SOURCE_HEIGHT_SAFETY_FACTOR if explicit_no_autofit else None
+                ),
+            )
+        except PortableTextUnsupportedError as error:
+            # FR-2026-08-27-09: keep this one frame as it was and carry on.
+            if diagnostics is not None:
+                diagnostics.append(
+                    unsupported_text_diagnostic(
+                        error,
+                        bounded_text_box_text(text_box),
+                        "pptx_text_frame",
+                        slide_index=slide_index,
+                        shape_index=shape_index,
+                    )
+                )
+            continue
+        _trim_trailing_empty_text_frame(text_shape.text_frame)
         _write_explicit_text_frame(text_shape.text_frame, fitted.text_box)
         replaced += sum(
             1
@@ -618,6 +874,8 @@ def _replace_table_cells(
     slide_index: int,
     shape_index: int,
     diagnostics: list[dict[str, object]] | None,
+    *,
+    list_only: bool = False,
 ) -> int:
     """Replace one table using a shared scale calculated before cells are written."""
     table = table_shape.table
@@ -647,15 +905,34 @@ def _replace_table_cells(
             )
             if not _has_non_whitespace_text(text_box):
                 continue
-            fitted = replace_and_fit_text_box(
-                text_box,
-                replacement,
-                source_language,
-                target_language,
-                typefaces,
-                preserve_source_font_family=preserve_source_font_family,
-                measure_source_fonts=preserve_source_font_family,
-            )
+            if list_only:
+                replace_paragraphs(text_box, replacement, source_language, target_language)
+                continue
+            try:
+                fitted = replace_and_fit_text_box(
+                    text_box,
+                    replacement,
+                    source_language,
+                    target_language,
+                    typefaces,
+                    preserve_source_font_family=preserve_source_font_family,
+                    measure_source_fonts=preserve_source_font_family,
+                )
+            except PortableTextUnsupportedError as error:
+                # FR-2026-08-27-09: leave this cell as it was; other cells still fit.
+                if diagnostics is not None:
+                    diagnostics.append(
+                        unsupported_text_diagnostic(
+                            error,
+                            bounded_text_box_text(text_box),
+                            "pptx_table_cell",
+                            slide_index=slide_index,
+                            shape_index=shape_index,
+                            row_index=row_index,
+                            column_index=column_index,
+                        )
+                    )
+                continue
             participants.append(
                 _TableCellFit(
                     cell,
@@ -667,6 +944,8 @@ def _replace_table_cells(
                     fitted,
                 )
             )
+    if list_only:
+        return replaced
     common_scale, common_status, allocated_row_heights, row_allocation_strategy = _table_common_scale(
         participants,
         captured_geometry.row_heights,
@@ -1076,10 +1355,10 @@ def _table_fit_diagnostic(
 
 
 def _refresh_written_table_fit_diagnostics(
-    presentation_path: Path, diagnostics: list[dict[str, object]]
+    presentation_path: Path | BinaryIO, diagnostics: list[dict[str, object]]
 ) -> None:
     """Read written table dimensions back from the saved package for debug output."""
-    presentation = Presentation(str(presentation_path))
+    presentation = Presentation(str(presentation_path) if isinstance(presentation_path, Path) else presentation_path)
     for diagnostic in diagnostics:
         if diagnostic.get("kind") != "table_fit":
             continue

@@ -9,7 +9,11 @@ import struct
 
 from PIL import Image
 
-from pipeline.bounded_text_layout import SourceTypefaceReference
+from pipeline.bounded_text_layout import (
+    PortableTextUnsupportedError,
+    SourceTypefaceReference,
+    unsupported_text_diagnostic,
+)
 from pipeline.text_replacement import TextReplacementProvider
 from pipeline.vector_text.common import (
     ETO_CLIPPED,
@@ -94,6 +98,7 @@ class WmfDocument:
         replace_nested: Callable[[int], VectorReplacementResult | None] | None = None,
     ) -> VectorReplacementResult:
         output: list[bytes] = [self._header]
+        diagnostics: list[dict[str, object]] = []
         replaced_items = 0
         replaced_image_regions = 0
         has_embedded_bitmaps = False
@@ -121,10 +126,18 @@ class WmfDocument:
                 fitted = None
                 if font_record is not None:
                     if function == _META_EXTTEXTOUT:
-                        fitted = _fitted_exttextout(
-                            record, source.text, self._layout, replacement_provider,
-                            self._source_language, self._target_language,
-                        )
+                        try:
+                            fitted = _fitted_exttextout(
+                                record, source.text, self._layout, replacement_provider,
+                                self._source_language, self._target_language,
+                            )
+                        except PortableTextUnsupportedError as error:
+                            # FR-2026-08-27-09: keep this record as it was and carry on.
+                            diagnostics.append(unsupported_text_diagnostic(
+                                error, source.text, "wmf_text_record", vector_format="wmf",
+                            ))
+                            output.append(record)
+                            continue
                     if fitted is None:
                         fitted = _fitted_unclipped_text(
                             source.text, font_record, self._layout, replacement_provider,
@@ -165,7 +178,7 @@ class WmfDocument:
             struct.pack_into("<I", result, self._header_offset + 6, len(result) // 2)
         return VectorReplacementResult(
             bytes(result), replaced_items, bool(replaced_items),
-            replaced_image_regions, has_embedded_bitmaps,
+            replaced_image_regions, has_embedded_bitmaps, tuple(diagnostics),
         )
 
 

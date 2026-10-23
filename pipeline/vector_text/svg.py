@@ -15,9 +15,12 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    PortableTextUnsupportedError,
     SourceTypefaceReference,
+    bounded_text_box_text,
     noto_typefaces,
     replace_and_fit_text_box,
+    unsupported_text_diagnostic,
 )
 from pipeline.portable_fonts import static_noto_bytes, static_noto_font
 from pipeline.text_replacement import TextReplacementProvider
@@ -125,11 +128,12 @@ class SvgDocument:
         replace_nested: Callable[[int], VectorReplacementResult | None] | None = None,
     ) -> VectorReplacementResult:
         fitted = 0
+        diagnostics: list[dict[str, object]] = []
         if self._clipped or self._free:
             if replacement_provider is None or self._target_language is None:
                 message = "Fitting SVG text needs a provider and a target language."
                 raise ValueError(message)
-            fitted, embedded = self._fit(replacement_provider, self._target_language)
+            fitted, embedded = self._fit(replacement_provider, self._target_language, diagnostics)
             free_fitted, free_embedded = self._fit_free(
                 replacement_provider, replace_text, self._target_language
             )
@@ -161,24 +165,38 @@ class SvgDocument:
         # A fitted text element is deliberately not sent through generic replacement
         # a second time.  The remaining slots still replace every unqualified text.
         if not items and not regions and not fitted:
-            return VectorReplacementResult(self._data, 0, False)
+            return VectorReplacementResult(
+                self._data, 0, False, diagnostics=tuple(diagnostics)
+            )
         return VectorReplacementResult(
             ElementTree.tostring(self._root, encoding="utf-8", xml_declaration=True),
             items + fitted,
-            bool(items or fitted), regions, bitmaps,
+            bool(items or fitted), regions, bitmaps, tuple(diagnostics),
         )
 
     def _fit(
-        self, provider: TextReplacementProvider, target_language: str
+        self,
+        provider: TextReplacementProvider,
+        target_language: str,
+        diagnostics: list[dict[str, object]],
     ) -> tuple[int, set[tuple[str, bool]]]:
         typefaces = noto_typefaces()
         embedded: set[tuple[str, bool]] = set()
+        retained = 0
         for item in self._clipped:
-            fitted = replace_and_fit_text_box(
-                item.box, provider, self._source_language, target_language, typefaces,
-                preserve_source_font_family=self._preserve_source_font,
-                measure_source_fonts=self._preserve_source_font,
-            )
+            try:
+                fitted = replace_and_fit_text_box(
+                    item.box, provider, self._source_language, target_language, typefaces,
+                    preserve_source_font_family=self._preserve_source_font,
+                    measure_source_fonts=self._preserve_source_font,
+                )
+            except PortableTextUnsupportedError as error:
+                # FR-2026-08-27-09: keep this element as it was and carry on.
+                retained += 1
+                diagnostics.append(unsupported_text_diagnostic(
+                    error, bounded_text_box_text(item.box), "svg_clipped_text", vector_format="svg",
+                ))
+                continue
             runs = fitted.text_box.paragraphs[0].runs
             element = item.element
             if len(runs) == 1:
@@ -198,7 +216,7 @@ class SvgDocument:
                     family_name, _path = static_noto_font(run.font_classification, run.bold)
                     span.set("font-family", family_name)
                     embedded.add((run.font_classification, bool(run.bold)))
-        return len(self._clipped), embedded
+        return len(self._clipped) - retained, embedded
 
     def _fit_free(
         self,

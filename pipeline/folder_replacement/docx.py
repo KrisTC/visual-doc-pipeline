@@ -20,10 +20,13 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    PortableTextUnsupportedError,
     SourceTypefaceReference,
+    bounded_text_box_text,
     noto_typefaces,
     replace_and_fit_text_box,
     replace_paragraphs,
+    unsupported_text_diagnostic,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, theme_fonts_from_xml
 from pipeline.folder_replacement.office_xml import (
@@ -41,6 +44,7 @@ from pipeline.folder_replacement.office_package import (
     plan_office_media,
 )
 from pipeline.folder_replacement.planning import (
+    ListingProvider,
     LookupProvider,
     PhaseProgress,
     WorkTicker,
@@ -122,19 +126,6 @@ def _nested_phase_progress(nested_progress: NestedProgressReporter) -> PhaseProg
 DOCX_UNIT_ID = "docx"
 _DOCX_NESTED_WORKBOOK_MODE = "fast"
 _SOURCE_FORMATTING_LAYOUT = "preserve-source-formatting"
-
-
-class _ListingProvider:
-    """Record each requested text and return it unchanged, so planning sends nothing."""
-
-    def __init__(self) -> None:
-        self.texts: list[str] = []
-
-    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        self.texts.extend(request.texts)
-        return TextReplacementResult(
-            tuple(TextReplacementItem(text, 1.0) for text in request.texts)
-        )
 
 
 @dataclass(slots=True)
@@ -258,7 +249,7 @@ def plan_docx(
     source_formatting = document_text_layout == _SOURCE_FORMATTING_LAYOUT
     font_resolver = _DocxFontResolver.from_parts(parts)
     emphasis_resolver = _DocxEmphasisResolver.from_parts(parts)
-    listing = _ListingProvider()
+    listing = ListingProvider()
     charts: list[_DocxChartPlan] = []
     workbooks: dict[str, XlsxPlan] = {}
     media: list[OfficeMediaPlan] = []
@@ -325,7 +316,7 @@ def plan_docx(
 def _plan_docx_chart(
     chart_part: str,
     parts: dict[str, bytes],
-    listing: _ListingProvider,
+    listing: ListingProvider,
     ocr: OcrProvider | None,
     workbooks: dict[str, XlsxPlan],
     source_language: str,
@@ -673,8 +664,18 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
             replace_paragraphs(box, provider, source, target)
             fitted_text.update(textbox.iter(_tag(_W, "t")))
             continue
-        fitted = replace_and_fit_text_box(box, provider, source, target, faces,
-            preserve_source_font_family=preserve_font, measure_source_fonts=preserve_font)
+        try:
+            fitted = replace_and_fit_text_box(box, provider, source, target, faces,
+                preserve_source_font_family=preserve_font, measure_source_fonts=preserve_font)
+        except PortableTextUnsupportedError as error:
+            # FR-2026-08-27-09: keep this text box as it was, and do not let a later
+            # pass translate it without fitting.
+            fitted_text.update(textbox.iter(_tag(_W, "t")))
+            if diagnostics is not None:
+                diagnostics.append(unsupported_text_diagnostic(
+                    error, bounded_text_box_text(box), "docx_textbox", package_part=package_part,
+                ))
+            continue
         for element in textbox.iter(_tag(_W, "t")):
             fitted_text.add(element)
         for destination, explicit in zip(textbox.findall("w:p", _NS), fitted.text_box.paragraphs, strict=True):
@@ -845,6 +846,7 @@ def _apply_chart_workbook(
                 if nested_progress is not None and row
                 else None
             ),
+            diagnostics=diagnostics,
         )
     except TextReplacementProviderError:
         raise

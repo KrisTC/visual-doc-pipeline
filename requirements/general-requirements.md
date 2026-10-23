@@ -868,6 +868,10 @@ candidate portable faces considered. The diagnostic path shall not invoke the
 replacement provider again merely to populate the report. Normal runs remain
 silent except for the existing end-of-run missing-font guidance.
 
+### Implementation Progress
+
+Implemented for PPTX text frames and table cells, DOCX text boxes, XLSX cells and drawing shapes, and clipped SVG, EMF and WMF text. PDF FreeText and AcroForm handling is pending Phase 9, so this requirement stays `Proposed`. Unclipped vector text without a bounded container keeps the unfitted fallback of FR-2026-10-22-12.
+
 The adapter shall serialize successfully selected multi-face segments using its
 native representation, as required by FR-2026-08-27-05, before applying this
 container-level recovery. Raster images, vector outlines, and ineligible
@@ -1945,5 +1949,38 @@ Readers are better served by a text that is shrunk to fit and may overflow a lit
 ### Verification
 
 Automated tests shall use synthetic documents only. Each format's tests shall verify that a text with known bounds is reduced to fit them, that a text without bounds is fitted to its measured source extent with a resolved and with an unavailable source face, and that a replacement that cannot fit at the minimum size is translated and overflows.
+
+---
+
+## FR-2026-10-23-01
+
+| Property | Value |
+|----------|-------|
+| Title | Treat a tab in fitted replacement text as whitespace |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following a PPTX failure diagnosis |
+| Date Added | 2026-10-23 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-03-14, FR-2026-08-27-05, FR-2026-08-27-09, FR-2026-10-22-11 |
+
+### Description
+
+In both fitted document-text layouts, a horizontal tab (U+0009) in replacement text shall be treated as whitespace by the portable-face coverage check of FR-2026-08-27-05, as a line break already is. A tab shall not require glyph coverage from any approved portable face, and shall not by itself cause the text to take the safe unsupported outcome.
+
+For measurement, wrapping, and fitting, a tab shall be measured as four ordinary spaces in the face selected for the surrounding text. The width is a fixed estimate, because the true width depends on tab stops that remain out of scope, as in FR-2026-08-03-13; it is wider than one space because a tab is normally rendered wider. The tab character shall be kept in the written text, and a format adapter shall serialize it with its native tab representation where its format defines one, or otherwise exactly as it does for any other text character.
+
+A tab shall never join or split a grapheme cluster. A replacement that contains a tab and a character that no approved portable face covers is governed by FR-2026-08-27-09, as it would be without the tab.
+
+### Implementation Note
+
+Implemented in the shared fitting core, so it applies to every adapter that uses it. PDF tab behaviour has not been checked and is reviewed with the PDF phase.
+
+### Rationale
+
+A tab is whitespace that translators and the `character_mask` provider both return unchanged, but the approved Noto faces have no glyph for it. Without this rule, a PowerPoint slide whose text contains a tab failed its whole file with "No approved portable replacement font covers the text" even though every visible character was covered. Two of the 34 files in a local evaluation set failed this way.
+
+### Verification
+
+Automated tests shall use synthetic text only. They shall verify that a run containing a tab is covered when its other characters are, that a tab between covered characters does not create a fallback segment, that a tab is measured as four spaces, that a tab plus an uncovered character is handled as FR-2026-08-27-09 defines, and that a PPTX slide whose text contains a tab is fitted and written with the tab preserved.
 
 ---

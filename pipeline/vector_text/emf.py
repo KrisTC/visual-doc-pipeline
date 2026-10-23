@@ -10,6 +10,10 @@ import struct
 from typing import TYPE_CHECKING
 
 from PIL import Image
+from pipeline.bounded_text_layout import (
+    PortableTextUnsupportedError,
+    unsupported_text_diagnostic,
+)
 from pipeline.vector_text.common import (
     ETO_CLIPPED,
     ETO_OPAQUE,
@@ -571,6 +575,7 @@ class EmfDocument:
                     clear_explicit_advances=offset in self._grouped_offsets,
                     bounds_override=None if context is None else context.render_bounds,
                     remove_explicit_clip=False if context is None else context.remove_explicit_clip,
+                    diagnostics=diagnostics,
                 )
                 replaced_items += changed
                 has_editable_text = has_editable_text or editable
@@ -2008,12 +2013,16 @@ def _emf_measured_source_bounds(
         nominal_width * 10,
         nominal_height * 10,
     )
-    measured = fit_explicit_noto_text_box(
-        source_box,
-        noto_typefaces(),
-        preserve_source_font_family=True,
-        measure_source_fonts=measure_source_fonts,
-    )
+    try:
+        measured = fit_explicit_noto_text_box(
+            source_box,
+            noto_typefaces(),
+            preserve_source_font_family=True,
+            measure_source_fonts=measure_source_fonts,
+        )
+    except PortableTextUnsupportedError:
+        # The source text itself cannot be measured; the caller keeps the record's bounds.
+        return source_bounds
     lines = fitted_text_lines(measured)
     if len(lines) != 1 or measured.font_scale != 1.0:
         return source_bounds
@@ -2237,6 +2246,7 @@ def _replace_emf_exttext_record(
     clear_explicit_advances: bool = False,
     bounds_override: _EmfRectangle | None = None,
     remove_explicit_clip: bool = False,
+    diagnostics: list[dict[str, object]] | None = None,
 ) -> tuple[bytes, int, bool, float, bool, str | None, str | None]:
     emr_text_offset = 36
     string_length_offset = emr_text_offset + 8
@@ -2270,24 +2280,32 @@ def _replace_emf_exttext_record(
         # EMR_EXTTEXTOUT stores a finite clipping rectangle when ETO_CLIPPED
         # is present.  The record's X/Y scale is the only local, safe way to
         # change text size without altering the selected GDI font object.
-        if unclipped_fit_context is not None:
-            fitted_replacement = _fit_unclipped_emf_text(
-                unclipped_fit_context.source_text,
-                unclipped_fit_context,
-                replacement_provider,
-                source_language,
-                target_language,
-                document_text_layout == "preserve-basic-layout-source-font",
-            )
-        elif options & ETO_CLIPPED and coordinate_state is not None and coordinate_state.valid:
-            fitted_replacement = _fit_clipped_emf_text(
-                source_text,
-                record,
-                replacement_provider,
-                source_language,
-                target_language,
-                document_text_layout == "preserve-basic-layout-source-font",
-            )
+        try:
+            if unclipped_fit_context is not None:
+                fitted_replacement = _fit_unclipped_emf_text(
+                    unclipped_fit_context.source_text,
+                    unclipped_fit_context,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    document_text_layout == "preserve-basic-layout-source-font",
+                )
+            elif options & ETO_CLIPPED and coordinate_state is not None and coordinate_state.valid:
+                fitted_replacement = _fit_clipped_emf_text(
+                    source_text,
+                    record,
+                    replacement_provider,
+                    source_language,
+                    target_language,
+                    document_text_layout == "preserve-basic-layout-source-font",
+                )
+        except PortableTextUnsupportedError as error:
+            # FR-2026-08-27-09: keep this record as it was and carry on.
+            if diagnostics is not None:
+                diagnostics.append(unsupported_text_diagnostic(
+                    error, source_text, "emf_text_record", vector_format="emf",
+                ))
+            return record, 0, False, 1.0, False, source_text, error.replacement_text
     used_fitted_layout = fitted_replacement is not None
     if fitted_replacement is None:
         replacement = replace_text(source_text)

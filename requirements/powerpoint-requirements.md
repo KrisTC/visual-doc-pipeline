@@ -885,7 +885,7 @@ exclusion, and synthetic-data-only constraint.
 |----------|-------|
 | Title | Translate all PowerPoint text parts in every document-text layout mode |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-03-07, FR-2026-08-04-11, FR-2026-08-04-13, FR-2026-10-22-04 |

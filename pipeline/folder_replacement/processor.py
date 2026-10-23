@@ -12,13 +12,12 @@ import sys
 import time
 from time import perf_counter
 from typing import Protocol
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZipFile
 
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
 from pipeline.ocr import OcrProvider
-from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.folder_replacement.failure_diagnostics import (
     ContextualOcrProvider,
     ContextualTextReplacementProvider,
@@ -34,15 +33,13 @@ from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacement
 from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
 from pipeline.vector_text import VectorReplacementResult
-from pipeline.folder_replacement.office_xml import replace_office_xml_text
 from pipeline.folder_replacement.docx import DocxResult, apply_docx, docx_work_item_total, plan_docx
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
-from pipeline.folder_replacement.pptx import replace_pptx_file
+from pipeline.folder_replacement.pptx import PptxResult, apply_pptx, plan_pptx, pptx_work_item_total
 from pipeline.folder_replacement.xlsx import XlsxResult, apply_xlsx, plan_xlsx, xlsx_work_item_total
 from pipeline.folder_replacement.bitmap import (
     apply_bitmap,
     plan_bitmap_file,
-    replace_bitmap_bytes as _process_bitmap_bytes,
     save_bitmap_file,
 )
 from pipeline.folder_replacement.planning import PhaseProgress, plan_and_apply
@@ -50,7 +47,6 @@ from pipeline.folder_replacement.vector import (
     append_vector_diagnostics,
     apply_vector,
     plan_vector,
-    replace_vector_bytes,
 )
 from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
@@ -426,72 +422,86 @@ def replace_input_folder(
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
             else:
-                if extension in {".docx", ".xlsx"}:
-                    phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
-                    engine = TranslationEngine(processing_replacement, source_language, target_language)
-                    office_diagnostics = document_diagnostics if diagnostics_enabled else None
-                    office_result: DocxResult | XlsxResult
-                    if extension == ".docx":
-                        document_plan = plan_docx(
-                            source_path.read_bytes(),
-                            processing_ocr,
-                            source_language,
-                            target_language,
-                            document_text_layout=document_text_layout,
-                            diagnostics=office_diagnostics,
-                            progress=phase_progress,
-                            nested_progress=display,
-                            failure_context=failure_context,
-                        )
-                        office_result = plan_and_apply(
-                            document_plan,
-                            engine,
-                            lambda translate: apply_docx(
-                                document_plan, translate, typeface,
-                                progress=phase_progress, failure_context=failure_context,
-                                diagnostics=office_diagnostics, nested_progress=display,
-                            ),
-                            phase_progress,
-                        )
-                    else:
-                        workbook_plan = plan_xlsx(
-                            source_path.read_bytes(),
-                            processing_ocr,
-                            source_language,
-                            target_language,
-                            document_text_layout=document_text_layout,
-                            xlsx_translation_mode=xlsx_translation_mode,
-                            diagnostics=office_diagnostics,
-                            progress=phase_progress,
-                            nested_progress=display,
-                            failure_context=failure_context,
-                        )
-                        office_result = plan_and_apply(
-                            workbook_plan,
-                            engine,
-                            lambda translate: apply_xlsx(
-                                workbook_plan, translate, typeface,
-                                progress=phase_progress, failure_context=failure_context,
-                            ),
-                            phase_progress,
-                        )
-                    temporary_destination.write_bytes(office_result.data)
-                    native_items = office_result.native_items
-                    image_regions = office_result.image_regions
-                    retained_vectors = office_result.retained_vectors
-                    for media_part, media_vector in office_result.vector_results:
-                        if diagnostics_enabled:
-                            append_vector_diagnostics(document_diagnostics, media_vector, media_part)
-                        if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
-                            print(f"Retained vector without editable text: {source_path}", file=sys.stderr)
-                else:
-                    native_items, image_regions, retained_vectors = replace_pptx_file(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                engine = TranslationEngine(processing_replacement, source_language, target_language)
+                office_diagnostics = document_diagnostics if diagnostics_enabled else None
+                office_result: DocxResult | XlsxResult | PptxResult
+                if extension == ".docx":
+                    document_plan = plan_docx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
                         nested_progress=display,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                        failure_context=failure_context,
                     )
+                    office_result = plan_and_apply(
+                        document_plan,
+                        engine,
+                        lambda translate: apply_docx(
+                            document_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics, nested_progress=display,
+                        ),
+                        phase_progress,
+                    )
+                elif extension == ".xlsx":
+                    workbook_plan = plan_xlsx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
+                        xlsx_translation_mode=xlsx_translation_mode,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
+                        nested_progress=display,
+                        failure_context=failure_context,
+                    )
+                    office_result = plan_and_apply(
+                        workbook_plan,
+                        engine,
+                        lambda translate: apply_xlsx(
+                            workbook_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics,
+                        ),
+                        phase_progress,
+                    )
+                else:
+                    presentation_plan = plan_pptx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
+                        nested_progress=display,
+                        failure_context=failure_context,
+                    )
+                    office_result = plan_and_apply(
+                        presentation_plan,
+                        engine,
+                        lambda translate: apply_pptx(
+                            presentation_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics,
+                        ),
+                        phase_progress,
+                    )
+                temporary_destination.write_bytes(office_result.data)
+                native_items = office_result.native_items
+                image_regions = office_result.image_regions
+                retained_vectors = office_result.retained_vectors
+                for media_part, media_vector in office_result.vector_results:
+                    if diagnostics_enabled:
+                        append_vector_diagnostics(document_diagnostics, media_vector, media_part)
+                    if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
+                        print(f"Retained vector without editable text: {source_path}", file=sys.stderr)
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
                 result.retained_vector_graphics += retained_vectors
@@ -792,166 +802,13 @@ def _source_work_total(
                     archive.namelist(), document_text_layout, xlsx_translation_mode
                 )
         with ZipFile(source_path) as archive:
-            return 1 + sum(
-                _is_office_bitmap_part(name) or _is_office_vector_part(name)
-                for name in archive.namelist()
-            )
+            return 2 * pptx_work_item_total(archive.namelist())
     return pdf_work_total(source_path)
 
 
 def _make_progress_bar(total: int, label: str) -> ProgressReporter:
     """Create the standard terminal bar for one source file."""
     raise RuntimeError("A Rich live display is required when no test progress factory is supplied.")
-
-
-def _replace_office_file(
-    source: Path,
-    destination: Path,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-    work_completed: Callable[[str], None],
-    *,
-    document_text_layout: str = "preserve-source-formatting",
-    replace_native_xml: bool = True,
-    skip_native_xml_part: Callable[[str], bool] | None = None,
-    ocr_backgrounds: Mapping[str, RgbColour] | None = None,
-    failure_context: FailureContext | None = None,
-    nested_progress: NestedProgressReporter | None = None,
-    diagnostics: list[dict[str, object]] | None = None,
-) -> tuple[int, int, int]:
-    native_items = 0
-    image_regions = 0
-    embedded_image_index = 0
-    vector_graphic_index = 0
-    retained_vectors = 0
-    with ZipFile(source) as source_archive, ZipFile(destination, "w", ZIP_DEFLATED) as destination_archive:
-        for entry in source_archive.infolist():
-            if failure_context is not None:
-                failure_context.set_location(
-                    stage="office_package_read",
-                    container_kind="office_package_part",
-                    operation="read",
-                    package_part=entry.filename,
-                )
-            data = source_archive.read(entry.filename)
-            if _is_office_bitmap_part(entry.filename):
-                embedded_image_index += 1
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="embedded_bitmap",
-                        container_kind="embedded_bitmap",
-                        operation="ocr",
-                        package_part=entry.filename,
-                        item_index=embedded_image_index,
-                    )
-                if nested_progress is not None:
-                    nested_progress.start_nested(entry.filename, 3, "stage")
-                try:
-                    data, replaced = _replace_bitmap_bytes(
-                        data,
-                        ocr_provider,
-                        replacement_provider,
-                        source_language,
-                        target_language,
-                        typeface,
-                        DEFAULT_OCR_BACKGROUND
-                        if ocr_backgrounds is None
-                        else ocr_backgrounds.get(entry.filename, DEFAULT_OCR_BACKGROUND),
-                        None if nested_progress is None else nested_progress.advance_nested,
-                    )
-                finally:
-                    if nested_progress is not None:
-                        nested_progress.clear_nested()
-                image_regions += replaced
-                work_completed(f"embedded image {embedded_image_index}")
-            elif _is_office_vector_part(entry.filename):
-                vector_graphic_index += 1
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="embedded_vector",
-                        container_kind="embedded_vector",
-                        operation="text_replacement",
-                        package_part=entry.filename,
-                        item_index=vector_graphic_index,
-                    )
-                vector_result = replace_vector_bytes(
-                    data,
-                    Path(entry.filename).suffix,
-                    ocr_provider,
-                    replacement_provider,
-                    source_language,
-                    target_language,
-                    typeface,
-                    document_text_layout=document_text_layout,
-                )
-                data = vector_result.data
-                native_items += vector_result.replaced_text_items
-                image_regions += vector_result.replaced_image_regions
-                if diagnostics is not None:
-                    append_vector_diagnostics(diagnostics, vector_result, entry.filename)
-                if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
-                    retained_vectors += 1
-                    print(f"Retained vector without editable text: {source}", file=sys.stderr)
-                work_completed(f"vector graphic {vector_graphic_index}")
-            elif (
-                replace_native_xml
-                and entry.filename.endswith(".xml")
-                and not (skip_native_xml_part and skip_native_xml_part(entry.filename))
-            ):
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="native_xml",
-                        container_kind="office_xml",
-                        operation="text_replacement",
-                        package_part=entry.filename,
-                    )
-                data, replaced = replace_office_xml_text(
-                    data, replacement_provider, source_language, target_language
-                )
-                native_items += replaced
-            if failure_context is not None:
-                failure_context.set_location(
-                    stage="office_package_write",
-                    container_kind="office_package_part",
-                    operation="write",
-                    package_part=entry.filename,
-                )
-            destination_archive.writestr(entry, data)
-    work_completed("native text")
-    return native_items, image_regions, retained_vectors
-
-
-def _is_office_bitmap_part(part_name: str) -> bool:
-    return "/media/" in part_name and Path(part_name).suffix.lower() in BITMAP_EXTENSIONS
-
-
-def _is_office_vector_part(part_name: str) -> bool:
-    return "/media/" in part_name and Path(part_name).suffix.lower() in VECTOR_EXTENSIONS
-
-
-def _replace_bitmap_bytes(
-    data: bytes,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-    ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND,
-    nested_completed: Callable[[str], None] | None = None,
-) -> tuple[bytes, int]:
-    return _process_bitmap_bytes(
-        data,
-        ocr_provider,
-        replacement_provider,
-        source_language,
-        target_language,
-        typeface,
-        ocr_background,
-        nested_completed,
-    )
 
 
 def _replace_native_text(
