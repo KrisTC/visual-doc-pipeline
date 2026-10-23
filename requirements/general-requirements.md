@@ -54,7 +54,7 @@ Using `google_cloud_translate`, including by accepting its default, authorizes t
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01, FR-2026-10-22-07 |
 
 ### Description
 
@@ -65,11 +65,9 @@ file. Its current-task bar shall show the source basename and retain the
 existing work-item totals and labels.
 
 The command shall write the relative path of each source file when it starts
-processing it. A bitmap source's current-task bar shall contain one work item.
-A document source's current-task bar shall contain one native-text work item
-and one work item for every embedded raster bitmap. A PDF's bar shall
-additionally contain one vector-content review work item for every page. The
-current-task bar shall advance after each work item completes. After each
+processing it. A source's current-task bar shall cover the plan, translate, and apply steps
+defined by FR-2026-10-22-07. The current-task bar shall advance after each work
+item completes. After each
 current-task advance, the overall bar shall advance to the corresponding
 percentage of that source file's 100-unit share. A completed or failed source
 shall advance the overall bar to the end of its share, so later source files
@@ -81,10 +79,9 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
-FR-2026-10-22-07 supersedes this requirement's work-item definition (one native-text item and one item per embedded bitmap) with plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling remain in force.
+FR-2026-10-22-07 defines the plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling are unchanged.
 
-The active-task text shall show the current native-text, embedded-image, or
-PDF-vector work item. Existing one-line per-file failure reporting shall remain
+The active-task text shall show the current step and work item without exposing text. Existing one-line per-file failure reporting shall remain
 visible without stopping later work. A failure shall reset the current-task and
 nested-operation rows before later files are processed.
 
@@ -1455,19 +1452,18 @@ progress rows:
    name exceeds the width. Its active-operation label shall appear in the
    detail column, not replace the filename.
 3. A **Nested** row shall appear only while the active folder-replacement
-   source processes one nested object. For an OCR-backed embedded bitmap or PDF
-   vector-analysis operation, it shall identify that document part and advance
-   through exactly three stages: OCR recognition; processing the OCR results,
-   including confidence filtering, text replacement, and colour analysis; and
-   rendering the replacement image. For a relationship-reachable DOCX chart
-   with an embedded XLSX workbook, it shall identify the chart and workbook and
-   advance once for every native-text replacement request made by the embedded
-   XLSX adapter. Its detail label shall identify the active worksheet or drawing
-   part and its replacement-request count without exposing replacement text.
-   Before translation begins, the adapter shall calculate the exact number of
-   such requests using its normal selection rules, so the row shows a real
-   completion count and percentage. It shall be cleared when that nested-object
-   operation finishes or fails.
+   source processes one nested object that FR-2026-10-22-07 selects for it. For
+   an OCR-backed embedded bitmap or PDF vector-analysis operation, it shall
+   identify that document part and advance through exactly three stages: OCR
+   recognition; processing the OCR results, including confidence filtering,
+   text replacement, and colour analysis; and rendering the replacement image.
+   For a nested document, such as the embedded XLSX workbook of a
+   relationship-reachable DOCX chart, it shall identify the document part and
+   advance through that document's plan items, translate batches, and apply
+   items as FR-2026-10-22-07 defines. Its detail label shall identify the
+   active worksheet or drawing part and its item count without exposing
+   replacement text. It shall be cleared when that nested-object operation
+   finishes or fails.
 
 The current row and nested row shall be reset for each next task rather than
 left as historical completed bars. The overall row shall remain visible until
@@ -1540,10 +1536,7 @@ supersedes the terminal-renderer and progress-row-cardinality clauses of
 FR-2026-08-02-01, FR-2026-08-03-04, FR-2026-08-04-14,
 FR-2026-09-02-02, and SR-2026-08-21-02. Their task-specific work totals,
 eligibility rules, and failure handling remain in force unless this requirement
-expressly changes them. FR-2026-10-22-07 further supersedes the Nested row's
-embedded-workbook definition (one advance per native-text replacement request,
-counted before translation) and the Current row's work-item model for folder
-replacement.
+expressly changes them.
 
 ---
 
@@ -1881,7 +1874,7 @@ Automated tests shall use synthetic documents. They shall verify a three-level t
 |----------|-------|
 | Title | Cache batched text-replacement results per text and report request metrics |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-27-10, FR-2026-08-27-11, FR-2026-10-21-01, FR-2026-10-22-01, FR-2026-10-22-03, FR-2026-10-22-04, SR-2026-08-27-01, SR-2026-10-21-01 |
@@ -1917,14 +1910,14 @@ Automated tests shall use synthetic requests, mocked providers, and caches. They
 
 ### Description
 
-For each source file, folder-replacement progress shall cover the plan, translate, and apply steps of FR-2026-10-22-04 on the one Current row, with an active-operation label for the step (for example, planning page 3 of 40, translating batch 4 of 31, and applying page 3 of 40). It shall retain FR-2026-08-03-04's 100-unit overall share for each source and the `progress.json` shape, and these rules replace its work-item definition:
+For each source file, folder-replacement progress shall cover the plan, translate, and apply steps of FR-2026-10-22-04 on the one Current row, with an active-operation label for the step (for example, planning page 3 of 40, translating batch 4 of 31, and applying page 3 of 40). It shall retain FR-2026-08-03-04's 100-unit overall share for each source and the `progress.json` shape, and these rules define its work items:
 
 - Plan and apply shall each advance once per work item that the handler already counts (a part, slide, sheet block, page, or image). Their totals are known before the step starts.
 - Translate shall advance once per batch sent. Its total is the number of batches remaining after deduplication and cache hits, known when planning finishes, and a fully cached source has none. The Current row's total therefore grows once, when that count is known. The displayed percentage, the overall share, and the `progress.json` percentage shall never move backwards, and none shall reach 100 before the source completes.
 - Nested documents shall add their plan and apply items to the parent's total when the parent's plan discovers them, so the parent's Current row counts the whole tree.
 - While a rate-limit wait of FR-2026-10-22-03 is in progress, the active-operation label shall be "Waiting for translation quota".
 
-A nested document shall additionally have its own Nested row, as FR-2026-09-03-01 defines it, only when it is a bitmap that needs OCR or when its plan contains more than 100 texts. This threshold is hard-coded. All other nested documents shall be counted only in their parent's Current row. The Nested row is a closer view of work already counted in the parent's row, not extra work. It shall show that document's plan items, translate batches, and apply items, identify the document part without exposing text, and show at most one nested document at a time. An OCR-backed bitmap shall keep the three OCR-stage labels of FR-2026-09-03-01. This requirement supersedes the embedded-workbook rule of one advance per replacement request counted before translation, in FR-2026-09-03-01, and the equivalent standalone fast-mode rule of FR-2026-09-04-01.
+A nested document shall additionally have its own Nested row, as FR-2026-09-03-01 defines it, only when it is a bitmap that needs OCR or when its plan contains more than 100 texts. This threshold is hard-coded. All other nested documents shall be counted only in their parent's Current row. The Nested row is a closer view of work already counted in the parent's row, not extra work. It shall show that document's plan items, translate batches, and apply items, identify the document part without exposing text, and show at most one nested document at a time. An OCR-backed bitmap shall keep the three OCR-stage labels of FR-2026-09-03-01.
 
 ### Rationale
 

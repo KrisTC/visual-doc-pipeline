@@ -135,7 +135,10 @@ For Google Cloud Translation, the fixed credential mount sets
 `GOOGLE_APPLICATION_CREDENTIALS` only if the caller did not set it explicitly.
 `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_TRANSLATION_LOCATION` are optional
 overrides; for example, an operator can select another supported European
-location with `--env GOOGLE_CLOUD_TRANSLATION_LOCATION=europe-west3`.
+location with `--env GOOGLE_CLOUD_TRANSLATION_LOCATION=europe-west3`. The
+batching, deadline and quota variables described in
+[Google Cloud Translation setup](google-cloud-translation-setup.md) can be
+passed the same way.
 Credentials are never copied into image layers, output, or the runtime cache.
 
 Mount `/input`, `/plugins`, and `/fonts` read-only. Mount `/output` and

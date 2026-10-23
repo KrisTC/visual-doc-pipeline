@@ -406,7 +406,7 @@ no cache creation or content disclosure, and unchanged cache opt-in behaviour.
 |----------|-------|
 | Title | Keep batched translation within the existing remote-data boundary |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | SR-2026-08-24-01, SR-2026-08-27-01, FR-2026-10-22-02, FR-2026-10-22-03, FR-2026-10-22-06 |

@@ -107,10 +107,10 @@ request may retry initialization. A `translateText` operation failure shall
 retain the initialized client and continue to raise the existing normalized
 provider error; it shall not silently select another endpoint or provider.
 
-This requirement shall not batch requests, alter individual `translateText`
+This requirement shall not alter individual `translateText`
 request construction, persist configuration or client state, widen the remote
 data boundary, or expose configuration values in errors or logs. FR-2026-10-22-02
-supersedes only the prohibition on batching requests.
+defines how a request carries several texts.
 
 ### Rationale
 
@@ -144,8 +144,9 @@ contents behaviour.
 
 ### Description
 
-For each non-empty cross-language `translateText` operation, the Google Cloud
-Translation provider shall apply a 10-second RPC deadline. It shall make at
+For each non-empty cross-language `translateText` request, the Google Cloud
+Translation provider shall apply the per-attempt RPC deadline defined by
+FR-2026-10-22-03 (300 seconds by default). It shall make at
 most three total attempts: the initial attempt and at most two retries. A retry
 is permitted only after a deadline expiry or another transient transport
 failure; invalid requests, authentication and authorization failures, and other
@@ -159,7 +160,8 @@ the provider name, failure category, attempted-call count, per-attempt deadline
 seconds, total configured attempt limit, input character count, source and
 target language tags, and filename flag. It shall not include request text,
 translated text, source or output paths as values, credentials, project IDs,
-authorization headers, API response bodies, or chained provider messages.
+authorization headers, API response bodies, or chained provider messages. It shall
+also include the request's text count.
 
 ### Rationale
 
@@ -170,14 +172,10 @@ single replacement request cannot silently stall an entire source document.
 ### Notes
 
 Automated tests shall use mocked clients and synthetic inputs. They shall verify
-the 10-second deadline for each attempt, success after a transient failure,
+the configured deadline for each attempt, success after a transient failure,
 termination after three attempts, immediate non-transient failure, unchanged
 client reuse, and complete safe diagnostic metadata without request text or
 credentials.
-
-FR-2026-10-22-03 supersedes this requirement's 10-second deadline value and
-its per-operation wording, which becomes per `translateText` request. The
-three-attempt limit and the transient-failure rules remain in force.
 
 ---
 
@@ -196,7 +194,7 @@ three-attempt limit and the transient-failure rules remain in force.
 
 The `google_cloud_translate` provider shall implement the batch `replace` of FR-2026-10-22-01 by sending the texts that need translation in the `contents` field of one Google Cloud Translation Advanced v3 `translateText` request, using `mime_type` `text/plain`, and shall return one item per request text in request order. It shall verify that the response contains exactly one translation per sent text and otherwise raise `TextReplacementProviderError`. It shall use only `translateText`. It shall not use `batchTranslateText` or `translateDocument`, which require Cloud Storage and asynchronous operation (SR-2026-08-24-01).
 
-Per text, the provider shall retain the behaviour of FR-2026-08-24-04. Empty text, and every text of a request whose source and target tags are equal after case-insensitive comparison, shall be returned unchanged with confidence `0.0` without an API call, and a request needing no API call shall make none. For filename requests it shall translate each filename stem, retain each suffix, and apply the same unsafe-stem checks. Every successful item shall have confidence `0.0`. FR-2026-08-28-01's prohibition on batching requests is superseded by this requirement; its client-reuse and initialization rules remain.
+Per text, the provider shall retain the behaviour of FR-2026-08-24-04. Empty text, and every text of a request whose source and target tags are equal after case-insensitive comparison, shall be returned unchanged with confidence `0.0` without an API call, and a request needing no API call shall make none. For filename requests it shall translate each filename stem, retain each suffix, and apply the same unsafe-stem checks. Every successful item shall have confidence `0.0`. FR-2026-08-28-01's client-reuse and initialization rules remain.
 
 The provider shall split a request into one or more `translateText` calls according to its limits, which it shall expose as `batch_limits`. The defaults are a maximum of 1,024 texts per call, a soft target of 5,000 characters per call, and a hard maximum of 30,000 characters per call, where a character is a Python string code point. The target is soft: a single text longer than the target shall be sent alone. A text longer than the hard maximum shall be rejected with a safe diagnostic. These defaults shall be hard-coded and overridable by these environment variables:
 
@@ -230,7 +228,7 @@ Automated tests shall use a mocked Google client and synthetic text only. They s
 |----------|-------|
 | Title | Use a long request deadline and back off on Google Cloud Translation quota limits |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-09-03-04, FR-2026-10-22-02, FR-2026-10-22-06, FR-2026-10-22-07, SR-2026-10-22-01 |

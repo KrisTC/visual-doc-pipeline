@@ -17,9 +17,9 @@ Text-replacement provider contracts and provider-specific test support.
 
 The product pipeline shall define a text-replacement task abstraction, including request and response models, a provider API, and a provider factory. The factory shall discover provider plugins from the default codebase directory `pipeline/text_replacement_plugins/` and make each provider available under its declared name.
 
-A text-replacement request shall accept a string of text, a boolean that indicates whether that text is a filename, a source-language BCP 47 tag, and a requested target-language BCP 47 tag. A text-replacement response shall contain the replacement string, normalized confidence from `0.0` to `1.0` inclusive, and an optional dictionary of provider-specific extra data.
+A text-replacement request shall accept a non-empty tuple of texts, a boolean that indicates whether those texts are filenames, a source-language BCP 47 tag, and a requested target-language BCP 47 tag. A text-replacement response shall contain one item per request text, in the same order, each with the replacement string, normalized confidence from `0.0` to `1.0` inclusive, and an optional dictionary of provider-specific extra data. FR-2026-10-22-01 defines the batch request and result.
 
-The initial provider, named `character_mask`, shall support all language-tag pairs. For non-filename input, it shall replace every non-whitespace character with `#` while preserving every Unicode whitespace character exactly, including ordinary, non-breaking, and ideographic spaces, tabs, and line breaks. Whitespace is defined by Python `str.isspace()`. It shall preserve the input string's Python character length. For filename input, it shall return the input unchanged. In both cases it shall return confidence `1.0` and no extra data.
+The initial provider, named `character_mask`, shall support all language-tag pairs. For non-filename input, it shall replace every non-whitespace character with `#` while preserving every Unicode whitespace character exactly, including ordinary, non-breaking, and ideographic spaces, tabs, and line breaks. Whitespace is defined by Python `str.isspace()`. It shall preserve the input string's Python character length. For filename input, it shall return the input unchanged. In both cases it shall return confidence `1.0` and no extra data. It shall apply this behaviour to each text of a request independently.
 
 This feature shall only provide the pipeline-library abstraction and initial plugin. It shall not yet integrate text replacement with document, image, or OCR processing.
 
@@ -28,8 +28,6 @@ This feature shall only provide the pipeline-library abstraction and initial plu
 The pipeline needs a stable, interchangeable boundary for translation and other visible-text replacement tasks before replacement is integrated with document processing.
 
 ### Notes
-
-FR-2026-10-22-01 supersedes this requirement's single-string request and single-item response shapes with a batch request and result. Its factory, discovery, unique-name, error, and `character_mask` per-text behaviour clauses remain in force and apply to each text of a batch.
 
 Provider names shall be unique. The factory shall reject duplicate names and raise a distinct error when a requested provider is unavailable. Provider failures shall raise a distinct provider error.
 
@@ -74,14 +72,14 @@ The providers shall have provider-owned behavioural tests and continue to partic
 |----------|-------|
 | Title | Replace a batch of texts with one provider call |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request: batch text replacement (`docs/batch-text-replacement-plan.md`) |
 | Date Added | 2026-10-22 |
 | Related Requirements | FR-2026-08-02-06, FR-2026-08-02-11, FR-2026-08-27-10, FR-2026-10-22-02, FR-2026-10-22-04, FR-2026-10-22-06 |
 
 ### Description
 
-The text-replacement provider API shall replace a batch of texts in one call. A request shall carry a non-empty tuple of one or more texts, one boolean that indicates whether those texts are filenames, one source-language BCP 47 tag, and one target-language BCP 47 tag. A result shall carry one item per request text, in the same order and of the same length. Each item shall carry the replacement string, normalized confidence from `0.0` to `1.0` inclusive, and an optional dictionary of provider-specific extra data, as FR-2026-08-02-06 defined for a single response. This requirement supersedes FR-2026-08-02-06's single-string request and single-response shapes. Every other clause of FR-2026-08-02-06 and FR-2026-08-02-11, including per-text provider behaviour, remains in force and applies to each text independently.
+The text-replacement provider API shall replace a batch of texts in one call. A request shall carry a non-empty tuple of one or more texts, one boolean that indicates whether those texts are filenames, one source-language BCP 47 tag, and one target-language BCP 47 tag. A result shall carry one item per request text, in the same order and of the same length. Each item shall carry the replacement string, normalized confidence from `0.0` to `1.0` inclusive, and an optional dictionary of provider-specific extra data, as FR-2026-08-02-06 defined for a single response. FR-2026-08-02-06 and FR-2026-08-02-11, including per-text provider behaviour, apply to each text independently.
 
 `replace` shall be the only method a provider implements to replace text. A single text is a batch of one.
 
@@ -93,7 +91,7 @@ The project shall provide a shared plain helper, `replace_each(request, function
 
 The caching, metering, and contextual wrappers shall implement the batch `replace` and preserve provider metadata.
 
-This is an intentional breaking change to the provider API. `docs/text-replacement-provider-api.md` and the changelog shall describe it, and the provider documentation shall include a worked example of a minimal provider.
+This is an intentional breaking change to the provider API. `docs/text-replacement-provider-api.md` shall describe it, and the provider documentation shall include a worked example of a minimal provider.
 
 ### Rationale
 
