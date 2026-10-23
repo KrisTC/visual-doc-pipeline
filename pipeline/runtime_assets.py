@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import platform
@@ -21,12 +22,14 @@ _SYMBOLS_ARCHIVE_URL = (
     "NotoSansSymbols2-v2.008/NotoSansSymbols2-v2.008.zip"
 )
 _SYMBOLS_ARCHIVE_MEMBER = "NotoSansSymbols2/googlefonts/ttf/NotoSansSymbols2-Regular.ttf"
+_SYMBOLS_ARCHIVE_SHA256 = "346c930bbe8eb946701a05c54e9c11a2094dee1d93c387bf1771c0a3e335688f"
 _SYMBOLS_FILENAME = "NotoSansSymbols2-Regular.ttf"
 _MATH_ARCHIVE_URL = (
     "https://github.com/notofonts/math/releases/download/"
     "NotoSansMath-v3.000/NotoSansMath-v3.000.zip"
 )
 _MATH_ARCHIVE_MEMBER = "NotoSansMath/googlefonts/ttf/NotoSansMath-Regular.ttf"
+_MATH_ARCHIVE_SHA256 = "ac351837b41f8a897f020b97fb0f075ad574c1e9669fb5839ada1f92fd748356"
 _MATH_FILENAME = "NotoSansMath-Regular.ttf"
 _SUCCESS_MARKER_FILENAME = "bootstrap-complete"
 _TEMPORARY_FILE_LOCK_RETRY_SECONDS = 30.0
@@ -110,16 +113,27 @@ def bootstrap_optional_fonts() -> tuple[Path, Path]:
 def bootstrap_symbols_font() -> Path:
     """Download the selected optional Noto Sans Symbols 2 face."""
     return _bootstrap_font(
-        _SYMBOLS_ARCHIVE_URL, _SYMBOLS_ARCHIVE_MEMBER, symbols_font_path()
+        _SYMBOLS_ARCHIVE_URL,
+        _SYMBOLS_ARCHIVE_MEMBER,
+        symbols_font_path(),
+        _SYMBOLS_ARCHIVE_SHA256,
     )
 
 
 def bootstrap_math_font() -> Path:
     """Download the selected optional Noto Sans Math face."""
-    return _bootstrap_font(_MATH_ARCHIVE_URL, _MATH_ARCHIVE_MEMBER, math_font_path())
+    return _bootstrap_font(
+        _MATH_ARCHIVE_URL, _MATH_ARCHIVE_MEMBER, math_font_path(), _MATH_ARCHIVE_SHA256
+    )
 
 
-def _bootstrap_font(archive_url: str, archive_member: str, destination: Path) -> Path:
+class RuntimeAssetIntegrityError(RuntimeError):
+    """Raised when a downloaded archive does not match its pinned SHA-256 digest."""
+
+
+def _bootstrap_font(
+    archive_url: str, archive_member: str, destination: Path, archive_sha256: str
+) -> Path:
     """Download one pinned Noto archive member unless it is already cached."""
     if destination.is_file():
         return destination
@@ -131,6 +145,13 @@ def _bootstrap_font(archive_url: str, archive_member: str, destination: Path) ->
             shutil.copyfileobj(response, archive_file)
         archive_file.flush()
     try:
+        # Verify before the archive is opened so a mismatched download is never parsed.
+        actual_sha256 = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+        if actual_sha256 != archive_sha256:
+            raise RuntimeAssetIntegrityError(
+                f"The downloaded archive {archive_url} has SHA-256 {actual_sha256}, "
+                f"not the pinned {archive_sha256}."
+            )
         with ZipFile(archive_path) as archive:
             with archive.open(archive_member) as source:
                 with NamedTemporaryFile(

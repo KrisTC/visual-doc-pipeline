@@ -661,6 +661,17 @@ not create a second model cache, lock model bytes, or alter PaddleOCR's cache
 configuration. Adding a PaddleOCR language shall add one initialization step
 to the bootstrap command.
 
+Each optional font archive shall be pinned to an exact release URL and an
+exact SHA-256 digest recorded beside the font mapping. The bootstrap shall
+verify the downloaded archive against that digest before opening it, and a
+mismatch shall fail the bootstrap without caching any font bytes. Changing a
+pinned font version shall update its URL and digest together.
+
+The bootstrap command shall accept `--fonts-only`. That option downloads and
+verifies only the optional fonts, skips PaddleOCR initialization, and does not
+write the success marker, because the marker records that PaddleOCR was
+initialized. Continuous integration (TR-2026-09-10-01) uses this option.
+
 The user-facing document-processing and OCR-evaluation scripts shall call one
 small shared helper before starting work. The helper shall check the fitted
 layout's optional packs and, when PaddleOCR is selected, whether the bootstrap
@@ -673,7 +684,9 @@ with a concise instruction to run the bootstrap command. Repository-root
 Downloading fonts or OCR models while a document is being processed causes
 late, network-dependent failures. A small explicit setup step makes those
 downloads happen at a convenient time without turning the wrappers or the
-normal processing path into an asset-management system.
+normal processing path into an asset-management system. Pinning each archive's
+digest keeps the font bytes that fitted layout measures and embeds identical
+across machines and CI.
 
 ### Notes
 
@@ -686,13 +699,15 @@ shall not contain source document content, paths, text, credentials, or
 translation responses.
 
 The source and licence for each optional Noto pack shall be recorded beside the
-font mapping. The project deliberately trusts the selected official Noto source
-for this convenience feature; it does not require a separate artifact manifest,
-download-size check, or checksum verification process.
+font mapping. The project trusts the selected official Noto source, and the
+pinned digest guards against a changed or corrupted download rather than
+replacing that trust.
 
 Automated tests shall mock the downloads and PaddleOCR initialization. They
 shall verify the bootstrap invokes every selected font and existing PaddleOCR
-language, the fitted-layout font-cache prerequisite fails before processing,
+language, rejects an archive that does not match its pinned digest without
+caching it, skips PaddleOCR and the success marker under `--fonts-only`, the
+fitted-layout font-cache prerequisite fails before processing,
 the folder-replacement summary names the missing font and bootstrap command,
 the successful marker is recognized, and the wrappers remain unchanged.
 

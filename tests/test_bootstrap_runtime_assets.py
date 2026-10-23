@@ -62,3 +62,25 @@ class BootstrapRuntimeAssetsTests(unittest.TestCase):
         self.assertEqual([call(), call(), call(), call()], display.advance_overall.call_args_list)
         self.assertEqual([call("en"), call("ja")], bootstrap_language.call_args_list)
         display.__exit__.assert_called_once()
+
+    # Verifies FR-2026-08-27-04's fonts-only option and TR-2026-09-10-01's CI font step.
+    def test_fonts_only_downloads_fonts_without_paddle_models_or_the_success_marker(self) -> None:
+        output = StringIO()
+        display = MagicMock()
+        display.__enter__.return_value = display
+        with (
+            patch.object(bootstrap, "bootstrap_symbols_font", return_value=Path("/fonts/symbols.ttf")),
+            patch.object(bootstrap, "bootstrap_math_font", return_value=Path("/fonts/math.ttf")),
+            patch.object(bootstrap, "bootstrap_model_language") as bootstrap_language,
+            patch.object(bootstrap, "mark_bootstrap_complete") as mark_complete,
+            patch.object(bootstrap, "font_cache_directory", return_value=Path("/fonts")),
+            patch.object(bootstrap, "LiveProgress", return_value=display),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(0, bootstrap.main(["--fonts-only"]))
+
+        bootstrap_language.assert_not_called()
+        mark_complete.assert_not_called()
+        display.start_overall.assert_called_once_with(2, "asset")
+        self.assertIn(f"Noto Sans Math: {Path('/fonts/math.ttf')}", output.getvalue())
+        self.assertNotIn("PaddleOCR", output.getvalue())

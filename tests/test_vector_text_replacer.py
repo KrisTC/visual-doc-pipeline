@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from io import BytesIO
 import base64
 import struct
@@ -44,6 +45,19 @@ def _style_font_size(element: ElementTree.Element) -> float:
         if name.strip() == "font-size":
             return float(value.strip().removesuffix("px"))
     raise AssertionError("No font-size in the inline style.")
+
+
+def _stand_in_optional_faces() -> AbstractContextManager[object]:
+    """Behave as if the optional Math and Symbols 2 fonts were bootstrapped.
+
+    The fallback segmentation only runs when those faces exist, and CI does not
+    download them.  The committed mono face stands in; it has no private-use glyphs.
+    """
+    mono = bounded_text_layout._base_noto_typefaces()["fixed-width"]
+    return patch(
+        "pipeline.bounded_text_layout.optional_static_typefaces",
+        return_value={"math": mono, "symbols": mono},
+    )
 
 
 class VectorTextReplacerTests(unittest.TestCase):
@@ -123,7 +137,7 @@ class VectorTextReplacerTests(unittest.TestCase):
     # Verifies FR-2026-10-22-12: a legacy symbol-font bullet has no approved portable face.
     def test_svg_text_no_portable_face_covers_is_replaced_at_its_source_size(self) -> None:
         for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
-            with self.subTest(layout=layout):
+            with self.subTest(layout=layout), _stand_in_optional_faces():
                 result = replace_vector_text(
                     '<svg xmlns="http://www.w3.org/2000/svg">'
                     '<text font-family="Wingdings" font-size="32">\uf06e</text>'
@@ -144,8 +158,9 @@ class VectorTextReplacerTests(unittest.TestCase):
 
         font = SourceLineFont("Wingdings", 24.0, False, False)
 
-        self.assertIsNone(measure_source_line("\uf06e", font, measure_source_fonts=False))
-        self.assertIsNotNone(measure_source_line("abc", font, measure_source_fonts=False))
+        with _stand_in_optional_faces():
+            self.assertIsNone(measure_source_line("\uf06e", font, measure_source_fonts=False))
+            self.assertIsNotNone(measure_source_line("abc", font, measure_source_fonts=False))
 
     # Verifies FR-2026-10-22-11 and FR-2026-10-22-12: overflow stays translated.
     def test_svg_text_that_cannot_fit_is_still_translated(self) -> None:
