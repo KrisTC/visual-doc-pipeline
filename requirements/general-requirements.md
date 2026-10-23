@@ -54,7 +54,7 @@ Using `google_cloud_translate`, including by accepting its default, authorizes t
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01, FR-2026-10-22-07 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01, FR-2026-10-22-07, FR-2026-10-23-02 |
 
 ### Description
 
@@ -79,7 +79,7 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
-FR-2026-10-22-07 defines the plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling are unchanged.
+FR-2026-10-22-07 defines the plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling are unchanged. FR-2026-10-23-02 adds the optional `details` and `eta_status` properties to `progress.json`.
 
 The active-task text shall show the current step and work item without exposing text. Existing one-line per-file failure reporting shall remain
 visible without stopping later work. A failure shall reset the current-task and
@@ -1990,5 +1990,37 @@ A tab is whitespace that translators and the `character_mask` provider both retu
 ### Verification
 
 Automated tests shall use synthetic text only. They shall verify that a run containing a tab is covered when its other characters are, that a tab between covered characters does not create a fallback segment, that a tab is measured as four spaces, that a tab plus an uncovered character is handled as FR-2026-08-27-09 defines, and that a PPTX slide whose text contains a tab is fitted and written with the tab preserved.
+
+---
+
+## FR-2026-10-23-02
+
+| Property | Value |
+|----------|-------|
+| Title | Report the current step, failure reason and ETA state in folder-replacement progress.json |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-23 |
+| Related Requirements | FR-2026-08-03-04, FR-2026-10-22-07 |
+
+### Description
+
+This requirement extends the `progress.json` file of FR-2026-08-03-04. Its existing keys, values and update rules are unchanged.
+
+1. **Details.** A file entry may contain an optional string property `details`.
+   - While a file has status `processing`, `details` shall hold the active-operation label that the Current row shows for that file (FR-2026-10-22-07), for example "Planning page 3 of 40", "Translating batch 4 of 31", "Applying page 3 of 40" or "Waiting for translation quota". Each change of label shall be published with the same atomic replacement as other updates. `details` shall be present whether or not the terminal progress display is shown, and shall be absent until the first label is set.
+   - When a file completes, `details` shall be removed.
+   - When a file fails, `details` shall hold the same one-line failure message that the command writes to standard error for that file, without the source path, which the entry's key already names. It shall be retained with status `failed`. That message already excludes request text.
+   - Queued and skipped entries shall not contain `details`.
+2. **Unknown ETA.** Whenever the top-level `eta_seconds`, or the `eta_seconds` of a processing file entry, is JSON `null` because the Rich task has insufficient completed work, the same object shall contain a string property `eta_status` with the value `Calculating`. This includes an estimate that reverts to unknown. `eta_status` shall be absent whenever `eta_seconds` is a number, and in entries that do not contain `eta_seconds`. The type of `eta_seconds` is unchanged: a number of seconds or `null`. When terminal progress is disabled, the command estimates no ETA, so `eta_seconds` remains `null` and `eta_status` shall be absent.
+
+### Rationale
+
+A consumer of `progress.json` could previously see only a rough status for a file, so a long planning, translation or apply step looked stalled, and a failed file gave no reason. In a measured Word document, planning alone took 33 to 73 seconds. Publishing the active step and the failure reason lets a monitor show what each file is doing and why it failed without reading the terminal. A `null` ETA is displayed by consumers as "None", which reads as an error. A separate `eta_status` property gives them a natural label while `eta_seconds` keeps its numeric type, so existing consumers continue to work.
+
+### Verification
+
+Automated tests shall use synthetic documents, a mocked provider and a mocked clock. They shall verify that `details` follows the label of each plan, translate, apply and rate-limit step, is absent before the first label and after completion, holds the stderr failure message without the source path for a failed file, and is absent for queued and skipped files; that `eta_status` is `Calculating` exactly when `eta_seconds` is `null` and the progress display is enabled, including when an estimate reverts to `null`, and is absent when `eta_seconds` is a number, in completed, failed, queued and skipped entries, and when terminal progress is disabled; and that every observed progress-file write is valid JSON.
 
 ---

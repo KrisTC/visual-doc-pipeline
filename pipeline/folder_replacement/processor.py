@@ -180,10 +180,11 @@ def replace_input_folder(
     completed_sources = 0
     overall_progress = 0
     overall_eta_seconds: float | None = None
+    overall_eta_status = _eta_status(None, display is not None)
 
     def update_overall_state(current_file_progress: int = 0) -> None:
         """Keep the JSON Overall state aligned with the Rich Overall task."""
-        nonlocal overall_progress, overall_eta_seconds
+        nonlocal overall_progress, overall_eta_seconds, overall_eta_status
         if display is not None:
             overall_progress, overall_eta_seconds = display.overall_state()
         elif eligible_source_count:
@@ -193,6 +194,7 @@ def replace_input_folder(
                 / (eligible_source_count * 100)
             )
             overall_eta_seconds = None
+        overall_eta_status = _eta_status(overall_eta_seconds, display is not None)
 
     progress_warning_shown = False
 
@@ -202,7 +204,8 @@ def replace_input_folder(
         nonlocal progress_warning_shown
         try:
             _write_progress_file(
-                output_root, overall_progress, overall_eta_seconds, progress_entries
+                output_root, overall_progress, overall_eta_seconds, progress_entries,
+                eta_status=overall_eta_status,
             )
         except ProgressWriteError as error:
             if not progress_warning_shown:
@@ -276,7 +279,7 @@ def replace_input_folder(
         try:
             progress_entry["status"] = "processing"
             progress_entry["progress"] = 0
-            progress_entry["eta_seconds"] = None
+            _set_entry_eta(progress_entry, None, display is not None)
             update_overall_state()
             publish_progress()
             source_work_total = _source_work_total(
@@ -294,8 +297,10 @@ def replace_input_folder(
                 else:
                     make_progress = progress_factory or _make_progress_bar
                     progress = make_progress(source_work_total, relative_source_path.name)
-            progress_entry["eta_seconds"] = (
-                None if display is None else display.current_state()[1]
+            _set_entry_eta(
+                progress_entry,
+                None if display is None else display.current_state()[1],
+                display is not None,
             )
             update_overall_state()
             publish_progress()
@@ -308,13 +313,15 @@ def replace_input_folder(
                     99, int(completed_work * 100 / source_work_total)
                 )
                 progress_entry["progress"] = max(reported_progress, file_progress)
+                progress_entry["details"] = label
                 if progress is not None:
                     progress.set_postfix_str(label)
                     progress.update()
                     if display is not None:
                         display.set_overall_from_current(completed_sources)
                 if display is not None:
-                    file_progress, progress_entry["eta_seconds"] = display.current_state()
+                    file_progress, current_eta = display.current_state()
+                    _set_entry_eta(progress_entry, current_eta, True)
                 file_progress = max(reported_progress, min(99, file_progress))
                 reported_progress = file_progress
                 progress_entry["progress"] = file_progress
@@ -322,8 +329,10 @@ def replace_input_folder(
                 publish_progress()
 
             def set_work_label(label: str) -> None:
+                progress_entry["details"] = label
                 if progress is not None:
                     progress.set_postfix_str(label)
+                publish_progress()
 
             def grow_work_total(count: int) -> None:
                 nonlocal source_work_total
@@ -515,6 +524,7 @@ def replace_input_folder(
             os.replace(temporary_destination, destination)
         except (BadZipFile, OSError, RuntimeError, ValueError) as error:
             progress_entry["status"] = "failed"
+            progress_entry["details"] = str(error)
             result.failed_files += 1
             result.failures.append(f"{source_path}: {error}")
             print(f"Failed: {source_path}: {error}", file=sys.stderr)
@@ -576,9 +586,11 @@ def replace_input_folder(
                 progress.close()
             completed_sources += 1
             if progress_entry["status"] == "completed":
-                progress_entry["eta_seconds"] = 0
+                _set_entry_eta(progress_entry, 0, False)
+                progress_entry.pop("details", None)
             else:
                 progress_entry.pop("eta_seconds", None)
+                progress_entry.pop("eta_status", None)
             update_overall_state()
             publish_progress()
     finally:
@@ -587,11 +599,26 @@ def replace_input_folder(
     return result
 
 
+def _eta_status(eta_seconds: float | None, estimating: bool) -> str | None:
+    """Label an unknown ETA, but only when a progress display is producing estimates."""
+    return "Calculating" if estimating and eta_seconds is None else None
+
+
+def _set_entry_eta(entry: ProgressEntry, eta_seconds: float | None, estimating: bool) -> None:
+    entry["eta_seconds"] = eta_seconds
+    status = _eta_status(eta_seconds, estimating)
+    if status is None:
+        entry.pop("eta_status", None)
+    else:
+        entry["eta_status"] = status
+
+
 def _write_progress_file(
     output_root: Path,
     progress: int,
     eta_seconds: float | None,
     entries: ProgressEntries,
+    eta_status: str | None = None,
 ) -> None:
     """Atomically publish a complete machine-readable folder-progress snapshot.
 
@@ -599,18 +626,11 @@ def _write_progress_file(
     """
     progress_path = output_root / "progress.json"
     temporary_path = progress_path.with_name(f".{progress_path.name}.tmp")
-    content = (
-        json.dumps(
-            {
-                "progress": progress,
-                "eta_seconds": eta_seconds,
-                "files": entries,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n"
-    )
+    document: dict[str, object] = {"progress": progress, "eta_seconds": eta_seconds}
+    if eta_status is not None:
+        document["eta_status"] = eta_status
+    document["files"] = entries
+    content = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
 
     def publish() -> None:
         temporary_path.write_text(content, encoding="utf-8")

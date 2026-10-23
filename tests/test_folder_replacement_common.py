@@ -290,8 +290,9 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                 progress: int,
                 eta_seconds: float | None,
                 entries: folder_processor.ProgressEntries,
+                eta_status: str | None = None,
             ) -> None:
-                original_write(progress_root, progress, eta_seconds, entries)
+                original_write(progress_root, progress, eta_seconds, entries, eta_status)
                 json.loads((progress_root / "progress.json").read_text(encoding="utf-8"))
                 snapshots.append({path: dict(entry) for path, entry in entries.items()})
 
@@ -308,6 +309,9 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
 
             self.assertEqual(1, result.processed_files)
             self.assertEqual(1, result.failed_files)
+            failure_message = result.failures[0].removeprefix(
+                f"{selected_root / 'failed.docx'}: "
+            )
             self.assertEqual(
                 {
                     "progress": 100,
@@ -319,7 +323,11 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                             "progress": 100,
                             "eta_seconds": 0,
                         },
-                        "selected/failed.docx": {"status": "failed", "progress": 0},
+                        "selected/failed.docx": {
+                            "status": "failed",
+                            "progress": 0,
+                            "details": failure_message,
+                        },
                         "unsupported.txt": {"status": "skipped"},
                     },
                 },
@@ -348,6 +356,111 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                     "eta_seconds": None,
                 },
                 [snapshot["selected/failed.docx"] for snapshot in snapshots],
+            )
+
+    # Verifies FR-2026-10-23-02's details property.
+    def test_progress_details_follow_each_step_label_and_clear_on_completion(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            Image.new("RGB", (300, 300), "white").save(input_root / "source.png")
+            Image.new("RGB", (20, 20), "white").save(input_root / "other.png")
+            snapshots: list[folder_processor.ProgressEntries] = []
+            original_write = folder_processor._write_progress_file
+
+            def capture_progress(
+                progress_root: Path,
+                progress: int,
+                eta_seconds: float | None,
+                entries: folder_processor.ProgressEntries,
+                eta_status: str | None = None,
+            ) -> None:
+                original_write(progress_root, progress, eta_seconds, entries, eta_status)
+                snapshots.append({path: dict(entry) for path, entry in entries.items()})
+
+            with patch.object(folder_processor, "_write_progress_file", side_effect=capture_progress):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _VectorOutlineOcrProvider(),
+                    _RecordingReplacementProvider(),
+                    include_patterns=("source.png",),
+                )
+
+            self.assertEqual(1, result.processed_files)
+            entries = [snapshot["source.png"] for snapshot in snapshots]
+            self.assertNotIn("details", entries[0])
+            self.assertNotIn(
+                "details",
+                next(entry for entry in entries if entry["status"] == "processing"),
+            )
+            labels = [entry["details"] for entry in entries if "details" in entry]
+            self.assertEqual(
+                ["Planning image 1 of 1", "Translating batch 1 of 1", "Applying image 1 of 1"],
+                list(dict.fromkeys(labels)),
+            )
+            self.assertEqual({"status": "completed", "progress": 100, "eta_seconds": 0}, entries[-1])
+            self.assertEqual({"status": "skipped"}, snapshots[-1]["other.png"])
+            self.assertTrue(all("eta_status" not in entry for entry in entries))
+
+    # Verifies FR-2026-10-23-02's eta_status property.
+    def test_unknown_eta_is_labelled_calculating_only_while_an_estimate_is_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            Image.new("RGB", (20, 20), "white").save(input_root / "source.png")
+            documents: list[dict[str, object]] = []
+            original_write = folder_processor._write_progress_file
+
+            def capture_progress(
+                progress_root: Path,
+                progress: int,
+                eta_seconds: float | None,
+                entries: folder_processor.ProgressEntries,
+                eta_status: str | None = None,
+            ) -> None:
+                original_write(progress_root, progress, eta_seconds, entries, eta_status)
+                documents.append(json.loads((progress_root / "progress.json").read_text(encoding="utf-8")))
+
+            # The estimate is unknown, known, then unknown again, as Rich reports when timing is poor.
+            display = _EtaLiveProgress([None, 12.5, None, 0.0])
+            with (
+                patch.object(folder_processor, "_write_progress_file", side_effect=capture_progress),
+                patch("pipeline.folder_replacement.processor.LiveProgress", return_value=display),
+            ):
+                self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(),
+                    show_progress=True,
+                )
+
+            for document in documents:
+                top_level_known = document["eta_seconds"] is not None
+                self.assertEqual(not top_level_known, document.get("eta_status") == "Calculating")
+                for entry in cast(dict[str, dict[str, object]], document["files"]).values():
+                    if "eta_seconds" in entry:
+                        self.assertEqual(
+                            entry["eta_seconds"] is None, entry.get("eta_status") == "Calculating"
+                        )
+                    else:
+                        self.assertNotIn("eta_status", entry)
+            processing = [
+                cast(dict[str, dict[str, object]], document["files"])["source.png"]
+                for document in documents
+                if cast(dict[str, dict[str, object]], document["files"])["source.png"]["status"]
+                == "processing"
+            ]
+            self.assertIn("Calculating", [entry.get("eta_status") for entry in processing])
+            self.assertIn(12.5, [entry["eta_seconds"] for entry in processing])
+            self.assertEqual(
+                {"status": "completed", "progress": 100, "eta_seconds": 0},
+                cast(dict[str, dict[str, object]], documents[-1]["files"])["source.png"],
             )
 
     # Verifies FR-2026-08-03-04.
@@ -702,6 +815,58 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             )
             self.assertFalse(any(not request.is_filename for request in provider.requests))
             self.assertIn("broken.png", failure_output.getvalue())
+
+class _EtaLiveProgress:
+    """A stand-in for the Rich display whose Current ETA follows a fixed script."""
+
+    def __init__(self, current_etas: list[float | None]) -> None:
+        self._current_etas = current_etas
+        self._reads = 0
+
+    def __enter__(self) -> "_EtaLiveProgress":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+    def start_overall(self, _total: int, _unit: str) -> None:
+        return None
+
+    def start_current(self, _name: str, _total: int, _unit: str) -> "_EtaLiveProgress":
+        return self
+
+    def set_postfix_str(self, _label: str) -> None:
+        return None
+
+    def update(self) -> None:
+        return None
+
+    def set_overall_from_current(self, _completed_sources: int) -> None:
+        return None
+
+    def complete_overall_source(self, _completed_sources: int) -> None:
+        return None
+
+    def overall_state(self) -> tuple[int, float | None]:
+        return 0, None
+
+    def clear_current(self) -> None:
+        return None
+
+    def current_state(self) -> tuple[int, float | None]:
+        eta = self._current_etas[min(self._reads, len(self._current_etas) - 1)]
+        self._reads += 1
+        return 0, eta
+
+    def start_nested(self, name: str, total: int, unit: str = "stage") -> None:
+        return None
+
+    def advance_nested(self, label: str) -> None:
+        return None
+
+    def clear_nested(self) -> None:
+        return None
+
 
 def _transparent_paletted_png() -> bytes:
     """Create a synthetic indexed PNG with transparent and opaque palette entries."""
