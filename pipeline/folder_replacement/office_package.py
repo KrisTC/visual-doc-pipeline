@@ -28,7 +28,7 @@ from pipeline.folder_replacement.failure_diagnostics import FailureContext
 from pipeline.folder_replacement.planning import child_unit_id, enter_nested
 from pipeline.folder_replacement.vector import VectorPlan, apply_vector, plan_vector
 from pipeline.ocr import OcrProvider
-from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.text_replacement import TextReplacementItem, TextUnit
 from pipeline.vector_text import VectorReplacementResult
 
@@ -80,11 +80,13 @@ def plan_office_media(
     document_text_layout: str = "preserve-source-formatting",
     nested_progress: NestedProgressReporter | None = None,
     failure_context: FailureContext | None = None,
+    ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND,
 ) -> OfficeMediaPlan | None:
     """Plan one media part as a nested unit, or None when it is too deep to process.
 
     ``depth`` is the parent document's depth below the root file. ``media_number`` counts
     bitmaps and vector graphics separately, from 1, so unit ids stay stable.
+    ``ocr_background`` is the colour a bitmap is read against, such as a Word page colour.
     """
     child_depth = enter_nested(depth, part, diagnostics)
     if child_depth is None:
@@ -106,7 +108,7 @@ def plan_office_media(
                 ocr,
                 source_language,
                 unit_id=child_unit_id(parent_unit_id, f"image-{media_number}"),
-                ocr_background=DEFAULT_OCR_BACKGROUND,
+                ocr_background=ocr_background,
                 nested_completed=None if nested_progress is None else nested_progress.advance_nested,
             )
         finally:

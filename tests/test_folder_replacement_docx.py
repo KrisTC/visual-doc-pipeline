@@ -276,10 +276,11 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
                 lambda _label: None,
                 nested_progress=nested_progress,
             )
-            self.assertEqual(1, len(nested_progress.started))
-            self.assertTrue(nested_progress.started[0][0].startswith("chart1.xml: chart.xlsx"))
-            self.assertEqual(4, nested_progress.started[0][1])
-            self.assertEqual("work item", nested_progress.started[0][2])
+            self.assertEqual(2, len(nested_progress.started))
+            for started in nested_progress.started:
+                self.assertTrue(started[0].startswith("chart1.xml: chart.xlsx"))
+                self.assertEqual(2, started[1])
+                self.assertEqual("work item", started[2])
             self.assertEqual(
                 [
                     "Planning part 1 of 2",
@@ -289,7 +290,7 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
                 ],
                 nested_progress.advanced,
             )
-            self.assertEqual(1, nested_progress.cleared)
+            self.assertEqual(2, nested_progress.cleared)
 
     # Verifies FR-2026-08-27-01.
     def test_uses_a_direct_document_background_for_embedded_word_image_ocr(self) -> None:
@@ -1023,10 +1024,9 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
             self.assertEqual(["ValueError"], entry["exception_cause_types"])
             self.assertEqual(
                 {
-                    "stage": "native_xml",
-                    "container_kind": "office_xml",
+                    "stage": "docx_batch_translation",
+                    "container_kind": "docx_document",
                     "operation": "text_replacement",
-                    "location": {"package_part": "word/document.xml"},
                     "request": {
                         "kind": "text_replacement",
                         "source_language": "en",

@@ -12,6 +12,7 @@ from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
     BoundedTextRun,
+    PortableTextUnsupportedError,
     SourceTypefaceReference,
     fit_explicit_noto_text_box,
     fitted_text_lines,
@@ -124,14 +125,19 @@ def measure_source_line(
     """Return the width and height of the source text laid out as one line at its own size.
 
     Uses the resolved source face when ``measure_source_fonts`` is set and the face is
-    usable, and the committed Noto face otherwise (FR-2026-08-27-02).
+    usable, and the committed Noto face otherwise (FR-2026-08-27-02).  Returns None when
+    no approved portable face covers the text, for example a legacy symbol-font bullet,
+    so the caller replaces it at its source size (FR-2026-10-22-12).
     """
     size_pixels = font.size_points * (4.0 / 3.0)
     box = _line_box(text, font, size_pixels * (len(text) + 2) * 2, size_pixels * 10)
-    measured = fit_explicit_noto_text_box(
-        box, noto_typefaces(), preserve_source_font_family=True,
-        measure_source_fonts=measure_source_fonts,
-    )
+    try:
+        measured = fit_explicit_noto_text_box(
+            box, noto_typefaces(), preserve_source_font_family=True,
+            measure_source_fonts=measure_source_fonts,
+        )
+    except PortableTextUnsupportedError:
+        return None
     lines = fitted_text_lines(measured)
     if len(lines) != 1 or measured.font_scale != 1.0:
         return None
@@ -161,17 +167,21 @@ def translate_and_fit_line(
     application's metrics are known; a narrower layout face then reduces the factor.
     ``height_pixels`` is None when the height is only a measurement of the source line,
     so the width alone limits the factor.
-    Returns None when the replacement is not one line in one run.
+    Returns None when the replacement is not one line in one run, or when no approved
+    portable face covers the source or replacement text.
     """
-    fitted = replace_and_fit_text_box(
-        _line_box(
-            source_text, font, width_pixels,
-            font.size_points * (4.0 / 3.0) * 10 if height_pixels is None else height_pixels,
-        ),
-        provider, source_language, target_language, noto_typefaces(),
-        preserve_source_font_family=preserve_source_font_family,
-        measure_source_fonts=measure_source_fonts,
-    )
+    try:
+        fitted = replace_and_fit_text_box(
+            _line_box(
+                source_text, font, width_pixels,
+                font.size_points * (4.0 / 3.0) * 10 if height_pixels is None else height_pixels,
+            ),
+            provider, source_language, target_language, noto_typefaces(),
+            preserve_source_font_family=preserve_source_font_family,
+            measure_source_fonts=measure_source_fonts,
+        )
+    except PortableTextUnsupportedError:
+        return None
     runs = fitted.text_box.paragraphs[0].runs
     replacement = "".join(run.text for run in runs)
     if len(runs) != 1 or any(character in replacement for character in "\r\n\v"):

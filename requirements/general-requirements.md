@@ -118,9 +118,26 @@ with a complete new JSON file. It shall not hold an exclusive lock while work
 is in progress. Readers may therefore read either the previous complete JSON
 document or the replacement complete JSON document.
 
+Publishing a progress snapshot shall tolerate transient local file locks, such
+as endpoint-security software or a monitoring reader briefly holding
+`progress.json` or its temporary file open. When writing or replacing the file
+fails with an operating-system error, the command shall retry the whole snapshot
+using bounded exponential backoff with jitter for no more than 5 seconds in
+total, with delays that increase up to approximately 1 second. A snapshot that
+still fails after that period shall be skipped, and the command shall continue
+processing. A later snapshot supersedes a skipped one. The command shall write
+one warning to standard error for the run, naming the progress file, the elapsed
+retry duration and the underlying operating-system error, and noting that
+another process, such as endpoint-security software, may be holding the file
+open. This applies equally to the initial snapshot. A progress-file failure
+shall never be reported as a failure of the source file being processed.
+
 Automated tests shall use synthetic files and verify the initial queued and
 skipped entries, processing updates, completed and failed entries, and that
-every observed progress-file write is valid JSON.
+every observed progress-file write is valid JSON. They shall also verify, with a
+mocked clock and sleep, success after a transient failure, the 5-second limit,
+the single warning, and that processing and its result continue after a skipped
+snapshot.
 
 ---
 

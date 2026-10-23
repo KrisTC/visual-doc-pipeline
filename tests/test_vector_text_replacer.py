@@ -120,6 +120,33 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual(1, result.data.count(b"font-size:"))
         self.assertEqual(8, result.replaced_text_items)
 
+    # Verifies FR-2026-10-22-12: a legacy symbol-font bullet has no approved portable face.
+    def test_svg_text_no_portable_face_covers_is_replaced_at_its_source_size(self) -> None:
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout):
+                result = replace_vector_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg">'
+                    '<text font-family="Wingdings" font-size="32">\uf06e</text>'
+                    '<text font-size="20">free</text></svg>'.encode(),
+                    ".svg", _mask, "en", document_text_layout=layout,
+                    replacement_provider=_LongReplacementProvider(), target_language="en",
+                )
+
+                bullet, free = _svg_texts(result.data)
+                self.assertEqual("#", bullet.text)
+                self.assertNotIn("font-size", bullet.get("style", ""))
+                self.assertEqual("A considerably longer heading", free.text)
+                self.assertEqual(2, result.replaced_text_items)
+
+    # Verifies FR-2026-10-22-12.
+    def test_measuring_text_no_portable_face_covers_reports_it_as_unmeasurable(self) -> None:
+        from pipeline.vector_text.common import SourceLineFont, measure_source_line
+
+        font = SourceLineFont("Wingdings", 24.0, False, False)
+
+        self.assertIsNone(measure_source_line("\uf06e", font, measure_source_fonts=False))
+        self.assertIsNotNone(measure_source_line("abc", font, measure_source_fonts=False))
+
     # Verifies FR-2026-10-22-11 and FR-2026-10-22-12: overflow stays translated.
     def test_svg_text_that_cannot_fit_is_still_translated(self) -> None:
         class _Huge:

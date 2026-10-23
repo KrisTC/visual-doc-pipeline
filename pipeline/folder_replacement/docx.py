@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import posixpath
 import re
 import unicodedata
 from uuid import NAMESPACE_URL, UUID, uuid5
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 import xml.etree.ElementTree as ElementTree
 
 import skia  # type: ignore[import-not-found]
@@ -23,21 +23,52 @@ from pipeline.bounded_text_layout import (
     SourceTypefaceReference,
     noto_typefaces,
     replace_and_fit_text_box,
+    replace_paragraphs,
 )
 from pipeline.pptx_theme_fonts import PptxThemeFonts, theme_fonts_from_xml
 from pipeline.folder_replacement.office_xml import (
     _namespace_bindings,
     _serialize_with_compatibility_bindings,
+    office_xml_texts,
+    replace_office_xml_text,
 )
 from pipeline.folder_replacement.failure_diagnostics import FailureContext
-from pipeline.folder_replacement.common import NestedProgressReporter
-from pipeline.folder_replacement.planning import PhaseProgress
-from pipeline.folder_replacement.xlsx import replace_xlsx_bytes, xlsx_work_item_total
+from pipeline.folder_replacement.common import NestedProgressReporter, is_office_bitmap_part
+from pipeline.folder_replacement.office_package import (
+    OfficeMediaPlan,
+    apply_office_media,
+    is_office_media_part,
+    plan_office_media,
+)
+from pipeline.folder_replacement.planning import (
+    LookupProvider,
+    PhaseProgress,
+    WorkTicker,
+    child_unit_id,
+    enter_nested,
+    plan_and_apply,
+)
+from pipeline.folder_replacement.xlsx import (
+    XlsxPlan,
+    XlsxResult,
+    apply_xlsx,
+    plan_xlsx,
+    xlsx_work_item_total,
+)
 from pipeline.ocr import OcrProvider
-from pipeline.ocr.image_preparation import RgbColour
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.portable_fonts import optional_static_typefaces, static_noto_bytes, static_noto_font
-from pipeline.text_replacement import TextReplacementProvider, replace_text
+from pipeline.text_replacement import (
+    TextReplacementItem,
+    TextReplacementProvider,
+    TextReplacementRequest,
+    TextReplacementResult,
+    TextUnit,
+    TranslationEngine,
+    replace_text,
+)
 from pipeline.text_replacement.errors import TextReplacementProviderError
+from pipeline.vector_text import VectorReplacementResult
 
 
 _W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -88,87 +119,466 @@ def _nested_phase_progress(nested_progress: NestedProgressReporter) -> PhaseProg
     )
 
 
-def replace_docx_file(
-    source: Path, destination: Path, ocr: OcrProvider, replacement: TextReplacementProvider,
-    source_language: str, target_language: str, typeface: skia.Typeface,
-    completed: Callable[[str], None], document_text_layout: str = "preserve-source-formatting",
-    failure_context: FailureContext | None = None,
+DOCX_UNIT_ID = "docx"
+_DOCX_NESTED_WORKBOOK_MODE = "fast"
+_SOURCE_FORMATTING_LAYOUT = "preserve-source-formatting"
+
+
+class _ListingProvider:
+    """Record each requested text and return it unchanged, so planning sends nothing."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+        self.texts.extend(request.texts)
+        return TextReplacementResult(
+            tuple(TextReplacementItem(text, 1.0) for text in request.texts)
+        )
+
+
+@dataclass(slots=True)
+class _DocxChartPlan:
+    """A chart reachable from the document, and the embedded workbook it reads."""
+
+    part: str
+    workbook_part: str | None = None
+
+
+@dataclass(slots=True)
+class DocxPlan:
+    """A parsed Word package with its own texts and its nested documents' plans.
+
+    ``texts`` is the document's own unit: every text the apply step requests from a Word
+    part, a chart's rich text or user shapes, or a generic XML part. Each embedded image
+    and vector graphic is a nested unit of this one, and so is each chart workbook.
+    """
+
+    entries: list[tuple[ZipInfo, bytes]]
+    layout: str
+    source_language: str
+    target_language: str
+    texts: tuple[str, ...]
+    media: list[OfficeMediaPlan]
+    charts: list[_DocxChartPlan]
+    workbooks: dict[str, XlsxPlan]
+    unit_id: str = DOCX_UNIT_ID
+
+    @property
+    def parts(self) -> dict[str, bytes]:
+        return {entry.filename: payload for entry, payload in self.entries}
+
+    def units(self) -> Iterator[TextUnit]:
+        """Yield the document's own unit, then its media's units, then its workbooks'."""
+        yield TextUnit(self.unit_id, self.texts)
+        for media in self.media:
+            yield from media.units()
+        for workbook in self.workbooks.values():
+            yield from workbook.units()
+
+
+@dataclass(slots=True)
+class DocxResult:
+    """The translated Word package and what was replaced in it."""
+
+    data: bytes
+    native_items: int = 0
+    image_regions: int = 0
+    vector_results: list[tuple[str, VectorReplacementResult]] = field(default_factory=list)
+
+    @property
+    def retained_vectors(self) -> int:
+        return sum(
+            not result.has_editable_text and not result.has_embedded_bitmaps
+            for _part, result in self.vector_results
+        )
+
+
+def _docx_text_parts(names: Iterable[str]) -> list[str]:
+    """Return the XML parts whose text is a plan and apply work item, in package order."""
+    return [name for name in names if name.endswith(".xml")]
+
+
+def _docx_media_parts(names: Iterable[str]) -> list[str]:
+    return [name for name in names if is_office_media_part(name)]
+
+
+def docx_work_item_total(names: Iterable[str]) -> int:
+    """Return how many items the plan step, and again the apply step, advance through.
+
+    The count comes from part names alone, so a source's progress total is known before
+    anything is parsed.
+    """
+    names = tuple(names)
+    return len(_docx_text_parts(names)) + len(_docx_media_parts(names))
+
+
+def plan_docx(
+    data: bytes,
+    ocr: OcrProvider | None,
+    source_language: str,
+    target_language: str,
+    *,
+    document_text_layout: str = _SOURCE_FORMATTING_LAYOUT,
+    unit_id: str = DOCX_UNIT_ID,
+    depth: int = 0,
     diagnostics: list[dict[str, object]] | None = None,
+    progress: PhaseProgress | None = None,
     nested_progress: NestedProgressReporter | None = None,
-    xlsx_translation_mode: str = "full",
-) -> tuple[int, int, int]:
-    """Fit Word DrawingML text boxes while retaining ordinary flow text behaviour."""
-    from pipeline.folder_replacement.processor import _replace_office_file
+    failure_context: FailureContext | None = None,
+) -> DocxPlan:
+    """List the document's texts and plan its media and chart workbooks; no provider is called.
+
+    ``ocr`` is None when media must be left unchanged. ``depth`` is how many documents
+    deep this document sits below the root file.
+    """
     if failure_context is not None:
         failure_context.set_location(
             stage="docx_background_detection",
             container_kind="docx_document",
             operation="read",
         )
-    ocr_backgrounds = _docx_ocr_backgrounds(source)
-    if document_text_layout == "preserve-source-formatting":
-        native, images, vectors = _replace_office_file(
-            source, destination, ocr, replacement, source_language, target_language, typeface,
-            completed,
-            document_text_layout=document_text_layout,
-            skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
-            ocr_backgrounds=ocr_backgrounds,
-            failure_context=failure_context,
-            nested_progress=nested_progress,
-            diagnostics=diagnostics,
+    with ZipFile(BytesIO(data)) as archive:
+        entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
+    parts = {entry.filename: payload for entry, payload in entries}
+    names = tuple(parts)
+    background = _docx_background_colour(parts.get("word/document.xml")) or DEFAULT_OCR_BACKGROUND
+    text_parts = frozenset(_docx_text_parts(names))
+    media_parts = frozenset(_docx_media_parts(names))
+    chart_parts = frozenset(_reachable_docx_chart_parts(parts))
+    total = len(text_parts) + len(media_parts)
+    position = 0
+
+    def advance(noun: str) -> None:
+        nonlocal position
+        position += 1
+        if progress is not None:
+            progress.plan_item(position, total, noun)
+
+    source_formatting = document_text_layout == _SOURCE_FORMATTING_LAYOUT
+    font_resolver = _DocxFontResolver.from_parts(parts)
+    emphasis_resolver = _DocxEmphasisResolver.from_parts(parts)
+    listing = _ListingProvider()
+    charts: list[_DocxChartPlan] = []
+    workbooks: dict[str, XlsxPlan] = {}
+    media: list[OfficeMediaPlan] = []
+    bitmap_number = vector_number = 0
+    for name in names:
+        if name in text_parts:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="docx_plan",
+                    container_kind="docx_package_part",
+                    operation="plan",
+                    package_part=name,
+                )
+            if not name.startswith("word/"):
+                listing.texts.extend(office_xml_texts(parts[name]))
+            elif name in chart_parts:
+                charts.append(_plan_docx_chart(
+                    name, parts, listing, ocr, workbooks, source_language, target_language,
+                    document_text_layout, unit_id, depth, diagnostics, nested_progress,
+                ))
+            elif not name.startswith("word/charts/"):
+                _replace_docx_xml(
+                    parts[name], listing, source_language, target_language, {},
+                    False, font_resolver, emphasis_resolver,
+                    fit_textboxes=not source_formatting, diagnostics=None,
+                    package_part=name, document_text_layout=document_text_layout,
+                    list_only=True,
+                )
+            advance("part")
+        elif name in media_parts:
+            is_bitmap = is_office_bitmap_part(name)
+            if is_bitmap:
+                bitmap_number += 1
+            else:
+                vector_number += 1
+            if ocr is not None:
+                planned = plan_office_media(
+                    name, parts[name], ocr, source_language, target_language,
+                    parent_unit_id=unit_id,
+                    media_number=bitmap_number if is_bitmap else vector_number,
+                    depth=depth,
+                    diagnostics=diagnostics,
+                    document_text_layout=document_text_layout,
+                    nested_progress=nested_progress,
+                    failure_context=failure_context,
+                    ocr_background=background,
+                )
+                if planned is not None:
+                    media.append(planned)
+            advance("image" if is_bitmap else "vector graphic")
+    if failure_context is not None:
+        # A batch spans many parts, so a translation failure names none of them.
+        failure_context.set_location(
+            stage="docx_batch_translation",
+            container_kind="docx_document",
+            operation="text_replacement",
         )
-        native += _replace_docx_parts(
-            destination, replacement, source_language, target_language, False, failure_context,
-            source_formatting=True, fit_textboxes=False,
-            diagnostics=diagnostics, document_text_layout=document_text_layout,
-            completed=completed, nested_progress=nested_progress,
-            xlsx_translation_mode=xlsx_translation_mode, ocr=ocr, typeface=typeface,
-        )
-        completed("package write")
-        return native, images, vectors
-    native, images, vectors = _replace_office_file(
-        source, destination, ocr, replacement, source_language, target_language, typeface,
-        completed,
-        document_text_layout=document_text_layout,
-        skip_native_xml_part=lambda name: name.startswith("word/") and name.endswith(".xml"),
-        ocr_backgrounds=ocr_backgrounds,
-        failure_context=failure_context,
-        nested_progress=nested_progress,
-        diagnostics=diagnostics,
+    return DocxPlan(
+        entries, document_text_layout, source_language, target_language,
+        tuple(listing.texts), media, charts, workbooks, unit_id,
     )
-    native += _replace_docx_parts(destination, replacement, source_language, target_language,
-        document_text_layout == "preserve-basic-layout-source-font", failure_context,
-        diagnostics=diagnostics, document_text_layout=document_text_layout,
-        completed=completed, nested_progress=nested_progress,
-        xlsx_translation_mode=xlsx_translation_mode, ocr=ocr, typeface=typeface)
-    if document_text_layout == "preserve-basic-layout":
+
+
+def _plan_docx_chart(
+    chart_part: str,
+    parts: dict[str, bytes],
+    listing: _ListingProvider,
+    ocr: OcrProvider | None,
+    workbooks: dict[str, XlsxPlan],
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    unit_id: str,
+    depth: int,
+    diagnostics: list[dict[str, object]] | None,
+    nested_progress: NestedProgressReporter | None,
+) -> _DocxChartPlan:
+    """List a chart's own texts and plan its embedded workbook as a nested document."""
+    chart_data = parts[chart_part]
+    _data, _count, chart_root = _replace_chart_rich_text(
+        chart_data, listing, source_language, target_language
+    )
+    if chart_root is None:
+        _chart_fallback(diagnostics, chart_part, "chart_xml_malformed")
+        return _DocxChartPlan(chart_part)
+    relationships = _part_relationships(parts, chart_part)
+    workbook_part = _chart_external_workbook_part(chart_root, relationships)
+    if workbook_part is not None:
+        if workbook_part not in workbooks:
+            workbook = _plan_chart_workbook(
+                chart_part, workbook_part, chart_root, parts, ocr, len(workbooks) + 1,
+                source_language, target_language, document_text_layout, unit_id, depth,
+                diagnostics, nested_progress,
+            )
+            if workbook is not None:
+                workbooks[workbook_part] = workbook
+    elif chart_root.find("c:externalData", _NS) is not None:
+        _chart_fallback(diagnostics, chart_part, "embedded_workbook_relationship_unresolved")
+    for relationship_type, user_shape_part in relationships.values():
+        if not relationship_type.endswith("/chartUserShapes"):
+            continue
+        user_shape_data = parts.get(user_shape_part)
+        if user_shape_data is None:
+            _chart_fallback(diagnostics, chart_part, "chart_user_shape_unresolved")
+            continue
+        try:
+            ElementTree.fromstring(user_shape_data)
+        except ElementTree.ParseError:
+            _chart_fallback(diagnostics, user_shape_part, "chart_user_shape_xml_malformed")
+        else:
+            _replace_chart_user_shape_text(
+                user_shape_data, listing, source_language, target_language
+            )
+    return _DocxChartPlan(chart_part, workbook_part)
+
+
+def _plan_chart_workbook(
+    chart_part: str,
+    workbook_part: str,
+    chart_root: ElementTree.Element,
+    parts: dict[str, bytes],
+    ocr: OcrProvider | None,
+    workbook_number: int,
+    source_language: str,
+    target_language: str,
+    document_text_layout: str,
+    unit_id: str,
+    depth: int,
+    diagnostics: list[dict[str, object]] | None,
+    nested_progress: NestedProgressReporter | None,
+) -> XlsxPlan | None:
+    """Plan a chart's workbook, or None when it is too deep or cannot be read."""
+    child_depth = enter_nested(depth, workbook_part, diagnostics)
+    if child_depth is None:
+        return None
+    row = False
+    try:
+        with ZipFile(BytesIO(parts[workbook_part])) as workbook_archive:
+            item_total = xlsx_work_item_total(
+                workbook_archive.namelist(), document_text_layout, _DOCX_NESTED_WORKBOOK_MODE
+            )
+        row = nested_progress is not None and item_total > 0
+        if nested_progress is not None and row:
+            nested_progress.start_nested(
+                f"{Path(chart_part).name}: {Path(workbook_part).name}", item_total, "work item"
+            )
+        return plan_xlsx(
+            parts[workbook_part], ocr, source_language, target_language,
+            document_text_layout=document_text_layout,
+            xlsx_translation_mode=_DOCX_NESTED_WORKBOOK_MODE,
+            fast_chart_formulae=_chart_displayed_string_formulae(chart_root),
+            unit_id=child_unit_id(unit_id, f"chart-{workbook_number}"),
+            depth=child_depth,
+            diagnostics=diagnostics,
+            progress=(
+                _nested_phase_progress(nested_progress)
+                if nested_progress is not None and row
+                else None
+            ),
+        )
+    except (BadZipFile, ElementTree.ParseError, ValueError, RuntimeError):
+        _chart_fallback(diagnostics, chart_part, "embedded_workbook_processing_failed")
+        return None
+    finally:
+        if nested_progress is not None and row:
+            nested_progress.clear_nested()
+
+
+def apply_docx(
+    plan: DocxPlan,
+    translate: Callable[[str], TextReplacementItem],
+    typeface: skia.Typeface | None,
+    *,
+    progress: PhaseProgress | None = None,
+    failure_context: FailureContext | None = None,
+    diagnostics: list[dict[str, object]] | None = None,
+    nested_progress: NestedProgressReporter | None = None,
+) -> DocxResult:
+    """Write the engine's translations into the package and return the new document.
+
+    Output is identical to translating each text with its own provider call. Text boxes
+    are still fitted here, from the translated text.
+    """
+    parts = plan.parts
+    names = tuple(parts)
+    layout = plan.layout
+    source_language, target_language = plan.source_language, plan.target_language
+    source_formatting = layout == _SOURCE_FORMATTING_LAYOUT
+    provider = LookupProvider(translate)
+    text_parts = _docx_text_parts(names)
+    media_parts = _docx_media_parts(names)
+    media_by_part = {item.part: item for item in plan.media}
+    ticker = WorkTicker(
+        (*text_parts, *media_parts),
+        None if progress is None else lambda position, total, noun: progress.apply_item(position, total, noun),
+    )
+    changed: dict[str, bytes] = {}
+    native_items = image_regions = 0
+    vector_results: list[tuple[str, VectorReplacementResult]] = []
+    for name in names:
+        if name in media_parts:
+            planned = media_by_part.get(name)
+            if planned is not None:
+                if typeface is None:
+                    message = "A typeface is required to render a document's planned media."
+                    raise ValueError(message)
+                if failure_context is not None:
+                    failure_context.set_location(
+                        stage="embedded_bitmap" if is_office_bitmap_part(name) else "embedded_vector",
+                        container_kind="embedded_bitmap" if is_office_bitmap_part(name) else "embedded_vector",
+                        operation="render" if is_office_bitmap_part(name) else "text_replacement",
+                        package_part=name,
+                    )
+                outcome = apply_office_media(planned, translate, typeface, target_language)
+                changed[name] = outcome.data
+                native_items += outcome.native_items
+                image_regions += outcome.image_regions
+                if outcome.vector_result is not None:
+                    vector_results.append((name, outcome.vector_result))
+            ticker.tick(name, "image" if is_office_bitmap_part(name) else "vector graphic")
+        elif name in text_parts and not name.startswith("word/"):
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage="native_xml",
+                    container_kind="office_xml",
+                    operation="text_replacement",
+                    package_part=name,
+                )
+            updated, count = replace_office_xml_text(
+                parts[name], provider, source_language, target_language
+            )
+            if count:
+                changed[name] = updated
+                native_items += count
+            ticker.tick(name, "part")
+    if failure_context is not None:
+        failure_context.set_location(
+            stage="native_xml" if source_formatting else "docx_fitted_layout_read",
+            container_kind="office_xml" if source_formatting else "docx_document",
+            operation="read",
+        )
+    faces = noto_typefaces()
+    font_resolver = _DocxFontResolver.from_parts(parts)
+    emphasis_resolver = _DocxEmphasisResolver.from_parts(parts)
+    for name in text_parts:
+        if not name.startswith("word/") or name.startswith("word/charts/"):
+            continue
+        if failure_context is not None:
+            failure_context.set_location(
+                stage="native_xml" if source_formatting else "docx_fitted_layout",
+                container_kind="office_xml" if source_formatting else "docx_xml",
+                operation="text_replacement",
+                package_part=name,
+            )
+        updated, count = _replace_docx_xml(
+            parts[name], provider, source_language, target_language, faces,
+            layout == "preserve-basic-layout-source-font", font_resolver, emphasis_resolver,
+            fit_textboxes=not source_formatting, diagnostics=diagnostics,
+            package_part=name, document_text_layout=layout,
+        )
+        changed[name] = updated
+        native_items += count
+        ticker.tick(name, "part")
+    chart_changes, chart_items = _apply_docx_charts(
+        plan, parts, provider, translate, typeface, diagnostics, nested_progress,
+        lambda name: ticker.tick(name, "part"),
+    )
+    changed.update(chart_changes)
+    native_items += chart_items
+    for name in (*text_parts, *media_parts):
+        ticker.tick(name, "part")
+    package = _pack_docx(plan.entries, changed, source_formatting, failure_context)
+    if layout == "preserve-basic-layout":
         if failure_context is not None:
             failure_context.set_location(
                 stage="docx_font_embedding",
                 container_kind="docx_document",
                 operation="write",
             )
-        _embed_docx_static_fonts(destination)
-    completed("package write")
-    return native, images, vectors
+        package = _embed_docx_static_fonts(package)
+    return DocxResult(package, native_items, image_regions, vector_results)
 
 
-def _docx_ocr_backgrounds(source: Path) -> dict[str, RgbColour]:
-    """Return the direct document background for every embedded Word image."""
-    with ZipFile(source) as archive:
-        try:
-            document = ElementTree.fromstring(archive.read("word/document.xml"))
-        except (KeyError, ElementTree.ParseError):
-            return {}
-        background = document.find(_tag(_W, "background"))
-        colour = None if background is None else _rgb_value(background.get(_tag(_W, "color")))
-        if colour is None:
-            return {}
-        return {
-            name: colour
-            for name in archive.namelist()
-            if name.startswith("word/media/")
-        }
+def _pack_docx(
+    entries: Sequence[tuple[ZipInfo, bytes]],
+    changed: dict[str, bytes],
+    source_formatting: bool,
+    failure_context: FailureContext | None,
+) -> bytes:
+    stage = "office_package_write" if source_formatting else "docx_fitted_layout_write"
+    output = BytesIO()
+    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
+        for entry, payload in entries:
+            if failure_context is not None:
+                failure_context.set_location(
+                    stage=stage,
+                    container_kind="office_package_part" if source_formatting else "docx_package_part",
+                    operation="write",
+                    package_part=entry.filename,
+                )
+            archive.writestr(entry, changed.get(entry.filename, payload))
+    if failure_context is not None:
+        failure_context.set_location(
+            stage=stage,
+            container_kind="office_document" if source_formatting else "docx_document",
+            operation="write",
+        )
+    return output.getvalue()
+
+
+def _docx_background_colour(document_xml: bytes | None) -> RgbColour | None:
+    """Return the direct document background used as the colour behind embedded images."""
+    if document_xml is None:
+        return None
+    try:
+        document = ElementTree.fromstring(document_xml)
+    except ElementTree.ParseError:
+        return None
+    background = document.find(_tag(_W, "background"))
+    return None if background is None else _rgb_value(background.get(_tag(_W, "color")))
 
 
 def _rgb_value(value: str | None) -> RgbColour | None:
@@ -180,88 +590,54 @@ def _rgb_value(value: str | None) -> RgbColour | None:
         return None
 
 
-def _replace_docx_parts(
-    path: Path,
-    provider: TextReplacementProvider,
-    source: str,
-    target: str,
-    preserve_font: bool,
+def replace_docx_file(
+    source: Path, destination: Path, ocr: OcrProvider, replacement: TextReplacementProvider,
+    source_language: str, target_language: str, typeface: skia.Typeface,
+    completed: Callable[[str], None], document_text_layout: str = "preserve-source-formatting",
     failure_context: FailureContext | None = None,
-    *,
-    source_formatting: bool = False,
-    fit_textboxes: bool = True,
     diagnostics: list[dict[str, object]] | None = None,
-    document_text_layout: str = "preserve-source-formatting",
-    completed: Callable[[str], None] | None = None,
     nested_progress: NestedProgressReporter | None = None,
-    xlsx_translation_mode: str = "full",
-    ocr: OcrProvider | None = None,
-    typeface: skia.Typeface | None = None,
-) -> int:
-    if failure_context is not None:
-        failure_context.set_location(
-            stage="native_xml" if source_formatting else "docx_fitted_layout_read",
-            container_kind="office_xml" if source_formatting else "docx_document",
-            operation="read",
-        )
-    with ZipFile(path) as archive:
-        entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
-    changed: dict[str, bytes] = {}
-    count = 0
-    faces = noto_typefaces()
-    parts = {entry.filename: data for entry, data in entries}
-    font_resolver = _DocxFontResolver.from_parts(parts)
-    emphasis_resolver = _DocxEmphasisResolver.from_parts(parts)
-    for entry, data in entries:
-        if (
-            not entry.filename.startswith("word/")
-            or not entry.filename.endswith(".xml")
-            or entry.filename.startswith("word/charts/")
-        ):
-            continue
-        if failure_context is not None:
-            failure_context.set_location(
-                stage="native_xml" if source_formatting else "docx_fitted_layout",
-                container_kind="office_xml" if source_formatting else "docx_xml",
-                operation="text_replacement",
-                package_part=entry.filename,
-            )
-        updated, changed_count = _replace_docx_xml(
-            data, provider, source, target, faces, preserve_font, font_resolver, emphasis_resolver,
-            fit_textboxes=fit_textboxes, diagnostics=diagnostics,
-            package_part=entry.filename, document_text_layout=document_text_layout,
-        )
-        changed[entry.filename] = updated
-        count += changed_count
-    if completed is not None:
-        completed("native text layout")
-    chart_changes, chart_count = _replace_docx_charts(
-        parts, provider, source, target, document_text_layout, diagnostics, nested_progress,
-        xlsx_translation_mode, ocr, typeface,
+) -> tuple[int, int, int]:
+    """Plan, translate and apply one Word document with its own engine."""
+    progress = PhaseProgress(completed, lambda _label: None, lambda _extra: None)
+    plan = plan_docx(
+        source.read_bytes(), ocr, source_language, target_language,
+        document_text_layout=document_text_layout,
+        diagnostics=diagnostics,
+        progress=progress,
+        nested_progress=nested_progress,
+        failure_context=failure_context,
     )
-    changed.update(chart_changes)
-    count += chart_count
-    if completed is not None:
-        completed("chart cache synchronization")
-    output = BytesIO()
-    with ZipFile(output, "w", ZIP_DEFLATED) as archive:
-        for entry, data in entries:
-            if failure_context is not None:
-                failure_context.set_location(
-                    stage="office_package_write" if source_formatting else "docx_fitted_layout_write",
-                    container_kind="office_package_part" if source_formatting else "docx_package_part",
-                    operation="write",
-                    package_part=entry.filename,
-                )
-            archive.writestr(entry, changed.get(entry.filename, data))
-    if failure_context is not None:
-        failure_context.set_location(
-            stage="office_package_write" if source_formatting else "docx_fitted_layout_write",
-            container_kind="office_document" if source_formatting else "docx_document",
-            operation="write",
-        )
-    path.write_bytes(output.getvalue())
-    return count
+    engine = TranslationEngine(replacement, source_language, target_language)
+    result = plan_and_apply(
+        plan, engine,
+        lambda translate: apply_docx(
+            plan, translate, typeface,
+            progress=progress,
+            failure_context=failure_context,
+            diagnostics=diagnostics,
+            nested_progress=nested_progress,
+        ),
+        progress,
+    )
+    destination.write_bytes(result.data)
+    return result.native_items, result.image_regions, result.retained_vectors
+
+
+def _docx_ocr_backgrounds(source: Path) -> dict[str, RgbColour]:
+    """Return the direct document background for every embedded Word image."""
+    with ZipFile(source) as archive:
+        try:
+            colour = _docx_background_colour(archive.read("word/document.xml"))
+        except KeyError:
+            return {}
+        if colour is None:
+            return {}
+        return {
+            name: colour
+            for name in archive.namelist()
+            if name.startswith("word/media/")
+        }
 
 
 def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: str, target: str,
@@ -272,7 +648,14 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
     diagnostics: list[dict[str, object]] | None,
     package_part: str,
     document_text_layout: str,
+    list_only: bool = False,
 ) -> tuple[bytes, int]:
+    """Replace a Word part's text, or with ``list_only`` only request it.
+
+    Listing runs the same grouping as replacing, over a private parse that is never
+    written, so the plan and apply steps cannot disagree about which texts are needed.
+    A text box is not fitted when listing.
+    """
     try:
         root = ElementTree.fromstring(data)
     except ElementTree.ParseError:
@@ -286,6 +669,10 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
         if bounds is None or not any(run.text.strip() for paragraph in paragraphs for run in paragraph.runs):
             continue
         box = BoundedTextBox(*bounds, 0, 0, 0, 0, None, paragraphs)
+        if list_only:
+            replace_paragraphs(box, provider, source, target)
+            fitted_text.update(textbox.iter(_tag(_W, "t")))
+            continue
         fitted = replace_and_fit_text_box(box, provider, source, target, faces,
             preserve_source_font_family=preserve_font, measure_source_fonts=preserve_font)
         for element in textbox.iter(_tag(_W, "t")):
@@ -361,106 +748,112 @@ def _replace_docx_xml(data: bytes, provider: TextReplacementProvider, source: st
             continue
         text.text = _replace(text.text, provider, source, target)
         count += 1
+    if list_only:
+        return data, count
     return _serialize_with_compatibility_bindings(root, _namespace_bindings(data)), count
 
 
-def _replace_docx_charts(
+def _apply_docx_charts(
+    plan: DocxPlan,
     parts: dict[str, bytes],
     provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    document_text_layout: str,
+    translate: Callable[[str], TextReplacementItem],
+    typeface: skia.Typeface | None,
     diagnostics: list[dict[str, object]] | None,
     nested_progress: NestedProgressReporter | None,
-    xlsx_translation_mode: str,
-    ocr: OcrProvider | None,
-    typeface: skia.Typeface | None,
+    chart_completed: Callable[[str], None],
 ) -> tuple[dict[str, bytes], int]:
-    """Replace only chart content reachable through Word package relationships."""
+    """Replace the text of every planned chart, and apply its embedded workbook once."""
+    source_language, target_language = plan.source_language, plan.target_language
     changed: dict[str, bytes] = {}
     count = 0
-    processed_workbooks: dict[str, bytes] = {}
-    for chart_part in _reachable_docx_chart_parts(parts):
+    workbook_results: dict[str, XlsxResult] = {}
+    for chart in plan.charts:
+        chart_part = chart.part
         chart_data = parts[chart_part]
         updated, replaced, chart_root = _replace_chart_rich_text(
             chart_data, provider, source_language, target_language
         )
         if chart_root is None:
-            _chart_fallback(diagnostics, chart_part, "chart_xml_malformed")
+            chart_completed(chart_part)
             continue
         count += replaced
-        relationships = _part_relationships(parts, chart_part)
-        workbook_part = _chart_external_workbook_part(chart_root, relationships)
+        workbook_part = chart.workbook_part
         if workbook_part is not None:
-            workbook_data = processed_workbooks.get(workbook_part)
-            if workbook_data is None:
-                try:
-                    chart_formulae = _chart_displayed_string_formulae(chart_root)
-                    with ZipFile(BytesIO(parts[workbook_part])) as workbook_archive:
-                        request_total = 2 * xlsx_work_item_total(
-                            workbook_archive.namelist(), document_text_layout, "fast"
-                        )
-                    if nested_progress is not None:
-                        if request_total:
-                            nested_progress.start_nested(
-                                f"{Path(chart_part).name}: {Path(workbook_part).name}",
-                                request_total,
-                                "work item",
-                            )
-                    workbook_data, workbook_count = replace_xlsx_bytes(
-                        parts[workbook_part], provider, source_language, target_language,
-                        document_text_layout,
-                        progress=(
-                            None
-                            if nested_progress is None or not request_total
-                            else _nested_phase_progress(nested_progress)
-                        ),
-                        xlsx_translation_mode="fast",
-                        fast_chart_formulae=chart_formulae,
-                        ocr=ocr,
-                        typeface=typeface,
-                        diagnostics=diagnostics,
-                    )
-                except TextReplacementProviderError:
-                    raise
-                except (BadZipFile, ElementTree.ParseError, ValueError, RuntimeError):
-                    _chart_fallback(diagnostics, chart_part, "embedded_workbook_processing_failed")
-                else:
-                    processed_workbooks[workbook_part] = workbook_data
-                    changed[workbook_part] = workbook_data
-                    count += workbook_count
-                finally:
-                    if nested_progress is not None and request_total:
-                        nested_progress.clear_nested()
-            if workbook_data is not None:
-                if not _update_chart_string_caches(chart_root, workbook_data):
+            workbook_result = workbook_results.get(workbook_part)
+            workbook_plan = plan.workbooks.get(workbook_part)
+            if workbook_result is None and workbook_plan is not None:
+                workbook_result = _apply_chart_workbook(
+                    chart_part, workbook_part, workbook_plan, translate, typeface,
+                    diagnostics, nested_progress,
+                )
+                if workbook_result is not None:
+                    workbook_results[workbook_part] = workbook_result
+                    changed[workbook_part] = workbook_result.data
+                    count += workbook_result.native_items
+            if workbook_result is not None:
+                if not _update_chart_string_caches(chart_root, workbook_result.data):
                     _chart_fallback(diagnostics, chart_part, "chart_string_cache_unresolved")
                 updated = _serialize_with_compatibility_bindings(
                     chart_root, _namespace_bindings(chart_data)
                 )
-        elif chart_root.find("c:externalData", _NS) is not None:
-            _chart_fallback(diagnostics, chart_part, "embedded_workbook_relationship_unresolved")
         if updated != chart_data:
             changed[chart_part] = updated
+        relationships = _part_relationships(parts, chart_part)
         for relationship_type, user_shape_part in relationships.values():
             if not relationship_type.endswith("/chartUserShapes"):
                 continue
             user_shape_data = parts.get(user_shape_part)
             if user_shape_data is None:
-                _chart_fallback(diagnostics, chart_part, "chart_user_shape_unresolved")
                 continue
             user_shape_updated, user_shape_count = _replace_chart_user_shape_text(
                 user_shape_data, provider, source_language, target_language
             )
-            if user_shape_updated == user_shape_data and user_shape_count == 0:
-                try:
-                    ElementTree.fromstring(user_shape_data)
-                except ElementTree.ParseError:
-                    _chart_fallback(diagnostics, user_shape_part, "chart_user_shape_xml_malformed")
-            else:
+            if user_shape_count:
                 changed[user_shape_part] = user_shape_updated
                 count += user_shape_count
+        chart_completed(chart_part)
     return changed, count
+
+
+def _apply_chart_workbook(
+    chart_part: str,
+    workbook_part: str,
+    workbook_plan: XlsxPlan,
+    translate: Callable[[str], TextReplacementItem],
+    typeface: skia.Typeface | None,
+    diagnostics: list[dict[str, object]] | None,
+    nested_progress: NestedProgressReporter | None,
+) -> XlsxResult | None:
+    """Apply a chart's workbook, or None when it cannot be written."""
+    row = False
+    try:
+        item_total = xlsx_work_item_total(
+            [entry.filename for entry, _payload in workbook_plan.entries],
+            workbook_plan.layout,
+            workbook_plan.mode,
+        )
+        row = nested_progress is not None and item_total > 0
+        if nested_progress is not None and row:
+            nested_progress.start_nested(
+                f"{Path(chart_part).name}: {Path(workbook_part).name}", item_total, "work item"
+            )
+        return apply_xlsx(
+            workbook_plan, translate, typeface,
+            progress=(
+                _nested_phase_progress(nested_progress)
+                if nested_progress is not None and row
+                else None
+            ),
+        )
+    except TextReplacementProviderError:
+        raise
+    except (BadZipFile, ElementTree.ParseError, ValueError, RuntimeError):
+        _chart_fallback(diagnostics, chart_part, "embedded_workbook_processing_failed")
+        return None
+    finally:
+        if nested_progress is not None and row:
+            nested_progress.clear_nested()
 
 
 def _reachable_docx_chart_parts(parts: dict[str, bytes]) -> tuple[str, ...]:
@@ -1808,9 +2201,9 @@ def _tag(namespace: str, name: str) -> str:
     return f"{{{namespace}}}{name}"
 
 
-def _embed_docx_static_fonts(path: Path) -> None:
+def _embed_docx_static_fonts(package: bytes) -> bytes:
     """Add standard Word obfuscated-font parts for the static Noto faces."""
-    with ZipFile(path) as archive:
+    with ZipFile(BytesIO(package)) as archive:
         entries = [(entry, archive.read(entry.filename)) for entry in archive.infolist()]
     parts = {entry.filename: data for entry, data in entries}
     font_table_name = "word/fontTable.xml"
@@ -1873,7 +2266,7 @@ def _embed_docx_static_fonts(path: Path) -> None:
         for name, data in additions.items():
             if name not in seen:
                 archive.writestr(name, data)
-    path.write_bytes(output.getvalue())
+    return output.getvalue()
 
 
 def _xml_or_new(data: bytes | None, tag: str) -> ElementTree.Element:

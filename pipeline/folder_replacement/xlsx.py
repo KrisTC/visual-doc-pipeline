@@ -45,7 +45,12 @@ from pipeline.folder_replacement.office_package import (
     is_office_media_part,
     plan_office_media,
 )
-from pipeline.folder_replacement.planning import LookupProvider, PhaseProgress, plan_and_apply
+from pipeline.folder_replacement.planning import (
+    LookupProvider,
+    PhaseProgress,
+    WorkTicker,
+    plan_and_apply,
+)
 from pipeline.ocr import OcrProvider
 from pipeline.portable_fonts import static_noto_font
 from pipeline.text_replacement import (
@@ -141,25 +146,6 @@ class XlsxResult:
             not result.has_editable_text and not result.has_embedded_bitmaps
             for _part, result in self.vector_results
         )
-
-
-class _WorkTicker:
-    """Announce each work item once, by name, as ``position of total``."""
-
-    def __init__(
-        self, names: Sequence[str], announce: Callable[[int, int, str], None] | None
-    ) -> None:
-        self._names = frozenset(names)
-        self._total = len(names)
-        self._announce = announce
-        self._done: set[str] = set()
-
-    def tick(self, name: str, noun: str) -> None:
-        if name not in self._names or name in self._done:
-            return
-        self._done.add(name)
-        if self._announce is not None:
-            self._announce(len(self._done), self._total, noun)
 
 
 def _validate_xlsx_options(mode: str, layout: str) -> None:
@@ -356,7 +342,7 @@ def apply_xlsx(
     media_by_part = {item.part: item for item in plan.media}
     all_media = _xlsx_media_parts(names, mode)
     work_names = (*text_parts, *all_media)
-    ticker = _WorkTicker(
+    ticker = WorkTicker(
         work_names,
         None if progress is None else lambda position, total, noun: progress.apply_item(position, total, noun),
     )

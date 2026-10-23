@@ -7,7 +7,9 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import os
+import random
 import sys
+import time
 from time import perf_counter
 from typing import Protocol
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
@@ -33,10 +35,10 @@ from pipeline.terminal_progress import LiveProgress
 from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
 from pipeline.vector_text import VectorReplacementResult
 from pipeline.folder_replacement.office_xml import replace_office_xml_text
-from pipeline.folder_replacement.docx import replace_docx_file
+from pipeline.folder_replacement.docx import DocxResult, apply_docx, docx_work_item_total, plan_docx
 from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
 from pipeline.folder_replacement.pptx import replace_pptx_file
-from pipeline.folder_replacement.xlsx import apply_xlsx, plan_xlsx, xlsx_work_item_total
+from pipeline.folder_replacement.xlsx import XlsxResult, apply_xlsx, plan_xlsx, xlsx_work_item_total
 from pipeline.folder_replacement.bitmap import (
     apply_bitmap,
     plan_bitmap_file,
@@ -57,6 +59,21 @@ OFFICE_DOCUMENT_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
 DOCUMENT_EXTENSIONS = OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
 VECTOR_EXTENSIONS = frozenset({".emf", ".svg", ".wmf"})
 TEXT_REPLACEMENT_MINIMUM_CONFIDENCE = 0.65
+PROGRESS_WRITE_RETRY_SECONDS = 5.0
+PROGRESS_WRITE_INITIAL_DELAY_SECONDS = 0.05
+PROGRESS_WRITE_MAX_DELAY_SECONDS = 1.0
+
+
+class ProgressWriteError(OSError):
+    """A progress snapshot could not be written within the retry period."""
+
+    def __init__(self, path: Path, elapsed_seconds: float, cause: OSError) -> None:
+        super().__init__(
+            f"Could not write progress file {path} after {elapsed_seconds:.1f} seconds: {cause}. "
+            "Another process, such as endpoint-security software, may be holding the file open."
+        )
+        self.path = path
+        self.elapsed_seconds = elapsed_seconds
 
 
 class ProgressReporter(Protocol):
@@ -181,10 +198,20 @@ def replace_input_folder(
             )
             overall_eta_seconds = None
 
+    progress_warning_shown = False
+
     def publish_progress() -> None:
-        _write_progress_file(
-            output_root, overall_progress, overall_eta_seconds, progress_entries
-        )
+        # A progress snapshot is monitoring output: a lock that outlasts the retry
+        # period skips this snapshot, and the next one supersedes it.
+        nonlocal progress_warning_shown
+        try:
+            _write_progress_file(
+                output_root, overall_progress, overall_eta_seconds, progress_entries
+            )
+        except ProgressWriteError as error:
+            if not progress_warning_shown:
+                progress_warning_shown = True
+                print(f"Warning: {error} Progress updates continue to be attempted.", file=sys.stderr)
 
     publish_progress()
     try:
@@ -399,43 +426,60 @@ def replace_input_folder(
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
             else:
-                if extension == ".docx":
-                    native_items, image_regions, retained_vectors = replace_docx_file(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
-                        nested_progress=display,
-                        xlsx_translation_mode=xlsx_translation_mode,
-                    )
-                elif extension == ".xlsx":
+                if extension in {".docx", ".xlsx"}:
                     phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
-                    workbook_plan = plan_xlsx(
-                        source_path.read_bytes(),
-                        processing_ocr,
-                        source_language,
-                        target_language,
-                        document_text_layout=document_text_layout,
-                        xlsx_translation_mode=xlsx_translation_mode,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
-                        progress=phase_progress,
-                        nested_progress=display,
-                        failure_context=failure_context,
-                    )
-                    workbook_result = plan_and_apply(
-                        workbook_plan,
-                        TranslationEngine(processing_replacement, source_language, target_language),
-                        lambda translate: apply_xlsx(
-                            workbook_plan, translate, typeface,
-                            progress=phase_progress, failure_context=failure_context,
-                        ),
-                        phase_progress,
-                    )
-                    temporary_destination.write_bytes(workbook_result.data)
-                    native_items = workbook_result.native_items
-                    image_regions = workbook_result.image_regions
-                    retained_vectors = workbook_result.retained_vectors
-                    for media_part, media_vector in workbook_result.vector_results:
+                    engine = TranslationEngine(processing_replacement, source_language, target_language)
+                    office_diagnostics = document_diagnostics if diagnostics_enabled else None
+                    office_result: DocxResult | XlsxResult
+                    if extension == ".docx":
+                        document_plan = plan_docx(
+                            source_path.read_bytes(),
+                            processing_ocr,
+                            source_language,
+                            target_language,
+                            document_text_layout=document_text_layout,
+                            diagnostics=office_diagnostics,
+                            progress=phase_progress,
+                            nested_progress=display,
+                            failure_context=failure_context,
+                        )
+                        office_result = plan_and_apply(
+                            document_plan,
+                            engine,
+                            lambda translate: apply_docx(
+                                document_plan, translate, typeface,
+                                progress=phase_progress, failure_context=failure_context,
+                                diagnostics=office_diagnostics, nested_progress=display,
+                            ),
+                            phase_progress,
+                        )
+                    else:
+                        workbook_plan = plan_xlsx(
+                            source_path.read_bytes(),
+                            processing_ocr,
+                            source_language,
+                            target_language,
+                            document_text_layout=document_text_layout,
+                            xlsx_translation_mode=xlsx_translation_mode,
+                            diagnostics=office_diagnostics,
+                            progress=phase_progress,
+                            nested_progress=display,
+                            failure_context=failure_context,
+                        )
+                        office_result = plan_and_apply(
+                            workbook_plan,
+                            engine,
+                            lambda translate: apply_xlsx(
+                                workbook_plan, translate, typeface,
+                                progress=phase_progress, failure_context=failure_context,
+                            ),
+                            phase_progress,
+                        )
+                    temporary_destination.write_bytes(office_result.data)
+                    native_items = office_result.native_items
+                    image_regions = office_result.image_regions
+                    retained_vectors = office_result.retained_vectors
+                    for media_part, media_vector in office_result.vector_results:
                         if diagnostics_enabled:
                             append_vector_diagnostics(document_diagnostics, media_vector, media_part)
                         if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
@@ -532,10 +576,13 @@ def _write_progress_file(
     eta_seconds: float | None,
     entries: ProgressEntries,
 ) -> None:
-    """Atomically publish a complete machine-readable folder-progress snapshot."""
+    """Atomically publish a complete machine-readable folder-progress snapshot.
+
+    Raises ``ProgressWriteError`` if the file stays unwritable for the retry period.
+    """
     progress_path = output_root / "progress.json"
     temporary_path = progress_path.with_name(f".{progress_path.name}.tmp")
-    temporary_path.write_text(
+    content = (
         json.dumps(
             {
                 "progress": progress,
@@ -545,10 +592,42 @@ def _write_progress_file(
             ensure_ascii=False,
             indent=2,
         )
-        + "\n",
-        encoding="utf-8",
+        + "\n"
     )
-    os.replace(temporary_path, progress_path)
+
+    def publish() -> None:
+        temporary_path.write_text(content, encoding="utf-8")
+        os.replace(temporary_path, progress_path)
+
+    _retry_progress_write(publish, progress_path)
+
+
+def _retry_progress_write(
+    action: Callable[[], None],
+    path: Path,
+    *,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> None:
+    """Retry a progress write with bounded jittered backoff while the file is locked."""
+    sleep = sleep or time.sleep
+    monotonic = monotonic or time.monotonic
+    started_at = monotonic()
+    deadline = started_at + PROGRESS_WRITE_RETRY_SECONDS
+    delay_seconds = PROGRESS_WRITE_INITIAL_DELAY_SECONDS
+    while True:
+        try:
+            action()
+            return
+        except OSError as error:
+            current_time = monotonic()
+            if current_time >= deadline:
+                raise ProgressWriteError(path, current_time - started_at, error) from error
+            jittered_delay_seconds = min(
+                PROGRESS_WRITE_MAX_DELAY_SECONDS, delay_seconds * random.uniform(0.8, 1.2)
+            )
+            sleep(min(jittered_delay_seconds, deadline - current_time))
+            delay_seconds = min(PROGRESS_WRITE_MAX_DELAY_SECONDS, delay_seconds * 2)
 
 
 def _diagnostic_options(
@@ -705,10 +784,7 @@ def _source_work_total(
         return 2
     if extension == ".docx":
         with ZipFile(source_path) as archive:
-            return 4 + sum(
-                _is_office_bitmap_part(name) or _is_office_vector_part(name)
-                for name in archive.namelist()
-            )
+            return 2 * docx_work_item_total(archive.namelist())
     if extension in OFFICE_DOCUMENT_EXTENSIONS:
         if extension == ".xlsx":
             with ZipFile(source_path) as archive:

@@ -9,7 +9,7 @@ steps for one source file: plan, resolve every text once, then apply.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import nullcontext
 from typing import Protocol, TypeVar
 
@@ -114,6 +114,25 @@ class PhaseProgress:
 
     def quota_wait(self, seconds: float) -> None:
         self._set_label(QUOTA_WAIT_LABEL)
+
+
+class WorkTicker:
+    """Announce each work item once, by name, as ``position of total``."""
+
+    def __init__(
+        self, names: Sequence[str], announce: Callable[[int, int, str], None] | None
+    ) -> None:
+        self._names = frozenset(names)
+        self._total = len(names)
+        self._announce = announce
+        self._done: set[str] = set()
+
+    def tick(self, name: str, noun: str) -> None:
+        if name not in self._names or name in self._done:
+            return
+        self._done.add(name)
+        if self._announce is not None:
+            self._announce(len(self._done), self._total, noun)
 
 
 def resolve_plan(plan: TextPlan, engine: TranslationEngine, progress: PhaseProgress | None = None) -> None:

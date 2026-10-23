@@ -6,9 +6,11 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import BytesIO, StringIO
 import json
+import os
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+import time
 from typing import cast
 import unittest
 from unittest.mock import patch
@@ -348,6 +350,90 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                 [snapshot["selected/failed.docx"] for snapshot in snapshots],
             )
 
+    # Verifies FR-2026-08-03-04.
+    def test_progress_write_retries_a_transient_lock_and_then_succeeds(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            output_root = Path(temporary_directory)
+            real_replace = os.replace
+            attempts: list[int] = []
+
+            def locked_twice(source: Path, destination: Path) -> None:
+                attempts.append(1)
+                if len(attempts) <= 2:
+                    raise PermissionError(5, "Access is denied")
+                real_replace(source, destination)
+
+            sleeps: list[float] = []
+            with (
+                patch.object(os, "replace", side_effect=locked_twice),
+                patch.object(time, "sleep", side_effect=sleeps.append),
+            ):
+                folder_processor._write_progress_file(output_root, 10, None, {"a.png": {"status": "queued"}})
+
+            self.assertEqual(3, len(attempts))
+            self.assertEqual(2, len(sleeps))
+            self.assertEqual(
+                {"progress": 10, "eta_seconds": None, "files": {"a.png": {"status": "queued"}}},
+                json.loads((output_root / "progress.json").read_text(encoding="utf-8")),
+            )
+
+    # Verifies FR-2026-08-03-04.
+    def test_progress_write_gives_up_after_the_five_second_budget(self) -> None:
+        clock = [0.0]
+
+        def sleep(seconds: float) -> None:
+            clock[0] += seconds
+
+        attempts: list[int] = []
+
+        def always_locked() -> None:
+            attempts.append(1)
+            raise PermissionError(5, "Access is denied")
+
+        with self.assertRaises(folder_processor.ProgressWriteError) as raised:
+            folder_processor._retry_progress_write(
+                always_locked, Path("progress.json"), sleep=sleep, monotonic=lambda: clock[0]
+            )
+
+        self.assertGreater(len(attempts), 3)
+        self.assertGreaterEqual(clock[0], 5.0)
+        self.assertLess(clock[0], 5.5)
+        self.assertIn("progress.json", str(raised.exception))
+
+    # Verifies FR-2026-08-03-04.
+    def test_locked_progress_file_is_skipped_with_one_warning_and_processing_continues(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            self._write_png(input_root / "first.png")
+            self._write_png(input_root / "second.png")
+            stderr = StringIO()
+
+            def locked(*_: object, **__: object) -> None:
+                raise folder_processor.ProgressWriteError(
+                    output_root / "progress.json", 5.0, PermissionError(5, "Access is denied")
+                )
+
+            with (
+                patch.object(folder_processor, "_write_progress_file", side_effect=locked) as write,
+                redirect_stderr(stderr),
+            ):
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(),
+                )
+
+            self.assertGreater(write.call_count, 2)
+            self.assertEqual(2, result.processed_files)
+            self.assertEqual(0, result.failed_files)
+            self.assertEqual([], result.failures)
+            self.assertEqual(1, stderr.getvalue().count("Warning: Could not write progress file"))
+            self.assertNotIn("Failed:", stderr.getvalue())
+
     # Verifies FR-2026-08-03-03.
     def test_processes_supported_files_ignores_others_and_resolves_filename_collisions(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -495,19 +581,13 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertEqual(1, result.processed_files)
             self.assertEqual("Processing: document.docx\n", standard_output.getvalue())
             self.assertEqual(1, len(progress_bars))
-            self.assertEqual(5, progress_bars[0].total)
+            self.assertEqual(2, progress_bars[0].total)
             self.assertEqual("document.docx", progress_bars[0].label)
             self.assertEqual(
-                [
-                    "embedded image 1",
-                    "native text",
-                    "native text layout",
-                    "chart cache synchronization",
-                    "package write",
-                ],
+                ["Planning image 1 of 1", "Applying image 1 of 1"],
                 progress_bars[0].postfixes,
             )
-            self.assertEqual(5, progress_bars[0].updates)
+            self.assertEqual(2, progress_bars[0].updates)
             self.assertTrue(progress_bars[0].closed)
 
     # Verifies FR-2026-09-03-01.
@@ -583,9 +663,9 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                     typeface=typeface,
                 )
 
-            self.assertEqual([("word/media/image1.png", 3, "stage")], display.started)
+            self.assertEqual([("word/media/image1.png", 2, "stage")], display.started)
             self.assertEqual(
-                ["OCR recognition", "process OCR results", "render replacement image"],
+                ["OCR recognition", "process OCR results"],
                 display.advanced,
             )
             self.assertEqual(1, display.cleared)
