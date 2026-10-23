@@ -85,7 +85,7 @@ An EMF can combine editable vector text with already-rasterized visual content. 
 
 ### Notes
 
-The initial scope is `EMR_STRETCHDIBITS`. Other EMF bitmap record types and outlined or path-only vector text remain out of scope until separately specified. The DIB shall be processed only in memory and shall invoke the existing shared raster handler; no intermediate image file is permitted.
+The initial scope is `EMR_STRETCHDIBITS`. Other EMF bitmap record types and outlined or path-only vector text remain out of scope until separately specified; FR-2026-10-22-14 specifies EMF+ image objects. The DIB shall be processed only in memory and shall invoke the existing shared raster handler; no intermediate image file is permitted.
 
 Automated tests shall use a synthetic EMF containing a DIB payload. They shall verify that the shared image processor is invoked, its result is re-embedded, and unrelated EMF records remain valid.
 
@@ -104,7 +104,7 @@ Automated tests shall use a synthetic EMF containing a DIB payload. They shall v
 
 ### Description
 
-The vector-replacement implementation shall provide separate SVG, EMF, and WMF modules, with a small extension-based dispatcher and shared result and DIB helpers. Standalone `.svg`, `.emf`, and `.wmf` input files shall be supported by the folder command and shall use the same in-memory format handler as an embedded Office vector part.
+The vector-replacement implementation shall provide separate SVG, EMF, and WMF modules, with a small dispatcher and shared result and DIB helpers. FR-2026-10-22-09 defines how the dispatcher identifies EMF and WMF content. Standalone `.svg`, `.emf`, and `.wmf` input files shall be supported by the folder command and shall use the same in-memory format handler as an embedded Office vector part.
 
 ### Rationale
 
@@ -271,25 +271,26 @@ external reference is opened.
 | Status | Implemented |
 | Source | User request following EMF table-label diagnosis |
 | Date Added | 2026-09-04 |
-| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-09-05-02 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-07, FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-09-05-02, FR-2026-10-22-11 |
 
 ### Description
 
-This requirement extends fitted-layout eligibility for editable EMF
+This requirement defines fitted-layout eligibility for editable EMF
 `EMR_EXTTEXTOUTA` and `EMR_EXTTEXTOUTW` records that have no explicit clipping
-rectangle.  It supersedes the EMF-specific explicit-clipping-only rule in
-FR-2026-08-04-07, but only for the eligible records below.  It does not change
-`preserve-source-formatting`, which shall retain its existing direct native
-text replacement behaviour. FR-2026-09-05-02 supersedes this requirement's
-per-record fitting and expansion behaviour for an eligible contiguous text
-record group.
+rectangle. It does not change `preserve-source-formatting`, which shall retain
+its existing direct native text replacement behaviour. FR-2026-09-05-02
+supersedes this requirement's per-record fitting and expansion behaviour for
+an eligible contiguous text record group.
 
 In either fitted layout mode, the EMF adapter shall first reconstruct the
 selected source GDI font and original horizontal text placement.  It shall
 measure the original non-empty, single-line text at its original size to derive
-its occupied source rectangle.  The record's non-degenerate rendered bounds
-shall be retained as independent geometry evidence and a safety limit; a
-measurement that cannot be reconciled safely with those bounds is ineligible.
+its occupied source rectangle.  A record with a non-degenerate rendered bounds
+rectangle shall use the measured rectangle as its source rectangle when it lies
+within those bounds, and otherwise shall use the record bounds themselves. A
+measurement that differs from the bounds shall not make the record ineligible.
+A record without non-degenerate bounds shall use the measured rectangle
+positioned from the record's origin and alignment.
 
 `preserve-basic-layout` shall measure the source text with the appropriate
 committed Noto face.  `preserve-basic-layout-source-font` shall first measure
@@ -340,7 +341,9 @@ limited exception that treats multiple source records as one one-line output.
 Automated tests shall use synthetic EMF inputs only.  They shall verify
 Noto-only source measurement in `preserve-basic-layout`; source-face
 measurement and Noto fallback in `preserve-basic-layout-source-font`; fitting
-to the measured source rectangle; permitted horizontal expansion; stopping at
+to the measured source rectangle; fitting a record whose measurement is wider
+than its bounds into those bounds; measuring a record without bounds from its
+origin; permitted horizontal expansion; stopping at
 both an adjacent text rectangle and a vertical line segment; alignment-aware
 expansion; and unchanged direct replacement for multi-line, rotated,
 transformed, ambiguous, or otherwise ineligible records.  Tests shall verify
@@ -424,8 +427,7 @@ than silently clipping or retaining source-language text.
 The adapter shall retain the direct `preserve-source-formatting` replacement
 fallback for a singular or non-finite matrix, an unresolvable map or graphics
 state, unsupported device-context restoration, an unsupported
-text-orientation semantic, or geometry that cannot be safely reconciled with
-the EMF record's rendered bounds.  It shall not approximate such a case
+text-orientation semantic.  It shall not approximate such a case
 through rasterization, OCR, or a guessed transform.
 
 ### Rationale
@@ -458,8 +460,7 @@ for rotated, reflected, and sheared text, baseline-only expansion and text and
 line obstacles for the orientation-preserving axis-aligned case, source-font
 and Noto measurement modes, output orientation, and structural validity.  They
 shall also verify unchanged direct replacement fallback for singular or
-non-finite transforms, unsupported state restoration, and unreconcilable
-source bounds.
+non-finite transforms and unsupported state restoration.
 
 ---
 
@@ -519,8 +520,8 @@ evidence is present:
   member rectangles are in strictly increasing left-to-right order, and each
   adjacent pair touches, overlaps, or has a horizontal gap no greater than four
   rendered source-line heights; and
-- the source-area geometry reconciliation rules from FR-2026-09-04-01 and
-  FR-2026-09-05-01 succeed for every member. Source-glyph measurement is
+- the source rectangle of every member can be derived as FR-2026-09-04-01 and
+  FR-2026-09-05-01 define. Source-glyph measurement is
   required only when the record has neither an explicit clip nor a
   non-degenerate bounds rectangle.
 
@@ -682,5 +683,178 @@ replacement text, package-part and record location, including the distinct
 rotated and sheared transform statuses. They shall verify sidecar omission
 when debug is disabled, when fitted EMF replacement succeeds, and for a vector
 retained solely because it has no editable text.
+
+---
+
+## FR-2026-10-22-09
+
+| Property | Value |
+|----------|-------|
+| Title | Identify EMF and WMF graphics by content, not file extension |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-10, FR-2026-10-22-04 |
+
+### Description
+
+The vector-replacement dispatcher shall identify an EMF or WMF graphic from its content. A graphic is an EMF when its first record is the EMF header record with the ` EMF` signature. It is a WMF when it starts with the placeable-metafile key or with a standard WMF header. A `.emf` or `.wmf` file whose content is the other format shall be processed by the handler for the format its content shows. When the content shows neither format, the file extension shall decide, so a damaged graphic reports the same format-specific error as before. A `.svg` file is not content-sniffed.
+
+The output keeps the source file's name and extension. Planning and applying a graphic shall use the format the dispatcher identified.
+
+### Rationale
+
+Real documents contain EMF graphics saved with a `.wmf` extension. The WMF parser rejected them with "Invalid WMF header size." and no translated output was produced. Identifying the format from the content processes these files and leaves correctly named files unchanged.
+
+### Verification
+
+Automated tests shall use synthetic graphics only. They shall verify that an EMF with a `.wmf` extension and a WMF with an `.emf` extension are each processed by the handler for their content, that a placeable WMF is recognised, and that content showing neither format keeps its extension's handler and error.
+
+---
+
+## FR-2026-10-22-10
+
+| Property | Value |
+|----------|-------|
+| Title | Translate EMF+ text and keep the EMF+ stream valid |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-03-10, FR-2026-10-22-04, FR-2026-10-22-09 |
+
+### Description
+
+An EMF can carry a second drawing stream in EMF+ records, stored inside `EMR_COMMENT` records that begin with the identifier `EMF+`. A dual EMF holds the same drawing twice, as GDI records and as EMF+ records. Viewers that play EMF+ draw the EMF+ stream and skip the GDI records that duplicate it.
+
+The EMF handler shall translate text in both streams, so either kind of viewer shows the translated text:
+
+- `EmfPlusDrawString` records, when the font object they name is defined earlier in the file.
+- `EmfPlusDrawDriverString` records whose glyphs are characters (`CmapLookup` set) and whose text runs horizontally.
+
+EMF+ text is planned and applied like any other vector text. Both streams request the same source text, so the batch, the cache and the request count see it once. The EMF handler shall analyse the EMF once and list its texts and embedded images through the `VectorDocument` protocol, as the SVG and WMF handlers do.
+
+When a fitted layout is selected, the handler shall shrink the font of a replaced EMF+ text to fit its source extent: the layout rectangle for `EmfPlusDrawString`, and the span of the source glyph positions for `EmfPlusDrawDriverString`. It shall do this by emitting a new font object under an object identifier the file never uses, never by changing the source font object, and it shall reuse one new font object for repeated sizes. When the source-font layout is selected, the source face is measured as for other EMF text.
+
+When an `EmfPlusDrawDriverString` text is replaced, the handler shall write one position for each replacement character, advanced by the measured width of the preceding characters. A source that gives only the first glyph position (`RealizedAdvance` set) keeps that single position.
+
+The handler shall keep the output a valid EMF: the EMF+ record sizes, the `EMR_COMMENT` size and data size, the `EMR_HEADER` byte and record counts shall match the rewritten records, and the EMF+ header shall stay the first record after the `EMR_HEADER`.
+
+The handler shall not insert any record before the EMF+ header comment. The fitted source-font layout inserts its scaled GDI font records immediately after that comment. An EMF without an EMF+ stream shall produce the same output as before this requirement.
+
+The handler shall leave an EMF+ text record unchanged, and shall add an `unsupported` entry to the output sidecar, when it cannot be replaced safely: the glyphs are glyph indices, the text is vertical, the record is malformed, the replacement needs characters outside the Basic Multilingual Plane, or the record needs regenerated positions but its font object is missing, is continued, or has a size unit that is not world or pixel. A malformed EMF+ comment is also left unchanged and reported as `unsupported`. When a fitted layout cannot be applied to a replaced EMF+ text because its font object is missing, its font size unit is not world or pixel, its extent is empty, no object identifier is free, or the bounded fit fails, the text shall be replaced at its source size and the output sidecar shall add one `layout_fallback` entry with `vector_format` `emf`, `container_kind` `emfplus_text_record`, and the source and replacement text. Neither entry is added when `--debug` is off, as for other vector diagnostics.
+
+### Rationale
+
+GDI+ viewers, including Office, play the EMF+ stream of a dual EMF and skip the duplicate GDI records. Translating only the GDI records left the source text visible there. Removing the EMF+ stream would lose the anti-aliased, more accurate GDI+ rendering, so both streams are translated.
+
+The fitted source-font layout inserted its scaled GDI font records before the EMF+ header comment. A viewer expects the EMF+ header to follow the `EMR_HEADER` directly, so it treated the file as GDI-only. Placing the records after the header comment keeps the EMF+ stream recognised.
+
+### Verification
+
+Automated tests shall use synthetic EMFs only. They shall verify that `EmfPlusDrawString` and character-glyph `EmfPlusDrawDriverString` text is replaced alongside GDI text records in a dual EMF; that the EMF+ record, comment and header sizes and the record count are consistent; that the EMF+ header stays the first record after the `EMR_HEADER` in all layout modes, including when scaled GDI font records are inserted; and that an EMF without EMF+ records produces unchanged output. They shall verify fitted font-object emission with an unused identifier, reuse of that object for repeated sizes, and the unmodified source font object; regenerated and first-position-only driver-string positions; each unsupported and fallback case and its sidecar entry; and that planning requests every text the apply step requests, so a planned run makes no further provider request.
+
+---
+
+## FR-2026-10-22-12
+
+| Property | Value |
+|----------|-------|
+| Title | Fit SVG text that has no clip rectangle to its measured source extent |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following an EMF diagnosis |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-04-07, FR-2026-08-22-08, FR-2026-08-22-13, FR-2026-08-27-02, FR-2026-10-22-11 |
+
+### Description
+
+An SVG `text` or `tspan` element has no text field. Text that has an explicit clip rectangle keeps its existing fit to that rectangle. In both fitted layouts, other text shall follow the unknown-bounds rule of FR-2026-10-22-11: the SVG handler shall measure the source text at its resolved `font-size` with the source face, or the committed Noto face when the source face is unavailable, and shall fit a longer replacement to that measured width by reducing the size. A replacement no longer than the source keeps the source size.
+
+The handler shall fit an element only when it has its own text and no child elements, is not inside a `foreignObject`, is not a `textPath`, uses horizontal writing, and has no rotation or skew from its own or an ancestor's `transform` or from a `rotate` attribute. The source size is its resolved `font-size`, or the CSS default size when none is set; a `font-size` that cannot be resolved to a length is not placed safely. A reduced size shall be written to the element's inline style, which takes precedence over style sheets. The handler shall not expand the measured extent into neighbouring space.
+
+An element that cannot be fitted safely shall be replaced at its source size, as `preserve-source-formatting` does, and shall still be translated. `preserve-source-formatting` is unchanged.
+
+### Rationale
+
+Most SVG text is not clipped. Leaving it at the source size lets longer translations run into neighbouring shapes, although the original extent is known from the source text and face.
+
+### Verification
+
+Automated tests shall use synthetic SVGs only. They shall verify the size reduction of un-clipped text with a resolved and with an unavailable source face; that a replacement no longer than the source keeps its size; that text with a clip rectangle is unchanged from before; that rotated, skewed, `textPath`, `foreignObject` and child-element text is replaced at its source size; that the replacement is translated when it cannot fit at the minimum size; and that the output remains valid SVG.
+
+---
+
+## FR-2026-10-22-13
+
+| Property | Value |
+|----------|-------|
+| Title | Fit WMF text that has no clip rectangle to its measured source extent |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following an EMF diagnosis |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-04-07, FR-2026-08-27-02, FR-2026-10-22-09, FR-2026-10-22-11 |
+
+### Description
+
+A WMF `META_TEXTOUT` or `META_EXTTEXTOUT` record has an origin and may have a clip rectangle. A record with a clip rectangle keeps its existing fit to that rectangle. In both fitted layouts, other records shall follow the unknown-bounds rule of FR-2026-10-22-11: the WMF handler shall measure the source text at the height of the selected font with the source face, or the committed Noto face when the source face is unavailable, and shall fit a longer replacement to that measured width by reducing the size. A replacement no longer than the source keeps the source size.
+
+The handler shall fit a record only when a created font is selected, that font has a non-zero height and no escapement, and the text is a single line. A reduced size shall be written as a scaled clone of the selected font that is used by that record only. The handler shall not expand the measured extent into neighbouring space.
+
+A record that cannot be fitted safely shall be replaced at its source size, as `preserve-source-formatting` does, and shall still be translated. `preserve-source-formatting` is unchanged.
+
+### Rationale
+
+Most WMF text is not clipped, so it was never fitted, and longer translations overlap neighbouring drawing. The original extent is known from the source text, face and font height.
+
+### Verification
+
+Automated tests shall use synthetic WMFs only. They shall verify the size reduction of `META_TEXTOUT` and un-clipped `META_EXTTEXTOUT` records with a resolved and with an unavailable source face; that a replacement no longer than the source keeps its size; that clipped records are unchanged from before; that a record with no selected font, a zero-height font, an escapement or multiple lines is replaced at its source size; that the replacement is translated when it cannot fit at the minimum size; that other records keep the original font; and that the generated WMF remains structurally valid.
+
+---
+
+## FR-2026-10-22-14
+
+| Property | Value |
+|----------|-------|
+| Title | Translate EMF+ image objects: embedded bitmaps and nested metafiles |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following an EMF diagnosis |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-09, FR-2026-08-03-10, FR-2026-10-22-04, FR-2026-10-22-05, FR-2026-10-22-09, FR-2026-10-22-10, SR-2026-08-03-02 |
+
+### Description
+
+FR-2026-10-22-10 translates the text records of an EMF+ stream. An EMF+ stream can also draw images defined in `EmfPlusObject` records with object type Image. An Image object holds either a bitmap or a nested metafile. A GDI+ viewer, such as Office, plays the EMF+ stream of a dual EMF and skips the duplicate GDI records, so text inside these images stays visible unless the images are processed. A viewer that plays only the GDI records, such as Inkscape, already shows the translated GDI text and is unaffected.
+
+The EMF handler shall list every Image object of the EMF+ stream through the `VectorDocument` protocol, whether or not a draw record uses it, and shall process each one in memory:
+
+- **Bitmap.** The handler shall decode the bitmap, process it through the shared bitmap OCR and text-replacement path as FR-2026-08-03-09 does for a GDI DIB, and re-embed the result in the same Image object under the same object identifier. The decoded bitmap is a compressed image (PNG or JPEG) or an uncompressed 24-bit RGB, 32-bit RGB or 32-bit ARGB pixel buffer. The replaced bitmap shall keep the source pixel dimensions, because draw records address it in source pixels, and shall keep its alpha. It shall be written as a compressed PNG bitmap. Its replaced OCR-region count shall contribute to the document's image-region result.
+- **Nested metafile.** The handler shall treat the metafile as a nested document under FR-2026-10-22-05: it shall plan and apply it through the public plan and apply entry points of the handler for the nested format, retain its plan, list its units after the parent's, and embed the returned bytes. The nested format is identified as FR-2026-10-22-09 identifies a graphic, so an EMF, EMF+-only or EMF-plus-dual metafile is handled by the EMF handler, and a WMF or placeable WMF by the WMF handler. The EMF handler shall not branch on being nested. The nested document is its own unit with a path-style identifier below its parent's, and the depth limit and `nested_document_depth_limit_exceeded` diagnostic of FR-2026-10-22-05 apply to it.
+
+The handler shall write Image objects with the chunking GDI+ uses: an object too large for one `EmfPlusObject` record, whose data holds at most 65,008 bytes, is split over consecutive records with the continuation flag set, and every chunk starts with the 4-byte total size of the whole object. It shall reassemble a chunked object before processing it and shall write the replacement as the same kind of chunked object.
+
+The handler shall keep the output a valid EMF as FR-2026-10-22-10 requires. The EMF+ record sizes, the `EMR_COMMENT` sizes and data sizes, the object's total size and, for a metafile, its metafile data size, and the `EMR_HEADER` byte and record counts shall match the rewritten records. The EMF+ header shall stay the first record after the `EMR_HEADER`. No Image object that is left unchanged shall change by a byte, and no object other than an Image object shall change.
+
+The handler shall leave an Image object unchanged, and shall add an `unsupported` entry to the output sidecar, when it cannot be processed safely: its chunks are not consecutive or do not add up to the declared total size, it is malformed, its bitmap is in a format or pixel format not listed above, or its metafile data is malformed or in an unrecognised format. A failure inside a nested metafile shall be reported through the nested handler's own entries and shall not change the other objects. The `unsupported` entry shall have `vector_format` `emf` and `container_kind` `emfplus_image_object`, and shall identify the object only by its identifier and never by its content. The entry is added only when `--debug` is set, as for other vector diagnostics.
+
+EMF+ image objects are self-contained, and nothing shall be fetched or opened for them, as SR-2026-08-03-02 requires.
+
+### Rationale
+
+Real EMF graphics can be saved as a dual EMF whose EMF+ stream draws image objects, including chunked bitmaps and nested metafiles, instead of text records. The GDI text and DIB records that the handler already translates are skipped by GDI+ viewers such as Office, so the output looked untranslated there. Re-using the shared bitmap handler and the nested-document recursion adds no second raster or vector implementation.
+
+### Notes
+
+Text that exists only as outlines or paths, such as `EmfPlusFillPath` and `EmfPlusDrawPath` records, remains out of scope as in FR-2026-08-03-09. Other EMF+ image types, such as indexed or high-bit-depth bitmaps, are reported as unsupported until separately specified.
+
+A dual EMF carries the same picture in the GDI stream and the EMF+ stream. Bitmaps in the two streams are processed as separate images, so a bitmap that is drawn in both costs one OCR pass for each encoding.
+
+### Verification
+
+Automated tests shall use synthetic EMFs only. They shall verify that a PNG bitmap object, a JPEG bitmap object and each listed uncompressed pixel format are processed through the shared bitmap handler and re-embedded under the same object identifier with the source pixel dimensions and alpha; that a chunked bitmap object is reassembled and written back with a valid total size in every chunk and valid chunk sizes; that a nested EMF+-only metafile and a nested WMF have their text and bitmaps translated by their own handlers and embedded with a valid metafile data size; that nested units are listed after the parent's with path-style identifiers and share the one resolution with the parent's texts; that a nested metafile at a depth beyond the limit is left unchanged and, only with `--debug`, reported without content; that the EMF+ header stays the first record after the `EMR_HEADER` and that the EMF+ record, comment and header sizes and counts are consistent; that objects left unchanged are byte-identical; that each unsupported case is left unchanged and reported only with `--debug`; and that planning requests every text and image the apply step requests, so a planned run makes no further provider request.
 
 ---

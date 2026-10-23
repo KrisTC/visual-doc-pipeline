@@ -43,6 +43,10 @@ jobs:
         env:
           VISUAL_DOC_PIPELINE_UV_EXTRA: cpu
         run: ./run.sh scripts/typecheck-python.py
+      - name: Download the optional portable fonts
+        env:
+          VISUAL_DOC_PIPELINE_UV_EXTRA: cpu
+        run: ./run.sh scripts/bootstrap_runtime_assets.py --fonts-only
       - name: Run automated tests
         env:
           VISUAL_DOC_PIPELINE_UV_EXTRA: cpu

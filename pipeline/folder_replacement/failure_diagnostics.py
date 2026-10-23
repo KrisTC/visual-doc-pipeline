@@ -7,9 +7,12 @@ from dataclasses import dataclass
 from pipeline.ocr import OcrProvider, OcrRequest, OcrResult
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    BatchLimits,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    batch_limits_of,
+    cached_flags_of,
 )
 from pipeline.text_replacement.errors import TextReplacementProviderRequestError
 
@@ -50,7 +53,8 @@ class FailureContext:
             "source_language": request.source_language,
             "target_language": request.target_language,
             "is_filename": request.is_filename,
-            "input_character_count": len(request.text),
+            "text_count": len(request.texts),
+            "input_character_count": sum(len(text) for text in request.texts),
         }
 
     def record_provider_failure(self, error: TextReplacementProviderRequestError) -> None:
@@ -93,6 +97,13 @@ class ContextualTextReplacementProvider:
 
     wrapped_provider: TextReplacementProvider
     context: FailureContext
+
+    @property
+    def batch_limits(self) -> BatchLimits | None:
+        return batch_limits_of(self.wrapped_provider)
+
+    def cached_flags(self, request: TextReplacementRequest) -> tuple[bool, ...] | None:
+        return cached_flags_of(self.wrapped_provider, request)
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         self.context.record_text_replacement(request)

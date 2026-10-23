@@ -8,7 +8,7 @@ import json
 import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import ClassVar
+from typing import ClassVar, cast
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +29,8 @@ from pipeline.provider_cache import (
 )
 from pipeline.provider_metrics import RunMetrics
 from pipeline.text_replacement.factory import TextReplacementProviderFactory
+from pipeline.text_replacement import BatchLimits, TextReplacementItem, replace_each
+from pipeline.text_replacement.errors import TextReplacementProviderError
 from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
 from scripts.cache_metrics import main as cache_metrics_main
 
@@ -59,12 +61,16 @@ class _RecordingOcrProvider:
 
 
 class _RecordingTextProvider:
+    batch_limits = BatchLimits(max_items=7, target_characters=70, max_characters=700)
+
     def __init__(self) -> None:
         self.calls = 0
+        self.requests: list[TextReplacementRequest] = []
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         self.calls += 1
-        return TextReplacementResult(text=f"translated:{request.text}", confidence=0.5)
+        self.requests.append(request)
+        return replace_each(request, lambda text: TextReplacementItem(f"translated:{text}", 0.5))
 
 
 class ProviderCacheTests(unittest.TestCase):
@@ -91,7 +97,7 @@ class ProviderCacheTests(unittest.TestCase):
             with patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
                 with source_cache_scope(source):
                     factory.create("synthetic").replace(
-                        TextReplacementRequest("one", False, "en", "fr")
+                        TextReplacementRequest(("one",), False, "en", "fr")
                     )
             inventory = inspect_cache(cache_path)
             self.assertIsNone(inventory[0]["provider_name"])
@@ -114,7 +120,7 @@ class ProviderCacheTests(unittest.TestCase):
     # Verifies FR-2026-10-21-01's underlying-call timing and hit exclusion.
     def test_provider_duration_is_measured_only_on_the_cache_miss(self) -> None:
         provider = _RecordingTextProvider()
-        request = TextReplacementRequest("one", True, "en", "fr")
+        request = TextReplacementRequest(("one",), True, "en", "fr")
         with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
             source = Path(directory) / "sample.txt"
             proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
@@ -146,7 +152,7 @@ class ProviderCacheTests(unittest.TestCase):
     # Verifies FR-2026-10-21-01 and SR-2026-10-21-01.
     def test_inventory_migrates_and_backfills_legacy_rows_without_changing_results(self) -> None:
         provider = _RecordingTextProvider()
-        request = TextReplacementRequest("caf\u00e9\U0001f600", True, "en", "ja")
+        request = TextReplacementRequest(("caf\u00e9\U0001f600",), True, "en", "ja")
         cache_factory = TextReplacementProviderFactory(
             {"synthetic": lambda: provider},
             cache_identities={"synthetic": lambda: "synthetic:v1"},
@@ -175,7 +181,7 @@ class ProviderCacheTests(unittest.TestCase):
                 self.assertIsNone(before[0]["provider_name"])
                 self.assertEqual(1, before[1]["unknown_input_count"])
             with source_cache_scope(source):
-                self.assertEqual("translated:caf\u00e9\U0001f600", proxy.replace(request).text)
+                self.assertEqual("translated:caf\u00e9\U0001f600", proxy.replace(request).items[0].text)
             self.assertEqual(1, provider.calls)
             with closing(sqlite3.connect(cache_path)) as connection, connection:
                 self.assertEqual(
@@ -248,14 +254,14 @@ class ProviderCacheTests(unittest.TestCase):
         factory = TextReplacementProviderFactory(
             {"fake": lambda: provider}, cache_identities={"fake": lambda: "fake:v1"}
         )
-        request = TextReplacementRequest("hello", False, "en", "ja")
+        request = TextReplacementRequest(("hello",), False, "en", "ja")
 
         with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
             source = Path(directory) / "report.pptx"
             with patch("pipeline.provider_cache.sqlite3.connect", wraps=sqlite3.connect) as connect:
                 with source_cache_scope(source):
-                    self.assertEqual("translated:hello", factory.create("fake").replace(request).text)
-                    self.assertEqual("translated:hello", factory.create("fake").replace(request).text)
+                    self.assertEqual("translated:hello", factory.create("fake").replace(request).items[0].text)
+                    self.assertEqual("translated:hello", factory.create("fake").replace(request).items[0].text)
 
             self.assertEqual(1, connect.call_count)
 
@@ -320,7 +326,7 @@ class ProviderCacheTests(unittest.TestCase):
         factory = TextReplacementProviderFactory(
             {"fake": lambda: provider}, cache_identities={"fake": lambda: "fake:v1"}
         )
-        request = TextReplacementRequest("hello", False, "en", "ja")
+        request = TextReplacementRequest(("hello",), False, "en", "ja")
 
         with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
             source = Path(directory) / "report.pdf"
@@ -335,9 +341,177 @@ class ProviderCacheTests(unittest.TestCase):
             finally:
                 connection.close()
             with source_cache_scope(source):
-                self.assertEqual("translated:hello", proxy.replace(request).text)
+                self.assertEqual("translated:hello", proxy.replace(request).items[0].text)
 
         self.assertEqual(2, provider.calls)
+
+
+def _batch_request(*texts: str) -> TextReplacementRequest:
+    return TextReplacementRequest(texts, False, "en", "ja")
+
+
+def _cache_rows(source: Path) -> list[tuple[object, ...]]:
+    cache_path = source.with_name(f"{source.name}{CACHE_FILENAME_SUFFIX}")
+    with closing(sqlite3.connect(cache_path)) as connection:
+        return connection.execute(
+            "SELECT input_characters, provider_seconds, batch_items FROM provider_result_cache "
+            "WHERE result_kind = 'text_replacement' ORDER BY input_characters, cache_key"
+        ).fetchall()
+
+
+class BatchProviderCacheTests(unittest.TestCase):
+    # Verifies FR-2026-10-22-06.
+    def test_only_missing_texts_are_forwarded_and_results_keep_request_order(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            with source_cache_scope(Path(directory) / "doc.txt"):
+                proxy.replace(_batch_request("a", "b"))
+                result = proxy.replace(_batch_request("a", "c", "b", "d"))
+
+        self.assertEqual(("c", "d"), provider.requests[1].texts)
+        self.assertEqual(
+            ["translated:a", "translated:c", "translated:b", "translated:d"],
+            [item.text for item in result.items],
+        )
+        self.assertEqual(0.5, result.items[0].confidence)
+
+    # Verifies FR-2026-10-22-06.
+    def test_a_request_with_only_hits_makes_no_provider_call(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            with RunMetrics() as metrics, source_cache_scope(Path(directory) / "doc.txt"):
+                proxy.replace(_batch_request("a", "b"))
+                result = proxy.replace(_batch_request("b", "a"))
+
+        self.assertEqual(1, provider.calls)
+        self.assertEqual(["translated:b", "translated:a"], [item.text for item in result.items])
+        report = metrics.report(10)[0]
+        self.assertEqual(4, report["requested_texts"])
+        self.assertEqual(2, report["successful_calls"])
+        self.assertEqual(1, report["duration_count"])
+
+    # Verifies FR-2026-10-22-06.
+    def test_batch_entries_are_reused_by_single_text_requests_and_the_reverse(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            with source_cache_scope(Path(directory) / "doc.txt"):
+                proxy.replace(_batch_request("a", "b"))
+                proxy.replace(_batch_request("c"))
+                proxy.replace(_batch_request("c", "a"))
+                proxy.replace(_batch_request("b"))
+
+        self.assertEqual(2, provider.calls)
+
+    # Verifies FR-2026-10-22-06.
+    def test_batch_size_and_apportioned_durations_are_stored_per_text(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            source = Path(directory) / "doc.txt"
+            with patch("pipeline.provider_cache.perf_counter", side_effect=[0.0, 3.0]):
+                with source_cache_scope(source):
+                    proxy.replace(_batch_request("a", "bb", "ccc"))
+            rows = _cache_rows(source)
+
+        self.assertEqual([(1, 3), (2, 3), (3, 3)], [(row[0], row[2]) for row in rows])
+        for row, expected in zip(rows, (0.5, 1.0, 1.5), strict=True):
+            self.assertAlmostEqual(expected, cast(float, row[1]))
+
+    # Verifies FR-2026-10-22-06.
+    def test_a_failed_or_wrong_length_provider_call_stores_nothing(self) -> None:
+        class FailingProvider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                raise TextReplacementProviderError("synthetic failure")
+
+        class ShortProvider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return TextReplacementResult((TextReplacementItem("only one", 0.0),))
+
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            source = Path(directory) / "doc.txt"
+            with source_cache_scope(source):
+                for provider in (FailingProvider(), ShortProvider()):
+                    proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+                    with self.assertRaises(TextReplacementProviderError):
+                        proxy.replace(_batch_request("a", "b"))
+            self.assertEqual([], _cache_rows(source))
+
+    # Verifies FR-2026-10-22-06.
+    def test_an_old_sidecar_gains_a_nullable_batch_column_without_losing_rows(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            source = Path(directory) / "doc.txt"
+            with source_cache_scope(source):
+                proxy.replace(_batch_request("old"))
+            cache_path = source.with_name(f"{source.name}{CACHE_FILENAME_SUFFIX}")
+            with closing(sqlite3.connect(cache_path)) as connection, connection:
+                connection.execute("ALTER TABLE provider_result_cache DROP COLUMN batch_items")
+            with source_cache_scope(source):
+                result = proxy.replace(_batch_request("old", "new"))
+
+            self.assertEqual(["translated:old", "translated:new"], [item.text for item in result.items])
+            self.assertEqual(2, provider.calls)
+            self.assertEqual({(3, None), (3, 1)}, {(row[0], row[2]) for row in _cache_rows(source)})
+            inventory = inspect_cache(cache_path)[0]
+        self.assertEqual(1, inventory["unknown_request_count"])
+        self.assertEqual(1.0, inventory["approximate_request_count"])
+
+    # Verifies FR-2026-10-22-06.
+    def test_inspection_reports_approximate_requests_and_unknown_rows(self) -> None:
+        provider = _RecordingTextProvider()
+        proxy = CachingTextReplacementProvider(provider, "synthetic:v1", "synthetic")
+        with TemporaryDirectory() as directory, patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}):
+            source = Path(directory) / "doc.txt"
+            with source_cache_scope(source):
+                proxy.replace(_batch_request("a", "b", "c", "d"))
+                proxy.replace(_batch_request("e"))
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                self.assertEqual(
+                    0,
+                    cache_metrics_main([str(source.with_name(f"{source.name}{CACHE_FILENAME_SUFFIX}"))]),
+                )
+
+        inventory = json.loads(stdout.getvalue())["cache_inventory"][0]
+        self.assertEqual(5, inventory["cached_results"])
+        self.assertAlmostEqual(2.0, inventory["approximate_request_count"])
+        self.assertEqual(0, inventory["unknown_request_count"])
+
+    # Verifies FR-2026-10-22-01.
+    def test_wrappers_forward_the_provider_batch_limits(self) -> None:
+        from pipeline.provider_metrics import MeteredTextReplacementProvider
+
+        provider = _RecordingTextProvider()
+
+        self.assertEqual(provider.batch_limits, CachingTextReplacementProvider(provider, "s:v1").batch_limits)
+        self.assertEqual(provider.batch_limits, MeteredTextReplacementProvider(provider, "s").batch_limits)
+
+    # Verifies FR-2026-10-22-01.
+    def test_wrappers_report_no_limits_for_a_provider_without_them(self) -> None:
+        class UnlimitedProvider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
+
+        self.assertIsNone(CachingTextReplacementProvider(UnlimitedProvider(), "s:v1").batch_limits)
+
+    # Verifies FR-2026-10-22-06 and FR-2026-10-22-03.
+    def test_run_metrics_report_texts_and_rate_limit_waits_separately_from_duration(self) -> None:
+        metrics = RunMetrics()
+        metrics.record("text_replacement", "synthetic", 10, 2.0, texts=4)
+        metrics.record_rate_limit_wait("text_replacement", "synthetic", 2.0)
+        metrics.record_rate_limit_wait("text_replacement", "synthetic", 4.0)
+
+        report = metrics.report(10)[0]
+
+        self.assertEqual(4, report["requested_texts"])
+        self.assertEqual(1, report["successful_calls"])
+        self.assertEqual(2, report["rate_limit_waits"])
+        self.assertEqual(6.0, report["rate_limit_wait_seconds"])
+        self.assertEqual(2.0, report["duration_total_seconds"])
 
 
 if __name__ == "__main__":

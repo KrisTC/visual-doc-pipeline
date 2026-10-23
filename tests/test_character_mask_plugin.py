@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from pipeline.text_replacement.models import TextReplacementRequest
+from pipeline.text_replacement import replace_text
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
 
@@ -13,8 +13,8 @@ class CharacterMaskProviderTests(unittest.TestCase):
     def test_masks_each_non_whitespace_character_and_preserves_unicode_whitespace(self) -> None:
         input_text = "Héllo\u00a0世界\u3000next\tline\nlast"
 
-        result = CharacterMaskProvider().replace(
-            TextReplacementRequest(input_text, False, "en", "ja")
+        result = replace_text(
+            CharacterMaskProvider(), input_text, is_filename=False, source_language="en", target_language="ja"
         )
 
         self.assertEqual("#####\u00a0##\u3000####\t####\n####", result.text)
@@ -26,8 +26,8 @@ class CharacterMaskProviderTests(unittest.TestCase):
     def test_preserves_filenames_unchanged(self) -> None:
         input_text = "quarterly report_日本語.pptx"
 
-        result = CharacterMaskProvider().replace(
-            TextReplacementRequest(input_text, True, "en", "ja")
+        result = replace_text(
+            CharacterMaskProvider(), input_text, is_filename=True, source_language="en", target_language="ja"
         )
 
         self.assertEqual(input_text, result.text)

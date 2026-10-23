@@ -1,6 +1,7 @@
 """Deterministic text-replacement provider with double-length hash output."""
 
-from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement.helpers import replace_each
+from pipeline.text_replacement.models import TextReplacementItem, TextReplacementRequest, TextReplacementResult
 from pipeline.text_replacement.provider import TextReplacementProvider
 from pipeline.text_replacement_plugins._masking import mask_non_whitespace_characters
 
@@ -18,12 +19,12 @@ class DoubleCharacterMaskProvider:
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
         """Return double masks while retaining filenames and whitespace unchanged."""
-        replacement = (
-            request.text
-            if request.is_filename
-            else mask_non_whitespace_characters(request.text, 2)
+        return replace_each(
+            request,
+            lambda text: TextReplacementItem(
+                text if request.is_filename else mask_non_whitespace_characters(text, 2), 1.0
+            ),
         )
-        return TextReplacementResult(text=replacement, confidence=1.0)
 
 
 def create_provider() -> TextReplacementProvider:

@@ -264,9 +264,22 @@ def _draw_on_image(image: Image.Image, draw: Callable[[skia.Canvas], None]) -> N
     source = np.ascontiguousarray(np.asarray(image.convert("RGBA")))
     surface = _make_surface(image.width, image.height)
     canvas = surface.getCanvas()
-    canvas.drawImage(skia.Image.fromarray(source), 0, 0)
+    # The default colour type is the platform's native order (BGRA on Windows), which would
+    # swap red and blue for an RGBA array, so state the byte order explicitly.
+    canvas.drawImage(
+        skia.Image.fromarray(
+            source,
+            colorType=skia.ColorType.kRGBA_8888_ColorType,
+            alphaType=skia.AlphaType.kUnpremul_AlphaType,
+        ),
+        0,
+        0,
+    )
     draw(canvas)
-    rendered_pixels = surface.makeImageSnapshot().toarray()
+    rendered_pixels = surface.makeImageSnapshot().toarray(
+        colorType=skia.ColorType.kRGBA_8888_ColorType,
+        alphaType=skia.AlphaType.kUnpremul_AlphaType,
+    )
     transparent_source = source[:, :, 3] == 0
     transparent_output = rendered_pixels[:, :, 3] == 0
     # Skia can canonicalize an alpha-zero pixel's otherwise unobservable RGB

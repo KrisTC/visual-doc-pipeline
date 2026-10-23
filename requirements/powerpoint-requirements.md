@@ -876,3 +876,32 @@ non-Latin output, and a visible non-text element do not receive an inferred
 space. Tests shall retain the existing one request per eligible SmartArt text
 node, replace-each-logical-value-once behaviour, generated-diagram-shape
 exclusion, and synthetic-data-only constraint.
+
+---
+
+## FR-2026-10-22-08
+
+| Property | Value |
+|----------|-------|
+| Title | Translate all PowerPoint text parts in every document-text layout mode |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-07, FR-2026-08-04-11, FR-2026-08-04-13, FR-2026-10-22-04 |
+
+### Description
+
+In every `--document-text-layout` mode, the PPTX handler shall translate the editable text of slide layouts, slide masters, chart text, and comments, and of any other package part that holds translatable DrawingML or PresentationML text, in addition to the slide, table, SmartArt, WordArt, and speaker-note text that FR-2026-08-04-11 and FR-2026-08-04-13 already cover. A fitted mode (`preserve-basic-layout` and `preserve-basic-layout-source-font`) shall fit the text it can fit, namely slide text frames and table cells, and shall translate these other parts through the `preserve-source-formatting` route, because no bounded text frame exists to fit. This matches FR-2026-08-04-11's rule that a text container that cannot be fitted uses `preserve-source-formatting` replacement.
+
+A text that another PPTX path already translates, such as slide text, SmartArt data, and speaker notes, shall not also be translated by the generic route. The generic route shall not alter non-text XML, relationships, geometry, or markup, and shall use the selected provider, languages, and per-source isolation of FR-2026-08-03-03.
+
+`preserve-source-formatting` mode already translates these parts, so its output is unchanged by this requirement.
+
+### Rationale
+
+Layout, master, chart and comment text left in the source language produces a partly translated presentation. Every fitted mode translates all text in the package, as it does for SmartArt, WordArt and speaker notes. These parts add translation requests (a measured presentation needed about 1,800 in total), which batching makes inexpensive.
+
+### Verification
+
+Automated tests shall use synthetic PPTX files only, with translatable text in a layout, a master, a chart title, and a comment. They shall verify translation in all three modes, that slide, SmartArt, and notes text is translated exactly once, that fitted slide text is unchanged, that non-text XML and relationships are retained, and that the package opens without repair.

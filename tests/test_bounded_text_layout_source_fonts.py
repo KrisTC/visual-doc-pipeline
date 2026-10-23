@@ -343,6 +343,56 @@ class SourceFontMeasurementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "bidirectional text"):
             _portable_segments(run, "base", (("symbols", "symbols"),))
 
+    # Verifies FR-2026-10-23-01.
+    def test_a_tab_needs_no_glyph_coverage_and_creates_no_fallback_segment(self) -> None:
+        assert self.typeface is not None
+        self.assertTrue(bounded_text_layout._glyphs_available(self.typeface, "A\tB"))
+        run = self._box("A\tB").paragraphs[0].runs[0]
+        coverage = {("base", "A"): True, ("base", "B"): True}
+        with patch(
+            "pipeline.bounded_text_layout._glyphs_available",
+            side_effect=lambda face, text: all(
+                coverage.get((face, character), character == "\t") for character in text
+            ),
+        ):
+            segments = _portable_segments(run, "base", (("symbols", "symbols"),))
+
+        self.assertEqual(["A\tB"], [segment.text for segment in segments])
+        self.assertEqual(["sans-serif"], [segment.font_classification for segment in segments])
+
+    # Verifies FR-2026-10-23-01.
+    def test_a_tab_is_kept_and_measures_as_four_spaces(self) -> None:
+        tabbed = fit_explicit_noto_text_box(self._box("A\tB"))
+        spaced = fit_explicit_noto_text_box(self._box("A    B"))
+
+        self.assertEqual("A\tB", tabbed.text_box.paragraphs[0].runs[0].text)
+        self.assertEqual(
+            fitted_text_lines(spaced)[0].width_pixels,
+            fitted_text_lines(tabbed)[0].width_pixels,
+        )
+
+    # Verifies FR-2026-10-23-01 and FR-2026-08-27-09.
+    def test_a_tab_beside_an_uncovered_character_takes_the_unsupported_outcome(self) -> None:
+        with self.assertRaises(bounded_text_layout.PortableTextUnsupportedError) as raised:
+            fit_explicit_noto_text_box(self._box("A\t\ue000"))
+
+        self.assertEqual("\ue000", raised.exception.characters)
+
+    # Verifies FR-2026-08-27-09.
+    def test_the_unsupported_diagnostic_names_code_points_without_the_provider(self) -> None:
+        with self.assertRaises(bounded_text_layout.PortableTextUnsupportedError) as raised:
+            fit_explicit_noto_text_box(self._box("A\ue000"))
+
+        entry = bounded_text_layout.unsupported_text_diagnostic(
+            raised.exception, "A\ue000", "synthetic_container", slide_index=3
+        )
+
+        self.assertEqual("unsupported", entry["kind"])
+        self.assertEqual("synthetic_container", entry["container_kind"])
+        self.assertEqual("A\ue000", entry["source_text"])
+        self.assertEqual(3, entry["slide_index"])
+        self.assertEqual(["U+E000"], entry["code_points"])
+
 
 if __name__ == "__main__":
     unittest.main()

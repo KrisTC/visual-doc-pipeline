@@ -1729,3 +1729,39 @@ Tests shall also verify the updated per-span output for a compatible
 cross-colour ordered-list item and that distinct ordered-list items remain
 separate. They shall use only repository-owned synthetic text, fonts, colours,
 and PDFs.
+
+---
+
+## FR-2026-10-23-02
+
+| Property | Value |
+|----------|-------|
+| Title | Plan PDF form-field appearance-stream text to avoid a plan miss |
+| Owner | KrisTC |
+| Status | Deferred |
+| Source | User decision during FR-2026-10-22-04 implementation review |
+| Date Added | 2026-10-23 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-10-22-01, FR-2026-10-22-04 |
+
+### Description
+
+In the fitted layout modes, the PDF plan step shall list the text that the apply
+step translates from a form field's generated appearance stream after the field's
+`/V` has been replaced, so that the apply step finds every such text in the batch
+results and makes no single-text provider call for it (a plan miss under
+FR-2026-10-22-04).
+
+### Rationale
+
+The pre-existing apply route translates a form field's appearance stream after
+replacing its `/V`, and the plan step does not list that text. Each affected field
+therefore costs one plan miss and one extra single-text provider request. The
+output is correct and the plan-miss fallback keeps it so. No sample PDF has
+produced a plan miss, so the rare extra request does not justify changing the
+PDF handler.
+
+### Notes
+
+Deferred; there is no plan to implement it unless plan misses are observed in
+real documents. The `plan_misses` count in the `--debug` sidecar shows whether a
+document is affected.

@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from pipeline.text_replacement.errors import TextReplacementProviderError
-from pipeline.text_replacement.models import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement.models import TextReplacementItem, TextReplacementRequest
 from pipeline.text_replacement_plugins.argos_translate import (
     ArgosTranslateProvider,
     _ArgosModules,
@@ -78,7 +78,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
         translate_module = _FakeTranslateModule(package_module, "Hola")
 
         result = self._replace_with_modules(
-            TextReplacementRequest("Hello", False, "en-GB", "es-MX"),
+            TextReplacementRequest(("Hello",), False, "en-GB", "es-MX"),
             package_module,
             translate_module,
         )
@@ -98,7 +98,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
         translate_module = _FakeTranslateModule(package_module, "こんにちは")
 
         result = self._replace_with_modules(
-            TextReplacementRequest("Hello", False, "en", "ja"), package_module, translate_module
+            TextReplacementRequest(("Hello",), False, "en", "ja"), package_module, translate_module
         )
 
         self.assertEqual("こんにちは", result.text)
@@ -113,7 +113,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
         translate_module = _FakeTranslateModule(package_module, "quarterly report")
 
         result = self._replace_with_modules(
-            TextReplacementRequest("四半期報告.pptx", True, "ja", "en"),
+            TextReplacementRequest(("四半期報告.pptx",), True, "ja", "en"),
             package_module,
             translate_module,
         )
@@ -128,7 +128,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
 
         with self.assertRaises(TextReplacementProviderError):
             self._replace_with_modules(
-                TextReplacementRequest("四半期報告.pptx", True, "ja", "en"),
+                TextReplacementRequest(("四半期報告.pptx",), True, "ja", "en"),
                 package_module,
                 translate_module,
             )
@@ -140,7 +140,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TextReplacementProviderError, "no downloadable route"):
             self._replace_with_modules(
-                TextReplacementRequest("Hello", False, "en", "ja"), package_module, translate_module
+                TextReplacementRequest(("Hello",), False, "en", "ja"), package_module, translate_module
             )
 
     # Verifies FR-2026-08-04-12.
@@ -150,7 +150,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TextReplacementProviderError, "non-official package index"):
             self._replace_with_modules(
-                TextReplacementRequest("Hello", False, "en", "ja"),
+                TextReplacementRequest(("Hello",), False, "en", "ja"),
                 package_module,
                 translate_module,
                 _FakeSettingsModule("https://example.invalid/index.json"),
@@ -163,7 +163,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
         package_module: _FakePackageModule,
         translate_module: _FakeTranslateModule,
         settings_module: _FakeSettingsModule | None = None,
-    ) -> TextReplacementResult:
+    ) -> TextReplacementItem:
         modules = _ArgosModules(
             package_module, translate_module, settings_module or _FakeSettingsModule()
         )
@@ -171,7 +171,7 @@ class ArgosTranslateProviderTests(unittest.TestCase):
             "pipeline.text_replacement_plugins.argos_translate._load_argos_modules",
             return_value=modules,
         ):
-            return ArgosTranslateProvider().replace(request)
+            return ArgosTranslateProvider().replace(request).items[0]
 
 
 def _has_route(packages: list[_AvailablePackage], source: str, target: str) -> bool:

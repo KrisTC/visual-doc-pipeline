@@ -3,17 +3,18 @@
 
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
 from io import BytesIO
 import base64
 import struct
 import unittest
 from unittest.mock import patch
-
+from xml.etree import ElementTree
 from PIL import Image
 
 from pipeline import bounded_text_layout
 from pipeline.vector_text import replace_vector_text
-from pipeline.vector_text.replacer import (
+from pipeline.vector_text.emf import (
     _EmfCoordinateState,
     _EmfFont,
     _EmfRectangle,
@@ -22,30 +23,158 @@ from pipeline.vector_text.replacer import (
     _emf_measured_source_bounds,
     _emf_unclipped_fit_contexts,
 )
-from pipeline.text_replacement import TextReplacementRequest, TextReplacementResult
+from pipeline.text_replacement import (
+    TextReplacementItem,
+    TextReplacementRequest,
+    TextReplacementResult,
+    replace_each,
+)
 
 
 def _mask(text: str) -> str:
     return "#" * len(text)
 
 
-class VectorTextReplacerTests(unittest.TestCase):
-    # Verifies FR-2026-08-04-07.
-    def test_fits_svg_text_only_when_an_explicit_clip_rectangle_exists(self) -> None:
-        class _Provider:
-            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return TextReplacementResult("A substantially longer replacement", 1.0)
+def _svg_texts(data: bytes) -> list[ElementTree.Element]:
+    return list(ElementTree.fromstring(data).iter("{http://www.w3.org/2000/svg}text"))
 
+
+def _style_font_size(element: ElementTree.Element) -> float:
+    for declaration in element.attrib.get("style", "").split(";"):
+        name, _, value = declaration.partition(":")
+        if name.strip() == "font-size":
+            return float(value.strip().removesuffix("px"))
+    raise AssertionError("No font-size in the inline style.")
+
+
+def _stand_in_optional_faces() -> AbstractContextManager[object]:
+    """Behave as if the optional Math and Symbols 2 fonts were bootstrapped.
+
+    The fallback segmentation only runs when those faces exist, and CI does not
+    download them.  The committed mono face stands in; it has no private-use glyphs.
+    """
+    mono = bounded_text_layout._base_noto_typefaces()["fixed-width"]
+    return patch(
+        "pipeline.bounded_text_layout.optional_static_typefaces",
+        return_value={"math": mono, "symbols": mono},
+    )
+
+
+class VectorTextReplacerTests(unittest.TestCase):
+    # Verifies FR-2026-08-04-07, FR-2026-10-22-11 and FR-2026-10-22-12.
+    def test_fits_svg_text_with_and_without_a_clip_rectangle(self) -> None:
         result = replace_vector_text(
             b'''<svg xmlns="http://www.w3.org/2000/svg"><defs><clipPath id="box"><rect width="40" height="20"/></clipPath></defs><text clip-path="url(#box)" font-family="Source Sans" font-size="20">old</text><text font-size="20">free</text></svg>''',
             ".svg", _mask, "en", document_text_layout="preserve-basic-layout",
-            replacement_provider=_Provider(), target_language="en",
+            replacement_provider=_LongReplacementProvider(), target_language="en",
         )
 
-        self.assertIn(b"A substantially longer replacement", result.data)
         self.assertIn(b"Noto Sans JP", result.data)
-        self.assertLess(float(result.data.split(b'font-size="')[1].split(b"px")[0]), 20.0)
-        self.assertIn(b"####", result.data)
+        self.assertNotIn(b"####", result.data)
+        self.assertEqual(2, result.replaced_text_items)
+        clipped, free = _svg_texts(result.data)
+        self.assertEqual("A considerably longer heading", clipped.text)
+        self.assertLess(float(clipped.attrib["font-size"].removesuffix("px")), 20.0)
+        self.assertEqual("A considerably longer heading", free.text)
+        self.assertLess(_style_font_size(free), 20.0)
+
+    # Verifies FR-2026-10-22-12.
+    def test_svg_text_without_a_clip_rectangle_is_fitted_in_both_layouts(self) -> None:
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout):
+                result = replace_vector_text(
+                    b'<svg xmlns="http://www.w3.org/2000/svg"><style>.t{font-size:24px}</style>'
+                    b'<text class="t" font-family="No Such Face">free</text></svg>',
+                    ".svg", _mask, "en", document_text_layout=layout,
+                    replacement_provider=_LongReplacementProvider(), target_language="en",
+                )
+
+                text = _svg_texts(result.data)[0]
+                self.assertEqual("A considerably longer heading", text.text)
+                self.assertLess(_style_font_size(text), 24.0)
+
+    # Verifies FR-2026-10-22-12.
+    def test_svg_replacement_no_longer_than_the_source_keeps_its_size(self) -> None:
+        class _Short:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("ab", 1.0))
+
+        result = replace_vector_text(
+            b'<svg xmlns="http://www.w3.org/2000/svg"><text font-size="20">free text</text></svg>',
+            ".svg", _mask, "en", document_text_layout="preserve-basic-layout",
+            replacement_provider=_Short(), target_language="en",
+        )
+
+        text = _svg_texts(result.data)[0]
+        self.assertEqual("ab", text.text)
+        self.assertNotIn("font-size", text.get("style", ""))
+
+    # Verifies FR-2026-10-22-12.
+    def test_svg_text_that_cannot_be_placed_safely_is_replaced_at_its_source_size(self) -> None:
+        source = (
+            b'<svg xmlns="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/1999/xlink">'
+            b'<g transform="rotate(30)"><text font-size="20">one</text></g>'
+            b'<text font-size="20" transform="skewX(10)">two</text>'
+            b'<text font-size="20" rotate="15">three</text>'
+            b'<text font-size="2em">four</text>'
+            b'<text font-size="20"><textPath x:href="#p">five</textPath></text>'
+            b'<text font-size="20" writing-mode="tb">six</text>'
+            b'<text font-size="20">seven<tspan>eight</tspan></text></svg>'
+        )
+
+        result = replace_vector_text(
+            source, ".svg", _mask, "en", document_text_layout="preserve-basic-layout",
+            replacement_provider=_LongReplacementProvider(), target_language="en",
+        )
+
+        # Only the childless tspan inside mixed content is fitted; its parent keeps the source size.
+        self.assertEqual(1, result.data.count(b"considerably"))
+        for word in (b"one", b"two", b"three", b"four", b"five", b"six", b"seven", b"eight"):
+            self.assertNotIn(b">" + word, result.data)
+        self.assertEqual(1, result.data.count(b"font-size:"))
+        self.assertEqual(8, result.replaced_text_items)
+
+    # Verifies FR-2026-10-22-12: a legacy symbol-font bullet has no approved portable face.
+    def test_svg_text_no_portable_face_covers_is_replaced_at_its_source_size(self) -> None:
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout), _stand_in_optional_faces():
+                result = replace_vector_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg">'
+                    '<text font-family="Wingdings" font-size="32">\uf06e</text>'
+                    '<text font-size="20">free</text></svg>'.encode(),
+                    ".svg", _mask, "en", document_text_layout=layout,
+                    replacement_provider=_LongReplacementProvider(), target_language="en",
+                )
+
+                bullet, free = _svg_texts(result.data)
+                self.assertEqual("#", bullet.text)
+                self.assertNotIn("font-size", bullet.get("style", ""))
+                self.assertEqual("A considerably longer heading", free.text)
+                self.assertEqual(2, result.replaced_text_items)
+
+    # Verifies FR-2026-10-22-12.
+    def test_measuring_text_no_portable_face_covers_reports_it_as_unmeasurable(self) -> None:
+        from pipeline.vector_text.common import SourceLineFont, measure_source_line
+
+        font = SourceLineFont("Wingdings", 24.0, False, False)
+
+        with _stand_in_optional_faces():
+            self.assertIsNone(measure_source_line("\uf06e", font, measure_source_fonts=False))
+            self.assertIsNotNone(measure_source_line("abc", font, measure_source_fonts=False))
+
+    # Verifies FR-2026-10-22-11 and FR-2026-10-22-12: overflow stays translated.
+    def test_svg_text_that_cannot_fit_is_still_translated(self) -> None:
+        class _Huge:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("W" * 400, 1.0))
+
+        result = replace_vector_text(
+            b'<svg xmlns="http://www.w3.org/2000/svg"><text font-size="20">x</text></svg>',
+            ".svg", _mask, "en", document_text_layout="preserve-basic-layout",
+            replacement_provider=_Huge(), target_language="en",
+        )
+
+        self.assertEqual("W" * 400, _svg_texts(result.data)[0].text)
 
     # Verifies FR-2026-08-03-05.
     def test_replaces_svg_text_and_retains_vector_structure(self) -> None:
@@ -111,7 +240,7 @@ class VectorTextReplacerTests(unittest.TestCase):
     def test_fits_unclipped_emf_text_and_stops_at_a_vertical_line(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return TextReplacementResult("A considerably longer heading", 1.0)
+                return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
         source = _emf_with_unclipped_text(line_x=60)
         contexts = _emf_unclipped_fit_contexts(source, measure_source_fonts=False)
@@ -144,8 +273,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(line_x=60)
@@ -184,8 +315,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(intervening_line=True)
@@ -211,8 +342,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("One coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("One coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -263,8 +394,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(second_left=12, include_third=True)
@@ -292,8 +425,10 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A considerably longer grouped heading", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(
+                    request, lambda text: TextReplacementItem("A considerably longer grouped heading", 1.0)
+                )
 
         provider = _Provider()
         source = _emf_with_grouped_unclipped_text(line_x=60, clipped=True)
@@ -321,8 +456,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A longer coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A longer coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -347,8 +482,8 @@ class VectorTextReplacerTests(unittest.TestCase):
                 self.requests: list[str] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request.text)
-                return TextReplacementResult("A longer coherent replacement", 1.0)
+                self.requests.extend(request.texts)
+                return replace_each(request, lambda text: TextReplacementItem("A longer coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -370,8 +505,8 @@ class VectorTextReplacerTests(unittest.TestCase):
     def test_groups_mixed_bounded_and_measurement_derived_fragments(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.request = request.text
-                return TextReplacementResult("One coherent replacement", 1.0)
+                self.request = request.texts[0]
+                return replace_each(request, lambda text: TextReplacementItem("One coherent replacement", 1.0))
 
         provider = _Provider()
         result = replace_vector_text(
@@ -551,6 +686,48 @@ class VectorTextReplacerTests(unittest.TestCase):
             replacement_provider=_LongReplacementProvider(),
             target_language="en",
         )
+        self.assertEqual([-20], _emf_font_heights(result.data))
+
+    # Verifies FR-2026-10-22-11 and FR-2026-09-04-01: a measurement wider than the bounds never vetoes.
+    def test_unclipped_emf_text_whose_measurement_exceeds_its_bounds_is_still_fitted(self) -> None:
+        source = _emf_with_unclipped_text(font_family="No Such Face", font_height=-40)
+
+        self.assertEqual(1, len(_emf_unclipped_fit_contexts(source, measure_source_fonts=True)))
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout):
+                result = replace_vector_text(
+                    source, ".emf", _mask, "en", document_text_layout=layout,
+                    replacement_provider=_LongReplacementProvider(), target_language="en",
+                )
+
+                self.assertEqual("A considerably longer heading", _emf_text(result.data))
+                self.assertLess(min(abs(height) for height in _emf_font_heights(result.data)), 40)
+
+    # Verifies FR-2026-10-22-11 and FR-2026-09-04-01: a record without bounds is measured, not skipped.
+    def test_unclipped_emf_text_without_record_bounds_is_measured_and_fitted(self) -> None:
+        source = _emf_with_unclipped_text(font_family="No Such Face", font_height=-40, record_bounded=False)
+
+        self.assertEqual(1, len(_emf_unclipped_fit_contexts(source, measure_source_fonts=True)))
+        result = replace_vector_text(
+            source, ".emf", _mask, "en", document_text_layout="preserve-basic-layout-source-font",
+            replacement_provider=_LongReplacementProvider(), target_language="en",
+        )
+
+        self.assertEqual("A considerably longer heading", _emf_text(result.data))
+
+    # Verifies FR-2026-10-22-11: text that cannot be fitted safely is still translated at its source size.
+    def test_unclipped_emf_text_that_cannot_be_fitted_is_still_translated(self) -> None:
+        source = _emf_with_unclipped_text(
+            record_bounded=False,
+            transform_records=(_emf_modify_world_transform_record(0.0, 0.0, 0.0, 1.0),),
+        )
+
+        result = replace_vector_text(
+            source, ".emf", _mask, "en", document_text_layout="preserve-basic-layout",
+            replacement_provider=_LongReplacementProvider(), target_language="en",
+        )
+
+        self.assertEqual("###", _emf_text(result.data))
         self.assertEqual([-20], _emf_font_heights(result.data))
 
     # Verifies FR-2026-09-05-01.
@@ -770,7 +947,7 @@ def _emf_text_rectangles(data: bytes, rectangle_offset: int) -> list[tuple[int, 
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        return TextReplacementResult("A considerably longer heading", 1.0)
+        return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
 
 def _emf_text_scales(data: bytes) -> list[tuple[float, float]]:
@@ -828,12 +1005,14 @@ def _emf_with_unclipped_text(
     transform_records: tuple[bytes, ...] = (),
     font_family: str = "Noto Sans JP",
     header_right: int = 200,
+    font_height: int = -20,
+    record_bounded: bool = True,
 ) -> bytes:
-    records = [_emf_font_record(font_family), _emf_select_object_record(1)]
+    records = [_emf_font_record(font_family, height=font_height), _emf_select_object_record(1)]
     records.extend(transform_records)
     if line_x is not None:
         records.extend((_emf_move_to_record(line_x, -10), _emf_line_to_record(line_x, 30)))
-    records.append(_emf_exttextout_record("Old", 0, 0, 40, 20))
+    records.append(_emf_exttextout_record("Old", 0, 0, 40, 20, bounded=record_bounded))
     if adjacent_text_left is not None:
         records.append(_emf_exttextout_record("Value", adjacent_text_left, 0, 120, 20))
     header = bytearray(88)

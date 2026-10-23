@@ -92,6 +92,7 @@ def run_git(project_root: Path, *arguments: str) -> str:
         check=True,
         cwd=project_root,
         text=True,
+        encoding="utf-8",
         capture_output=True,
     )
     return completed_process.stdout
@@ -138,7 +139,7 @@ def requirement_files_at_revision(project_root: Path, revision: str) -> dict[Pat
     """Read requirement files directly in requirements/ from a Git revision."""
     paths = run_git(project_root, "ls-tree", "-r", "--name-only", revision, "--", "requirements").splitlines()
     return {
-        path: run_git(project_root, "show", f"{revision}:{path}")
+        path: run_git(project_root, "show", f"{revision}:{path.as_posix()}")
         for name in paths
         if (path := Path(name)).parent == REQUIREMENTS_DIRECTORY and path.suffix == ".md"
     }

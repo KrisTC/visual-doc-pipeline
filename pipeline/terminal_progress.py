@@ -53,6 +53,10 @@ class CurrentProgress:
         """Advance the active task."""
         self.display.advance_current(1 if count is None else count)
 
+    def set_total(self, total: int) -> None:
+        """Grow the active task's total."""
+        self.display.set_current_total(total)
+
     def close(self) -> None:
         """The shared live display owns row lifetime."""
         return None
@@ -139,6 +143,11 @@ class LiveProgress:
     def advance_current(self, count: float = 1) -> None:
         if self._current is not None:
             self._progress.advance(self._current, count)
+
+    def set_current_total(self, total: int) -> None:
+        """Grow or set the active task's total once more work is known."""
+        if self._current is not None:
+            self._progress.update(self._current, total=total)
 
     def clear_current(self) -> None:
         if self._current is not None:

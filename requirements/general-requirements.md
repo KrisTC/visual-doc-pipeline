@@ -54,7 +54,7 @@ Using `google_cloud_translate`, including by accepting its default, authorizes t
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-08-03 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-01, FR-2026-10-22-07, FR-2026-10-23-02 |
 
 ### Description
 
@@ -65,11 +65,9 @@ file. Its current-task bar shall show the source basename and retain the
 existing work-item totals and labels.
 
 The command shall write the relative path of each source file when it starts
-processing it. A bitmap source's current-task bar shall contain one work item.
-A document source's current-task bar shall contain one native-text work item
-and one work item for every embedded raster bitmap. A PDF's bar shall
-additionally contain one vector-content review work item for every page. The
-current-task bar shall advance after each work item completes. After each
+processing it. A source's current-task bar shall cover the plan, translate, and apply steps
+defined by FR-2026-10-22-07. The current-task bar shall advance after each work
+item completes. After each
 current-task advance, the overall bar shall advance to the corresponding
 percentage of that source file's 100-unit share. A completed or failed source
 shall advance the overall bar to the end of its share, so later source files
@@ -81,8 +79,9 @@ OCR and later translation can take substantial time. Per-document progress provi
 
 ### Notes
 
-The active-task text shall show the current native-text, embedded-image, or
-PDF-vector work item. Existing one-line per-file failure reporting shall remain
+FR-2026-10-22-07 defines the plan, translate, and apply work items. The 100-unit overall share per source, the `progress.json` shape, and failure handling are unchanged. FR-2026-10-23-02 adds the optional `details` and `eta_status` properties to `progress.json`.
+
+The active-task text shall show the current step and work item without exposing text. Existing one-line per-file failure reporting shall remain
 visible without stopping later work. A failure shall reset the current-task and
 nested-operation rows before later files are processed.
 
@@ -116,9 +115,26 @@ with a complete new JSON file. It shall not hold an exclusive lock while work
 is in progress. Readers may therefore read either the previous complete JSON
 document or the replacement complete JSON document.
 
+Publishing a progress snapshot shall tolerate transient local file locks, such
+as endpoint-security software or a monitoring reader briefly holding
+`progress.json` or its temporary file open. When writing or replacing the file
+fails with an operating-system error, the command shall retry the whole snapshot
+using bounded exponential backoff with jitter for no more than 5 seconds in
+total, with delays that increase up to approximately 1 second. A snapshot that
+still fails after that period shall be skipped, and the command shall continue
+processing. A later snapshot supersedes a skipped one. The command shall write
+one warning to standard error for the run, naming the progress file, the elapsed
+retry duration and the underlying operating-system error, and noting that
+another process, such as endpoint-security software, may be holding the file
+open. This applies equally to the initial snapshot. A progress-file failure
+shall never be reported as a failure of the source file being processed.
+
 Automated tests shall use synthetic files and verify the initial queued and
 skipped entries, processing updates, completed and failed entries, and that
-every observed progress-file write is valid JSON.
+every observed progress-file write is valid JSON. They shall also verify, with a
+mocked clock and sleep, success after a transient failure, the 5-second limit,
+the single warning, and that processing and its result continue after a skipped
+snapshot.
 
 ---
 
@@ -322,7 +338,7 @@ Automated tests shall invoke the script as a subprocess with synthetic temporary
 
 Portable formats shall embed selected repository-owned static Noto faces. For a format without a safe portable embedding path, including ordinary EMF and WMF, the adapter shall retain the resolved source face but write the Noto-derived fitted size and explicit layout settings. This is a required best-effort mode, not a reason to retain the original size when replacement text length changes substantially.
 
-A container without an explicit finite rectangle, or for which the adapter cannot safely write an explicit fitting result, shall retain the existing `preserve-source-formatting` replacement behaviour. Free-flowing Word paragraphs, arbitrary PDF page-content text, outlined vector text, and SVG text without an explicit containing rectangle shall not opt in.
+A container without an explicit finite rectangle, or for which the adapter cannot safely write an explicit fitting result, shall retain the existing `preserve-source-formatting` replacement behaviour, except where a format requirement defines fitting without a rectangle (FR-2026-10-22-11). Free-flowing Word paragraphs, arbitrary PDF page-content text, and outlined vector text shall not opt in.
 
 ### Rationale
 
@@ -335,8 +351,7 @@ The required bounding sources and safe write rules are not yet fully specified f
 - DOCX: DrawingML text boxes can use their drawing extent; Word embedded-diagram text requires a defined mapping from the diagram's text node to its rendered shape extent.
 - XLSX: Drawing-shape text can use its DrawingML transform extent. The existing finite-grid-cell path remains separate only for bounds extraction; it uses the same fitting core.
 - PDF: AcroForm widgets and FreeText annotations have rectangles. Implemented PDF rules are defined by FR-2026-08-04-09; portable Unicode fallback is proposed by FR-2026-08-04-10.
-- SVG: ordinary `text`/`tspan` elements do not define a rectangular text field. A qualifying explicit rectangle must be identified, such as a clipping rectangle associated with the text; `foreignObject` and arbitrary HTML layout remain out of scope unless separately added.
-- EMF and WMF: text output records have an origin and may have a clipping/opaque rectangle. Only records with an explicit clipping rectangle are candidates; a record with only an origin, advances, or current font is not bounded text.
+- SVG, EMF, and WMF: the bounding sources, and fitting of text that has no bounds, are defined in vector-requirements.md. `foreignObject` and arbitrary HTML layout remain out of scope unless separately added.
 
 Automated tests shall use synthetic DOCX, XLSX, PDF, SVG, EMF, and WMF inputs. They shall verify exact eligibility/fallback decisions, replacement through the shared core, explicit fitted output, and that every generated file remains loadable by an appropriate format parser. PDF tests shall also verify any required appearance streams and embedded-font resources.
 
@@ -643,6 +658,17 @@ not create a second model cache, lock model bytes, or alter PaddleOCR's cache
 configuration. Adding a PaddleOCR language shall add one initialization step
 to the bootstrap command.
 
+Each optional font archive shall be pinned to an exact release URL and an
+exact SHA-256 digest recorded beside the font mapping. The bootstrap shall
+verify the downloaded archive against that digest before opening it, and a
+mismatch shall fail the bootstrap without caching any font bytes. Changing a
+pinned font version shall update its URL and digest together.
+
+The bootstrap command shall accept `--fonts-only`. That option downloads and
+verifies only the optional fonts, skips PaddleOCR initialization, and does not
+write the success marker, because the marker records that PaddleOCR was
+initialized. Continuous integration (TR-2026-09-10-01) uses this option.
+
 The user-facing document-processing and OCR-evaluation scripts shall call one
 small shared helper before starting work. The helper shall check the fitted
 layout's optional packs and, when PaddleOCR is selected, whether the bootstrap
@@ -655,7 +681,9 @@ with a concise instruction to run the bootstrap command. Repository-root
 Downloading fonts or OCR models while a document is being processed causes
 late, network-dependent failures. A small explicit setup step makes those
 downloads happen at a convenient time without turning the wrappers or the
-normal processing path into an asset-management system.
+normal processing path into an asset-management system. Pinning each archive's
+digest keeps the font bytes that fitted layout measures and embeds identical
+across machines and CI.
 
 ### Notes
 
@@ -668,13 +696,15 @@ shall not contain source document content, paths, text, credentials, or
 translation responses.
 
 The source and licence for each optional Noto pack shall be recorded beside the
-font mapping. The project deliberately trusts the selected official Noto source
-for this convenience feature; it does not require a separate artifact manifest,
-download-size check, or checksum verification process.
+font mapping. The project trusts the selected official Noto source, and the
+pinned digest guards against a changed or corrupted download rather than
+replacing that trust.
 
 Automated tests shall mock the downloads and PaddleOCR initialization. They
 shall verify the bootstrap invokes every selected font and existing PaddleOCR
-language, the fitted-layout font-cache prerequisite fails before processing,
+language, rejects an archive that does not match its pinned digest without
+caching it, skips PaddleOCR and the success marker under `--fonts-only`, the
+fitted-layout font-cache prerequisite fails before processing,
 the folder-replacement summary names the missing font and bootstrap command,
 the successful marker is recognized, and the wrappers remain unchanged.
 
@@ -849,6 +879,10 @@ or object). It shall include the uncovered characters and code points and the
 candidate portable faces considered. The diagnostic path shall not invoke the
 replacement provider again merely to populate the report. Normal runs remain
 silent except for the existing end-of-run missing-font guidance.
+
+### Implementation Progress
+
+Implemented for PPTX text frames and table cells, DOCX text boxes, XLSX cells and drawing shapes, and clipped SVG, EMF and WMF text. PDF FreeText and AcroForm handling is pending Phase 9, so this requirement stays `Proposed`. Unclipped vector text without a bounded container keeps the unfitted fallback of FR-2026-10-22-12.
 
 The adapter shall serialize successfully selected multi-face segments using its
 native representation, as required by FR-2026-08-27-05, before applying this
@@ -1418,19 +1452,18 @@ progress rows:
    name exceeds the width. Its active-operation label shall appear in the
    detail column, not replace the filename.
 3. A **Nested** row shall appear only while the active folder-replacement
-   source processes one nested object. For an OCR-backed embedded bitmap or PDF
-   vector-analysis operation, it shall identify that document part and advance
-   through exactly three stages: OCR recognition; processing the OCR results,
-   including confidence filtering, text replacement, and colour analysis; and
-   rendering the replacement image. For a relationship-reachable DOCX chart
-   with an embedded XLSX workbook, it shall identify the chart and workbook and
-   advance once for every native-text replacement request made by the embedded
-   XLSX adapter. Its detail label shall identify the active worksheet or drawing
-   part and its replacement-request count without exposing replacement text.
-   Before translation begins, the adapter shall calculate the exact number of
-   such requests using its normal selection rules, so the row shows a real
-   completion count and percentage. It shall be cleared when that nested-object
-   operation finishes or fails.
+   source processes one nested object that FR-2026-10-22-07 selects for it. For
+   an OCR-backed embedded bitmap or PDF vector-analysis operation, it shall
+   identify that document part and advance through exactly three stages: OCR
+   recognition; processing the OCR results, including confidence filtering,
+   text replacement, and colour analysis; and rendering the replacement image.
+   For a nested document, such as the embedded XLSX workbook of a
+   relationship-reachable DOCX chart, it shall identify the document part and
+   advance through that document's plan items, translate batches, and apply
+   items as FR-2026-10-22-07 defines. Its detail label shall identify the
+   active worksheet or drawing part and its item count without exposing
+   replacement text. It shall be cleared when that nested-object operation
+   finishes or fails.
 
 The current row and nested row shall be reset for each next task rather than
 left as historical completed bars. The overall row shall remain visible until
@@ -1757,5 +1790,237 @@ with caching both enabled and disabled. They shall verify
 that the new metrics fields and command output contain no cache content,
 paths, keys, or provider configuration and that inspection never creates a
 cache. Existing diagnostic fields remain governed by FR-2026-08-27-06.
+
+---
+
+## FR-2026-10-22-04
+
+| Property | Value |
+|----------|-------|
+| Title | Process each source as plan, translate, and apply steps with a shared translation engine |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request: batch text replacement (`docs/batch-text-replacement-plan.md`) |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-07, FR-2026-08-27-10, FR-2026-10-22-01, FR-2026-10-22-02, FR-2026-10-22-05, FR-2026-10-22-06, FR-2026-10-22-07 |
+
+### Description
+
+Folder replacement shall process each source file in three steps, so that translation can be sent in batches while keeping the output unchanged.
+
+1. **Plan** performs only the work that depends on the source: parsing, merging runs and spans, grouping by emphasis, OCR, colour estimation, and building the ordered list of texts to translate, while retaining the state that apply needs. It shall not fit, render, or write output, shall not call a text-replacement provider, and shall have no side effect outside its own plan object.
+2. **Translate** is performed by a translation engine shared by every format. It resolves every planned text through the text-replacement provider.
+3. **Apply** performs everything that needs the translated text, including post-processing, measuring, fitting, writing, and rendering, in the order the handlers use. For each item it shall request the translation of the exact text that plan stored. It shall not build a new text to translate, so plan and apply cannot drift apart.
+
+Every format handler, namely bitmap, vector (SVG, EMF, WMF), PDF, DOCX, PPTX, XLSX, and the shared Office package stage, shall provide an explicit plan function and an explicit apply function. Handlers shall not build provider requests: the engine builds them.
+
+The engine shall exist once per top-level source file, matching the source cache scope of FR-2026-08-27-10, and shall own that run's source and target language tags. Handlers shall give the engine each unit's ordered texts, where a unit is a part of the source that is packed and attributed together (for example one document's XML parts, one PDF page's native spans, or one image's OCR items). The driver shall then resolve the engine once, before any apply step of that source starts. During resolution the engine shall, for each unit in order:
+
+- deduplicate texts, skipping a text already resolved by an earlier unit of the same source;
+- pack the remaining texts into batches in document order, closing a batch at the provider's `batch_limits` maximum item count or target character count, sending a text larger than the target character count alone, and rejecting with a safe diagnostic a text larger than the hard maximum character count; a provider with no limits has none applied;
+- send each batch as one text-replacement request with `is_filename` false and the run's language pair, so a provider never receives mixed language pairs;
+- keep the results only in memory, apart from the provider-result cache.
+
+A batch shall never contain texts of more than one unit. A unit larger than one batch shall be split across several batches. The translation of a text that apply asks for but plan did not list shall be requested by a single-text call and counted as a plan miss, so output remains correct although slower. Automated tests on synthetic documents shall require zero plan misses.
+
+Output filenames shall continue to be translated by one-text requests with `is_filename` true, outside the engine and before the output path is determined (FR-2026-08-03-03).
+
+For the same provider results, the output of every format shall be identical to the output of unbatched, per-text translation. Where another requirement states that each paragraph, run group, or text item is replaced by one text-replacement request, that statement defines the granularity of translated texts, not the number of provider calls: each such text is still translated independently as its own element of a batch. A provider failure for a batch shall fail the source file through the existing per-source failure isolation.
+
+### Rationale
+
+Translating each string as it is reached makes one remote request per string, because fitting, bullet mapping and rendering need the translated text. Measured documents needed about 6,900 requests (Word), 3,400 (PDF), 1,800 (PowerPoint) and 220 (Excel), about 0.11 to 0.15 seconds each. Repeating a handler with unchanged text to collect its strings would also repeat OCR, fitting and rendering, and unchanged text does not skip that work. Splitting each handler into a source-only plan step and a translation-dependent apply step lets one engine batch every unit's texts, about 31 requests and an estimated 5 seconds instead of about 14 minutes for the largest measured document, without repeating expensive work or changing output.
+
+### Verification
+
+Automated tests shall use synthetic documents, the `identity` and mask providers, and a test-only recording wrapper that counts requests and can set small `batch_limits`. They shall verify limits obeyed, order preserved, deduplication, batches not spanning units, a unit split into several batches, a plan miss counted and still translated correctly, zero plan misses for each format's synthetic documents, output identical to per-text translation using the mask providers, and that plan calls no provider and writes no output. Google shall be exercised only through a mocked client.
+
+---
+
+## FR-2026-10-22-05
+
+| Property | Value |
+|----------|-------|
+| Title | Process nested documents recursively with the same plan and apply functions |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-09-03-06, FR-2026-09-04-01, FR-2026-10-22-04, FR-2026-10-22-07 |
+
+### Description
+
+A document embedded in another document shall be processed by the same plan and apply functions as a root document of its type, and embedded documents may themselves contain embedded documents. A Word document with an embedded workbook that contains images is one example. Nested document types include a Word chart's embedded workbook, bitmaps and vector graphics under an Office `media` directory, images inside an embedded workbook, PDF raster image XObjects, and raster images inside SVG, EMF, and WMF files. There shall be no separate nested implementation for any type.
+
+A parent shall plan and apply only its direct children through the child type's public plan and apply entry points. A parent's plan shall retain its children's plans and list their units after its own, depth first, with the parent before its children. A parent's apply shall apply each child at the point where the parent's format processes the nested document and embed the returned bytes. The engine and its single resolution step of FR-2026-10-22-04 cover the whole tree of a top-level source file, so deduplication works across levels. Each nested document shall be its own unit with its own batches and a unique path-style identifier below its parent's, for example `docx/xlsx/image-1`.
+
+A handler shall not know its depth and shall not contain a branch for being nested. A parent may change a child's behaviour only by passing explicit keyword-only options that the child's entry point documents and a root caller could also pass, such as the `fast` mode and chart formulae that a Word chart's workbook uses (FR-2026-09-03-06). Work that exists only because of the embedding, such as rebuilding a chart's string cache from the translated workbook or replacing a package part, shall be done by the parent after the child's apply returns.
+
+Processing shall go at most 6 levels below the root file, where the root is level 0 and its embedded documents are level 1. This limit is hard-coded. An embedded document at level 7 or deeper shall be left unchanged, exactly as in the source, and the source shall not fail. When `--debug` is set, the source's diagnostic sidecar shall record one safe `nested_document_depth_limit_exceeded` entry for each such document, identifying its package part name and depth and never its content. Runs without `--debug` shall write nothing extra for this case. There shall be no limit on the total size or number of embedded documents in a tree other than this depth limit.
+
+### Rationale
+
+Embedded documents come from untrusted input, so recursion needs a bound: 6 levels covers realistic nesting such as a Word document containing a workbook that contains images. One implementation per type keeps behaviour, fallbacks and diagnostics identical between a root file and the same type nested in another document, and keeps each format's logic in one place. Treating each nested document as its own unit lets a 75,000-row embedded workbook be batched on its own instead of being mixed into its parent's batches.
+
+### Verification
+
+Automated tests shall use synthetic documents. They shall verify a three-level tree (document, workbook, image) with path-style unit ids, depth-first unit order, one shared resolution, and deduplication across levels; that a nested document's output equals the output of the same bytes processed as a root file with the same options; that a level-7 document is left unchanged without failing the source; and that the depth-limit diagnostic appears only with `--debug` and contains no content.
+
+---
+
+## FR-2026-10-22-06
+
+| Property | Value |
+|----------|-------|
+| Title | Cache batched text-replacement results per text and report request metrics |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-27-10, FR-2026-08-27-11, FR-2026-10-21-01, FR-2026-10-22-01, FR-2026-10-22-03, FR-2026-10-22-04, SR-2026-08-27-01, SR-2026-10-21-01 |
+
+### Description
+
+The text-replacement caching proxy shall implement the batch `replace` of FR-2026-10-22-01 while keeping the per-text cache semantics of FR-2026-08-27-10. It shall derive each text's key exactly as before, so the cache schema version and key derivation are unchanged and existing cache sidecars continue to hit. It shall read all of a request's keys in one transaction rather than one round trip per text, forward only the misses to the wrapped provider as one smaller request in the original order, merge the results back into request order, and store each successful item under its own per-text key. A request whose texts are all hits shall make no provider call. A failed request, or a wrapped result whose length differs from the forwarded text count, shall store nothing and shall raise the provider error.
+
+The existing `provider_result_cache` table shall gain one nullable `batch_items INTEGER` column, added by the same in-place migration pattern as FR-2026-10-21-01, that records the number of texts in the provider request that produced the row. It shall remain unknown for existing rows and shall not be backfilled on a hit. For a row produced by a batched request, the stored provider-call duration shall be the request's elapsed time apportioned across its texts by character share, so per-text durations still sum to the measured call time. The cache-metrics command and the debug cache-inventory snapshot shall additionally report an approximate provider request count, computed by aggregation in SQLite as the sum over rows with known `batch_items` of one divided by `batch_items`, together with the number of rows whose `batch_items` is unknown. Their existing per-string figures shall be retained and labelled so that per-string averages are not read as call latency. FR-2026-10-21-01's rules that inspection reads no result text, creates or modifies no cache, and reports no paths, keys, text, or document-specific detail apply unchanged (SR-2026-10-21-01).
+
+The per-document `--debug` diagnostic sidecar's run activity shall additionally report the number of texts requested, the number of unique texts, cache hits, remote requests, plan misses (FR-2026-10-22-04), the character count and elapsed duration of each remote request, and the number of rate-limit waits and total wait seconds (FR-2026-10-22-03). Cache hits shall contribute no provider-call duration, and these fields shall contain no text.
+
+### Rationale
+
+Per-text keys mean a partly cached document sends only its new texts, existing caches stay valid, and batch composition never changes a result. Cached results are read in one transaction instead of thousands of round trips. Recording `batch_items` and the request count lets cache metrics report real request counts: the measured per-string durations (0.11 to 0.15 seconds on average) are shares of batched requests and would otherwise be misread as the latency of separate calls.
+
+### Verification
+
+Automated tests shall use synthetic requests, mocked providers, and caches. They shall verify that a pre-existing sidecar still hits, partial-hit forwarding and merge order, an all-hit request making no call, nothing cached on failure or wrong length, the migration and unknown `batch_items` for old rows, apportioned durations, the request-count and unknown-count reporting, run-metric fields with caching enabled and disabled, and that no output contains text, keys, or paths.
+
+---
+
+## FR-2026-10-22-07
+
+| Property | Value |
+|----------|-------|
+| Title | Report plan, translate, and apply progress for each source |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-04, FR-2026-09-03-01, FR-2026-09-04-01, FR-2026-10-22-03, FR-2026-10-22-04, FR-2026-10-22-05 |
+
+### Description
+
+For each source file, folder-replacement progress shall cover the plan, translate, and apply steps of FR-2026-10-22-04 on the one Current row, with an active-operation label for the step (for example, planning page 3 of 40, translating batch 4 of 31, and applying page 3 of 40). It shall retain FR-2026-08-03-04's 100-unit overall share for each source and the `progress.json` shape, and these rules define its work items:
+
+- Plan and apply shall each advance once per work item that the handler already counts (a part, slide, sheet block, page, or image). Their totals are known before the step starts.
+- Translate shall advance once per batch sent. Its total is the number of batches remaining after deduplication and cache hits, known when planning finishes, and a fully cached source has none. The Current row's total therefore grows once, when that count is known. The displayed percentage, the overall share, and the `progress.json` percentage shall never move backwards, and none shall reach 100 before the source completes.
+- Nested documents shall add their plan and apply items to the parent's total when the parent's plan discovers them, so the parent's Current row counts the whole tree.
+- While a rate-limit wait of FR-2026-10-22-03 is in progress, the active-operation label shall be "Waiting for translation quota".
+
+A nested document shall additionally have its own Nested row, as FR-2026-09-03-01 defines it, only when it is a bitmap that needs OCR or when its plan contains more than 100 texts. This threshold is hard-coded. All other nested documents shall be counted only in their parent's Current row. The Nested row is a closer view of work already counted in the parent's row, not extra work. It shall show that document's plan items, translate batches, and apply items, identify the document part without exposing text, and show at most one nested document at a time. An OCR-backed bitmap shall keep the three OCR-stage labels of FR-2026-09-03-01.
+
+### Rationale
+
+Once strings are translated in batches, the number of requests is unknown until planning finishes, so a request count can no longer be the unit of progress. Planning is also long-running work: OCR alone took 33 to 73 seconds in measured Word, PDF and PowerPoint documents. Showing each step keeps OCR, translation and rendering visible, and clamping avoids a bar that moves backwards when the batch total becomes known.
+
+### Verification
+
+Automated tests shall use synthetic documents, mocked clocks, and a mocked provider. They shall verify the per-step labels and totals, a single total growth, a fully cached source with no translate step, monotonic row and `progress.json` percentages, parent totals that include nested items, a Nested row for an OCR bitmap and for a nested document above 100 texts and none below, the rate-limit label, and cleanup after a failure.
+
+---
+
+## FR-2026-10-22-11
+
+| Property | Value |
+|----------|-------|
+| Title | Fit text to its known bounds, otherwise to its measured source extent, and always translate |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following an EMF diagnosis |
+| Date Added | 2026-10-22 |
+| Related Requirements | FR-2026-08-03-14, FR-2026-08-04-07, FR-2026-08-27-02 |
+
+### Description
+
+In both fitted document-text layouts, a text that a format can safely rewrite shall be fitted and shall always be translated:
+
+1. **Known bounds.** When the source gives bounds for a text, the replacement shall be fitted into those bounds by reducing its size. A measurement of the source text shall not make a text with known bounds ineligible.
+2. **Unknown bounds.** When the source gives no bounds, the pipeline shall measure the source text at its original size with the source face, or with the committed Noto face when the source face is unavailable (FR-2026-08-27-02), and shall fit the replacement to that measured extent.
+3. **No fit.** A replacement that is larger than its bounds at the smallest permitted size is best effort and shall remain visible as overflow (FR-2026-08-03-14). A failed or inexact fit shall never leave the source text untranslated.
+
+Each format requirement defines what counts as bounds for that format, which texts it can rewrite safely, and any extension or exception to these rules. A text that its format cannot rewrite safely keeps the replacement behaviour that format defines, and is still translated.
+
+### Rationale
+
+Readers are better served by a text that is shrunk to fit and may overflow a little than by one that is not fitted or not translated. A measurement of the source estimates what the source application already knows; when the source face is not installed the Noto face is usually wider, so a measurement must not veto a fit.
+
+### Verification
+
+Automated tests shall use synthetic documents only. Each format's tests shall verify that a text with known bounds is reduced to fit them, that a text without bounds is fitted to its measured source extent with a resolved and with an unavailable source face, and that a replacement that cannot fit at the minimum size is translated and overflows.
+
+---
+
+## FR-2026-10-23-01
+
+| Property | Value |
+|----------|-------|
+| Title | Treat a tab in fitted replacement text as whitespace |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following a PPTX failure diagnosis |
+| Date Added | 2026-10-23 |
+| Related Requirements | FR-2026-08-03-13, FR-2026-08-03-14, FR-2026-08-27-05, FR-2026-08-27-09, FR-2026-10-22-11 |
+
+### Description
+
+In both fitted document-text layouts, a horizontal tab (U+0009) in replacement text shall be treated as whitespace by the portable-face coverage check of FR-2026-08-27-05, as a line break already is. A tab shall not require glyph coverage from any approved portable face, and shall not by itself cause the text to take the safe unsupported outcome.
+
+For measurement, wrapping, and fitting, a tab shall be measured as four ordinary spaces in the face selected for the surrounding text. The width is a fixed estimate, because the true width depends on tab stops that remain out of scope, as in FR-2026-08-03-13; it is wider than one space because a tab is normally rendered wider. The tab character shall be kept in the written text, and a format adapter shall serialize it with its native tab representation where its format defines one, or otherwise exactly as it does for any other text character.
+
+A tab shall never join or split a grapheme cluster. A replacement that contains a tab and a character that no approved portable face covers is governed by FR-2026-08-27-09, as it would be without the tab.
+
+### Implementation Note
+
+Implemented in the shared fitting core, so it applies to every adapter that uses it. PDF tab behaviour has not been checked and is reviewed with the PDF phase.
+
+### Rationale
+
+A tab is whitespace that translators and the `character_mask` provider both return unchanged, but the approved Noto faces have no glyph for it. Without this rule, a PowerPoint slide whose text contains a tab failed its whole file with "No approved portable replacement font covers the text" even though every visible character was covered. Two of the 34 files in a local evaluation set failed this way.
+
+### Verification
+
+Automated tests shall use synthetic text only. They shall verify that a run containing a tab is covered when its other characters are, that a tab between covered characters does not create a fallback segment, that a tab is measured as four spaces, that a tab plus an uncovered character is handled as FR-2026-08-27-09 defines, and that a PPTX slide whose text contains a tab is fitted and written with the tab preserved.
+
+---
+
+## FR-2026-10-23-02
+
+| Property | Value |
+|----------|-------|
+| Title | Report the current step, failure reason and ETA state in folder-replacement progress.json |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-23 |
+| Related Requirements | FR-2026-08-03-04, FR-2026-10-22-07 |
+
+### Description
+
+This requirement extends the `progress.json` file of FR-2026-08-03-04. Its existing keys, values and update rules are unchanged.
+
+1. **Details.** A file entry may contain an optional string property `details`.
+   - While a file has status `processing`, `details` shall hold the active-operation label that the Current row shows for that file (FR-2026-10-22-07), for example "Planning page 3 of 40", "Translating batch 4 of 31", "Applying page 3 of 40" or "Waiting for translation quota". Each change of label shall be published with the same atomic replacement as other updates. `details` shall be present whether or not the terminal progress display is shown, and shall be absent until the first label is set.
+   - When a file completes, `details` shall be removed.
+   - When a file fails, `details` shall hold the same one-line failure message that the command writes to standard error for that file, without the source path, which the entry's key already names. It shall be retained with status `failed`. That message already excludes request text.
+   - Queued and skipped entries shall not contain `details`.
+2. **Unknown ETA.** Whenever the top-level `eta_seconds`, or the `eta_seconds` of a processing file entry, is JSON `null` because the Rich task has insufficient completed work, the same object shall contain a string property `eta_status` with the value `Calculating`. This includes an estimate that reverts to unknown. `eta_status` shall be absent whenever `eta_seconds` is a number, and in entries that do not contain `eta_seconds`. The type of `eta_seconds` is unchanged: a number of seconds or `null`. When terminal progress is disabled, the command estimates no ETA, so `eta_seconds` remains `null` and `eta_status` shall be absent.
+
+### Rationale
+
+A consumer of `progress.json` could previously see only a rough status for a file, so a long planning, translation or apply step looked stalled, and a failed file gave no reason. In a measured Word document, planning alone took 33 to 73 seconds. Publishing the active step and the failure reason lets a monitor show what each file is doing and why it failed without reading the terminal. A `null` ETA is displayed by consumers as "None", which reads as an error. A separate `eta_status` property gives them a natural label while `eta_seconds` keeps its numeric type, so existing consumers continue to work.
+
+### Verification
+
+Automated tests shall use synthetic documents, a mocked provider and a mocked clock. They shall verify that `details` follows the label of each plan, translate, apply and rate-limit step, is absent before the first label and after completion, holds the stderr failure message without the source path for a failed file, and is absent for queued and skipped files; that `eta_status` is `Calculating` exactly when `eta_seconds` is `null` and the progress display is enabled, including when an estimate reverts to `null`, and is absent when `eta_seconds` is a number, in completed, failed, queued and skipped entries, and when terminal progress is disabled; and that every observed progress-file write is valid JSON.
 
 ---

@@ -17,6 +17,7 @@ from PIL import Image
 
 from pipeline import mounted_plugins
 from pipeline.ocr import OcrProviderFactory
+from pipeline.runtime_assets import bootstrap_command
 from pipeline.text_replacement import TextReplacementProviderFactory
 from scripts import folder_replacement
 from scripts.folder_replacement import _argument_parser, _load_default_typeface
@@ -195,7 +196,7 @@ class CliEntryPointTests(unittest.TestCase):
             self.assertIn("Folder replacement did not start", message)
             self.assertIn("No input document was processed", message)
             self.assertIn("Noto Sans Symbols 2", message)
-            self.assertIn("./run.sh scripts/bootstrap_runtime_assets.py", message)
+            self.assertIn(bootstrap_command(), message)
             self.assertNotIn("usage:", message)
 
     # Verifies FR-2026-08-04-02.

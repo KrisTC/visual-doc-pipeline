@@ -69,9 +69,11 @@ from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelP
 from pipeline.ocr.provider import OcrProvider
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    TextReplacementItem,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    replace_each,
 )
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
@@ -155,31 +157,49 @@ class _VectorOutlineOcrProvider(_EmptyOcrProvider):
         )
 
 
+class _SingleTextRequest(TextReplacementRequest):
+    """One text of a received batch, so tests can inspect each requested text."""
+
+    @property
+    def text(self) -> str:
+        return self.texts[0]
+
+
+def _single_text_requests(request: TextReplacementRequest) -> list[_SingleTextRequest]:
+    return [
+        _SingleTextRequest((text,), request.is_filename, request.source_language, request.target_language)
+        for text in request.texts
+    ]
+
+
 class _RecordingReplacementProvider:
     def __init__(self, filename: str | None = None, replacement_text: str | None = None) -> None:
         self.filename = filename
         self.replacement_text = replacement_text
-        self.requests: list[TextReplacementRequest] = []
+        self.requests: list[_SingleTextRequest] = []
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        self.requests.append(request)
+        self.requests.extend(_single_text_requests(request))
         if request.is_filename and self.filename is not None:
-            return TextReplacementResult(self.filename, 1.0)
+            filename = self.filename
+            return replace_each(request, lambda text: TextReplacementItem(filename, 1.0))
         if request.is_filename:
-            return TextReplacementResult(request.text, 1.0)
-        return TextReplacementResult(self.replacement_text or "#" * len(request.text), 1.0)
+            return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
+        return replace_each(
+            request, lambda text: TextReplacementItem(self.replacement_text or "#" * len(text), 1.0)
+        )
 
 
 class _MappedReplacementProvider:
     def __init__(self, replacements: dict[str, str]) -> None:
         self.replacements = replacements
-        self.requests: list[TextReplacementRequest] = []
+        self.requests: list[_SingleTextRequest] = []
 
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        self.requests.append(request)
+        self.requests.extend(_single_text_requests(request))
         if request.is_filename:
-            return TextReplacementResult(request.text, 1.0)
-        return TextReplacementResult(self.replacements.get(request.text, request.text), 1.0)
+            return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
+        return replace_each(request, lambda text: TextReplacementItem(self.replacements.get(text, text), 1.0))
 
 
 def _synthetic_pdf_visual_region(text: str, font_resource_name: str) -> _PdfVisualRegion:
@@ -198,9 +218,9 @@ def _synthetic_pdf_visual_region(text: str, font_resource_name: str) -> _PdfVisu
 
 class _FailingReplacementProvider(_RecordingReplacementProvider):
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        self.requests.append(request)
+        self.requests.extend(_single_text_requests(request))
         if request.is_filename:
-            return TextReplacementResult(request.text, 1.0)
+            return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
         raise RuntimeError("Synthetic text replacement failed.") from ValueError(
             "Synthetic chained detail must not be recorded."
         )

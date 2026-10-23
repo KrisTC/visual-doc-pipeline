@@ -1,5 +1,345 @@
 # Changelog
 
+## [0.2.0](https://github.com/KrisTC/visual-doc-pipeline/compare/v0.1.0...v0.2.0) (2026-10-23)
+
+**Headline: massively faster translation.** Previously, every string in a document
+was translated in its own Google Cloud Translation request. A large document
+therefore made thousands of sequential calls, each costing about 0.1 s of
+round-trip latency however short the text was, so translation dominated the
+processing time. Each file is now processed in three steps: plan, translate, and
+apply. The plan step collects every text that needs translating, including text
+in embedded documents. The translate step removes duplicates, packs the texts
+into batches of about 5,000 characters, and sends each batch as a single request.
+The apply step then fits and writes the results exactly as before. In a benchmark
+against the real service with 1,000 synthetic strings, batched requests
+**translated 90 to 320 times faster** than single-text calls, and translating a
+large document drops from about 15 minutes to  ~5 seconds. OCR becomes the main 
+remaining cost, and it is still performed once per image.  
+
+What this means in practice:
+
+- **Same results, same caches.** Cache entries remain per text, so existing
+  caches stay valid and a partly cached document sends only its new texts. Texts
+  translated in a batch can occasionally be worded slightly differently from the
+  same text translated alone (8 of 100 in the benchmark, with the same meaning);
+  each cached text stays stable.
+- **Safe batching.** Batches stay within Google's limits. An embedded document's
+  texts are never mixed into its parent's batches. A failed batch is split to
+  isolate the offending text, so one bad string does not fail a document.
+- **Quota-aware.** Reaching Google's per-minute quota now slows a run down
+  with exponential backoff instead of failing it, and the request deadline rises
+  from 10 s to 300 s because large requests need longer. A daily-quota error still
+  fails immediately. Batch size, deadline and backoff can be tuned with
+  `GOOGLE_CLOUD_TRANSLATION_*` environment variables, and
+  `GOOGLE_CLOUD_TRANSLATION_BATCH_MAX_ITEMS=1` reproduces one-text requests.
+- **Visible progress.** Progress shows the plan, translate, and apply steps for
+  each source, and `progress.json` now reports the current step, the failure
+  reason, and an ETA status. Cache metrics report per-provider run and request
+  counts, so they reflect real batch requests.
+- **Breaking change for provider plugin authors.** The text-replacement provider
+  contract now has a single `replace` method that takes a batch of texts and
+  returns a batch of results. A provider that handles one text at a time can use
+  `replace_each`. Built-in providers are already migrated. See
+  [Text-replacement provider API](docs/text-replacement-provider-api.md).
+
+Also in this release: PowerPoint text in layouts, masters, charts, and comments
+is translated in every fitted layout mode. EMF and WMF graphics are identified by
+content rather than file extension. EMF+ text and image objects (embedded bitmaps
+and nested metafiles) are translated. SVG and WMF text without a clip rectangle
+is fitted to its measured source extent. A tab in fitted replacement text no
+longer fails a file. Design and measurements are in the
+[batch text replacement plan](docs/batch-text-replacement-plan.md).
+
+### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| SR-2026-10-21-01 | Permit explicit read-only aggregate inspection of local provider caches | Implemented | KrisTC |
+| SR-2026-10-22-01 | Keep batched translation within the existing remote-data boundary | Implemented | KrisTC |
+
+### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+#### Updated
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| TR-2026-09-10-01 | Validate pull requests with GitHub Actions continuous integration | Implemented | KrisTC |
+
+### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-21-01 | Report per-provider OCR and text-replacement cache and run metrics | Implemented | KrisTC |
+| FR-2026-10-22-04 | Process each source as plan, translate, and apply steps with a shared translation engine | Implemented | KrisTC |
+| FR-2026-10-22-05 | Process nested documents recursively with the same plan and apply functions | Implemented | KrisTC |
+| FR-2026-10-22-06 | Cache batched text-replacement results per text and report request metrics | Implemented | KrisTC |
+| FR-2026-10-22-07 | Report plan, translate, and apply progress for each source | Implemented | KrisTC |
+| FR-2026-10-22-11 | Fit text to its known bounds, otherwise to its measured source extent, and always translate | Implemented | KrisTC |
+| FR-2026-10-23-01 | Treat a tab in fitted replacement text as whitespace | Implemented | KrisTC |
+| FR-2026-10-23-02 | Report the current step, failure reason and ETA state in folder-replacement progress.json | Implemented | KrisTC |
+
+#### Updated
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-08-27-04 | Bootstrap optional font packs and PaddleOCR models before processing | Implemented | KrisTC |
+
+### Text Replacement Requirements
+
+Requirements for Text-replacement provider contract or deterministic replacement-provider test support.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-22-01 | Replace a batch of texts with one provider call | Implemented | KrisTC |
+
+### Google Cloud Translation Requirements
+
+Requirements for Google Cloud Translation provider or its local configuration.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-22-02 | Translate a batch of texts in one Google Cloud Translation request | Implemented | KrisTC |
+| FR-2026-10-22-03 | Use a long request deadline and back off on Google Cloud Translation quota limits | Implemented | KrisTC |
+
+### Pdf Requirements
+
+Requirements for PDF.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-23-02 | Plan PDF form-field appearance-stream text to avoid a plan miss | Deferred | KrisTC |
+
+### Powerpoint Requirements
+
+Requirements for PowerPoint / PPTX.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-22-08 | Translate all PowerPoint text parts in every document-text layout mode | Implemented | KrisTC |
+
+### Vector Requirements
+
+Requirements for SVG, EMF, WMF, or other vector graphics.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-22-09 | Identify EMF and WMF graphics by content, not file extension | Implemented | KrisTC |
+| FR-2026-10-22-10 | Translate EMF+ text and keep the EMF+ stream valid | Implemented | KrisTC |
+| FR-2026-10-22-12 | Fit SVG text that has no clip rectangle to its measured source extent | Implemented | KrisTC |
+| FR-2026-10-22-13 | Fit WMF text that has no clip rectangle to its measured source extent | Implemented | KrisTC |
+| FR-2026-10-22-14 | Translate EMF+ image objects: embedded bitmaps and nested metafiles | Implemented | KrisTC |
+
+### Requirement details
+
+#### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+##### SR-2026-10-21-01 — Permit explicit read-only aggregate inspection of local provider caches [Implemented]
+
+###### Rationale
+
+Reading existing metrics is distinct from enabling provider-result caching.
+
+##### SR-2026-10-22-01 — Keep batched translation within the existing remote-data boundary [Implemented]
+
+###### Rationale
+
+Batching changes how many texts travel in one request, not which data may leave the machine. The synchronous operation avoids a Cloud Storage dependency that would store source text in an additional remote location, and content-free diagnostics keep the added request, retry and progress detail from leaking document content.
+
+#### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+##### TR-2026-09-10-01 — Validate pull requests with GitHub Actions continuous integration [Implemented]
+
+###### Rationale
+
+Pull-request CI gives contributors and reviewers repeatable evidence that a
+change preserves the dependency controls, Python quality gates, test suite,
+and both distributable container definitions before it is merged.  Keeping
+untrusted pull-request code in a read-only, secret-free workflow limits the
+effect of contributions from forks.  Downloading the verified optional fonts
+before the tests keeps the fitted-layout fallback path under test; without them
+the fallback is silently skipped on the runner and tests pass without exercising it.
+
+#### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+##### FR-2026-10-21-01 — Report per-provider OCR and text-replacement cache and run metrics [Implemented]
+
+###### Rationale
+
+Per-provider metrics make expensive provider work visible without exposing
+cached content. Timing highlights whether translation or OCR dominates a
+document's processing time and whether a batch translation interface merits
+investigation. Backfilling on cache hits lets existing sidecars gradually
+gain useful attribution without invalidating or recomputing cached results;
+historical provider latency cannot be reconstructed from a cache hit.
+
+##### FR-2026-10-22-04 — Process each source as plan, translate, and apply steps with a shared translation engine [Implemented]
+
+###### Rationale
+
+Translating each string as it is reached makes one remote request per string, because fitting, bullet mapping and rendering need the translated text. Measured documents needed about 6,900 requests (Word), 3,400 (PDF), 1,800 (PowerPoint) and 220 (Excel), about 0.11 to 0.15 seconds each. Repeating a handler with unchanged text to collect its strings would also repeat OCR, fitting and rendering, and unchanged text does not skip that work. Splitting each handler into a source-only plan step and a translation-dependent apply step lets one engine batch every unit's texts, about 31 requests and an estimated 5 seconds instead of about 14 minutes for the largest measured document, without repeating expensive work or changing output.
+
+##### FR-2026-10-22-05 — Process nested documents recursively with the same plan and apply functions [Implemented]
+
+###### Rationale
+
+Embedded documents come from untrusted input, so recursion needs a bound: 6 levels covers realistic nesting such as a Word document containing a workbook that contains images. One implementation per type keeps behaviour, fallbacks and diagnostics identical between a root file and the same type nested in another document, and keeps each format's logic in one place. Treating each nested document as its own unit lets a 75,000-row embedded workbook be batched on its own instead of being mixed into its parent's batches.
+
+##### FR-2026-10-22-06 — Cache batched text-replacement results per text and report request metrics [Implemented]
+
+###### Rationale
+
+Per-text keys mean a partly cached document sends only its new texts, existing caches stay valid, and batch composition never changes a result. Cached results are read in one transaction instead of thousands of round trips. Recording `batch_items` and the request count lets cache metrics report real request counts: the measured per-string durations (0.11 to 0.15 seconds on average) are shares of batched requests and would otherwise be misread as the latency of separate calls.
+
+##### FR-2026-10-22-07 — Report plan, translate, and apply progress for each source [Implemented]
+
+###### Rationale
+
+Once strings are translated in batches, the number of requests is unknown until planning finishes, so a request count can no longer be the unit of progress. Planning is also long-running work: OCR alone took 33 to 73 seconds in measured Word, PDF and PowerPoint documents. Showing each step keeps OCR, translation and rendering visible, and clamping avoids a bar that moves backwards when the batch total becomes known.
+
+##### FR-2026-10-22-11 — Fit text to its known bounds, otherwise to its measured source extent, and always translate [Implemented]
+
+###### Rationale
+
+Readers are better served by a text that is shrunk to fit and may overflow a little than by one that is not fitted or not translated. A measurement of the source estimates what the source application already knows; when the source face is not installed the Noto face is usually wider, so a measurement must not veto a fit.
+
+##### FR-2026-10-23-01 — Treat a tab in fitted replacement text as whitespace [Implemented]
+
+###### Rationale
+
+A tab is whitespace that translators and the `character_mask` provider both return unchanged, but the approved Noto faces have no glyph for it. Without this rule, a PowerPoint slide whose text contains a tab failed its whole file with "No approved portable replacement font covers the text" even though every visible character was covered. Two of the 34 files in a local evaluation set failed this way.
+
+##### FR-2026-10-23-02 — Report the current step, failure reason and ETA state in folder-replacement progress.json [Implemented]
+
+###### Rationale
+
+A consumer of `progress.json` could previously see only a rough status for a file, so a long planning, translation or apply step looked stalled, and a failed file gave no reason. In a measured Word document, planning alone took 33 to 73 seconds. Publishing the active step and the failure reason lets a monitor show what each file is doing and why it failed without reading the terminal. A `null` ETA is displayed by consumers as "None", which reads as an error. A separate `eta_status` property gives them a natural label while `eta_seconds` keeps its numeric type, so existing consumers continue to work.
+
+##### FR-2026-08-27-04 — Bootstrap optional font packs and PaddleOCR models before processing [Implemented]
+
+###### Rationale
+
+Downloading fonts or OCR models while a document is being processed causes
+late, network-dependent failures. A small explicit setup step makes those
+downloads happen at a convenient time without turning the wrappers or the
+normal processing path into an asset-management system. Pinning each archive's
+digest keeps the font bytes that fitted layout measures and embeds identical
+across machines and CI.
+
+#### Text Replacement Requirements
+
+Requirements for Text-replacement provider contract or deterministic replacement-provider test support.
+
+##### FR-2026-10-22-01 — Replace a batch of texts with one provider call [Implemented]
+
+###### Rationale
+
+Translating a large document string by string takes thousands of sequential remote requests: measured Word, PDF, PowerPoint and Excel documents needed about 6,900, 3,400, 1,800 and 220 requests, at roughly 0.11 to 0.15 seconds each, for strings averaging 11 to 26 characters. A batch `replace` lets a remote provider send many texts per request: measured against the real service, batches of 100 to 1,000 texts translated 90 to 320 times faster than single-text calls. It is the only provider method, so a new provider implements one function, and a provider that handles one text at a time uses `replace_each`. This is a breaking change to the provider API.
+
+#### Google Cloud Translation Requirements
+
+Requirements for Google Cloud Translation provider or its local configuration.
+
+##### FR-2026-10-22-02 — Translate a batch of texts in one Google Cloud Translation request [Implemented]
+
+###### Rationale
+
+Measured Word, PDF, PowerPoint and Excel documents made about 6,900, 3,400, 1,800 and 220 sequential `translateText` calls (about 151,000, 88,000, 20,000 and 6,000 characters), taking about 770, 390, 210 and 32 seconds, or 0.11 to 0.15 seconds per call whatever the length. Latency per call, not payload size, dominated. A benchmark with the real service on 1,000 synthetic Japanese strings (about 19 characters each) confirmed this: a request costs about 0.12 seconds plus about 11 milliseconds per 1,000 characters, and batches of 100 to 1,000 texts translated 90 to 320 times faster than single-text calls. At the default of about 5,000 characters per request, the estimated time for the largest measured document falls from about 14 minutes to about 5 seconds (about 31 requests). Larger requests gain little more (about 1 second at 10,000 characters) while a failed request repeats more text, so the defaults follow Google's recommendation of about 5,000 code points within its 1,024-item and 30,000-code-point limits. Per-character billing and per-text cache keys are unchanged. Hard-coded defaults with environment overrides allow tuning without a code change.
+
+In the same benchmark a text's translation did not depend on its batch neighbours or position, but 8 of 100 texts were worded slightly differently from their single-text translation (same meaning). Existing cache entries stay valid and each cached text stays stable.
+
+##### FR-2026-10-22-03 — Use a long request deadline and back off on Google Cloud Translation quota limits [Implemented]
+
+###### Rationale
+
+The 10-second deadline was a fixed value that suited single-text requests but would fail a large batch. The time went into the number of requests, not the length of any one, so a longer deadline lets a request pass instead of failing early. The pipeline may run inside a larger service with several users translating at once, so reaching a shared quota slows a run down rather than failing it. Google's quota documentation defines the daily and per-minute quota errors but prescribes no retry policy or maximum wait, so the backoff schedule and the 30-minute cap are project choices.
+
+#### Pdf Requirements
+
+Requirements for PDF.
+
+##### FR-2026-10-23-02 — Plan PDF form-field appearance-stream text to avoid a plan miss [Deferred]
+
+###### Rationale
+
+The pre-existing apply route translates a form field's appearance stream after
+replacing its `/V`, and the plan step does not list that text. Each affected field
+therefore costs one plan miss and one extra single-text provider request. The
+output is correct and the plan-miss fallback keeps it so. No sample PDF has
+produced a plan miss, so the rare extra request does not justify changing the
+PDF handler.
+
+#### Powerpoint Requirements
+
+Requirements for PowerPoint / PPTX.
+
+##### FR-2026-10-22-08 — Translate all PowerPoint text parts in every document-text layout mode [Implemented]
+
+###### Rationale
+
+Layout, master, chart and comment text left in the source language produces a partly translated presentation. Every fitted mode translates all text in the package, as it does for SmartArt, WordArt and speaker notes. These parts add translation requests (a measured presentation needed about 1,800 in total), which batching makes inexpensive.
+
+#### Vector Requirements
+
+Requirements for SVG, EMF, WMF, or other vector graphics.
+
+##### FR-2026-10-22-09 — Identify EMF and WMF graphics by content, not file extension [Implemented]
+
+###### Rationale
+
+Real documents contain EMF graphics saved with a `.wmf` extension. The WMF parser rejected them with "Invalid WMF header size." and no translated output was produced. Identifying the format from the content processes these files and leaves correctly named files unchanged.
+
+##### FR-2026-10-22-10 — Translate EMF+ text and keep the EMF+ stream valid [Implemented]
+
+###### Rationale
+
+GDI+ viewers, including Office, play the EMF+ stream of a dual EMF and skip the duplicate GDI records. Translating only the GDI records left the source text visible there. Removing the EMF+ stream would lose the anti-aliased, more accurate GDI+ rendering, so both streams are translated.
+
+The fitted source-font layout inserted its scaled GDI font records before the EMF+ header comment. A viewer expects the EMF+ header to follow the `EMR_HEADER` directly, so it treated the file as GDI-only. Placing the records after the header comment keeps the EMF+ stream recognised.
+
+##### FR-2026-10-22-12 — Fit SVG text that has no clip rectangle to its measured source extent [Implemented]
+
+###### Rationale
+
+Most SVG text is not clipped. Leaving it at the source size lets longer translations run into neighbouring shapes, although the original extent is known from the source text and face.
+
+##### FR-2026-10-22-13 — Fit WMF text that has no clip rectangle to its measured source extent [Implemented]
+
+###### Rationale
+
+Most WMF text is not clipped, so it was never fitted, and longer translations overlap neighbouring drawing. The original extent is known from the source text, face and font height.
+
+##### FR-2026-10-22-14 — Translate EMF+ image objects: embedded bitmaps and nested metafiles [Implemented]
+
+###### Rationale
+
+Real EMF graphics can be saved as a dual EMF whose EMF+ stream draws image objects, including chunked bitmaps and nested metafiles, instead of text records. The GDI text and DIB records that the handler already translates are skipped by GDI+ viewers such as Office, so the output looked untranslated there. Re-using the shared bitmap handler and the nested-document recursion adds no second raster or vector implementation.
+
 ## 0.1.0 (2026-09-11)
 
 First release of the visual document replacement pipeline. The folder-replacement

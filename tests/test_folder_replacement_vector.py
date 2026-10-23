@@ -69,9 +69,11 @@ from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    TextReplacementItem,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    replace_each,
 )
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
@@ -262,7 +264,7 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-        return TextReplacementResult("A considerably longer heading", 1.0)
+        return replace_each(request, lambda text: TextReplacementItem("A considerably longer heading", 1.0))
 
 
 def _unclipped_emf_with_vertical_rule() -> bytes:

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 from pipeline.ocr import OcrProvider
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
 OFFICE_DOCUMENT_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
@@ -43,7 +43,9 @@ def provider_supports_language(provider: OcrProvider, language: str) -> bool:
     return any(item.replace("_", "-").lower().split("-", 1)[0] == primary for item in provider.supported_languages)
 
 def replace_native_text(text: str, provider: TextReplacementProvider, source_language: str, target_language: str) -> str:
-    return provider.replace(TextReplacementRequest(text, False, source_language, target_language)).text
+    return replace_text(
+        provider, text, is_filename=False, source_language=source_language, target_language=target_language
+    ).text
 
 def is_office_bitmap_part(name: str) -> bool:
     return "/media/" in name and Path(name).suffix.lower() in BITMAP_EXTENSIONS

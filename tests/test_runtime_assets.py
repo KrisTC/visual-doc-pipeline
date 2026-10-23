@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -23,25 +24,24 @@ def _optional_fonts_archive(member: str, contents: bytes) -> bytes:
 class RuntimeAssetsTests(unittest.TestCase):
     # Verifies FR-2026-08-27-04.
     def test_bootstrap_optional_fonts_reuses_the_shared_user_cache(self) -> None:
+        symbols_archive = _optional_fonts_archive(
+            runtime_assets._SYMBOLS_ARCHIVE_MEMBER, b"synthetic-symbol-font"
+        )
+        math_archive = _optional_fonts_archive(
+            runtime_assets._MATH_ARCHIVE_MEMBER, b"synthetic-math-font"
+        )
         with TemporaryDirectory() as temporary_directory:
             with patch.dict(
                 os.environ,
                 {runtime_assets.FONT_CACHE_ENVIRONMENT_VARIABLE: temporary_directory},
                 clear=False,
+            ), patch.object(
+                runtime_assets, "_SYMBOLS_ARCHIVE_SHA256", hashlib.sha256(symbols_archive).hexdigest()
+            ), patch.object(
+                runtime_assets, "_MATH_ARCHIVE_SHA256", hashlib.sha256(math_archive).hexdigest()
             ), patch(
                 "pipeline.runtime_assets.urlopen",
-                side_effect=(
-                    BytesIO(
-                        _optional_fonts_archive(
-                            runtime_assets._SYMBOLS_ARCHIVE_MEMBER, b"synthetic-symbol-font"
-                        )
-                    ),
-                    BytesIO(
-                        _optional_fonts_archive(
-                            runtime_assets._MATH_ARCHIVE_MEMBER, b"synthetic-math-font"
-                        )
-                    ),
-                ),
+                side_effect=(BytesIO(symbols_archive), BytesIO(math_archive)),
             ) as download:
                 first = runtime_assets.bootstrap_optional_fonts()
                 second = runtime_assets.bootstrap_optional_fonts()
@@ -62,6 +62,27 @@ class RuntimeAssetsTests(unittest.TestCase):
                     ],
                     download.call_args_list,
                 )
+
+    # Verifies FR-2026-08-27-04's pinned SHA-256 check: a mismatched archive is never cached.
+    def test_bootstrap_font_rejects_an_archive_that_does_not_match_its_pinned_digest(self) -> None:
+        tampered = _optional_fonts_archive(runtime_assets._SYMBOLS_ARCHIVE_MEMBER, b"tampered-font")
+        with TemporaryDirectory() as temporary_directory:
+            with patch.dict(
+                os.environ,
+                {runtime_assets.FONT_CACHE_ENVIRONMENT_VARIABLE: temporary_directory},
+                clear=False,
+            ), patch("pipeline.runtime_assets.urlopen", return_value=BytesIO(tampered)):
+                with self.assertRaisesRegex(
+                    runtime_assets.RuntimeAssetIntegrityError, "SHA-256"
+                ):
+                    runtime_assets.bootstrap_symbols_font()
+
+            self.assertEqual([], list(Path(temporary_directory).iterdir()))
+
+    # Verifies FR-2026-08-27-04's pinned digests are well-formed SHA-256 values.
+    def test_pinned_font_digests_are_sha256_hex(self) -> None:
+        for digest in (runtime_assets._SYMBOLS_ARCHIVE_SHA256, runtime_assets._MATH_ARCHIVE_SHA256):
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
     # Verifies FR-2026-09-02-01.
     def test_temporary_file_operation_retries_a_transient_windows_lock(self) -> None:

@@ -68,9 +68,11 @@ from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    TextReplacementItem,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    replace_each,
 )
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
@@ -86,7 +88,9 @@ from folder_replacement_test_support import (
     _LowConfidenceOcrProvider,
     _RecordedProgress,
     _RecordingReplacementProvider,
+    _SingleTextRequest,
     _VectorOutlineOcrProvider,
+    _single_text_requests,
     _synthetic_pdf_visual_region,
 )
 
@@ -95,8 +99,9 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_replaces_reachable_chart_rich_text_and_embedded_workbook_caches(self) -> None:
         class _PrefixReplacementProvider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return TextReplacementResult(
-                    request.text if request.is_filename else f"translated-{request.text}", 1.0
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem(text if request.is_filename else f"translated-{text}", 1.0),
                 )
 
         with TemporaryDirectory() as temporary_directory:
@@ -271,19 +276,21 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
                 lambda _label: None,
                 nested_progress=nested_progress,
             )
-            self.assertEqual(1, len(nested_progress.started))
-            self.assertTrue(nested_progress.started[0][0].startswith("chart1.xml: chart.xlsx"))
-            self.assertEqual(3, nested_progress.started[0][1])
-            self.assertEqual("replacement request", nested_progress.started[0][2])
+            self.assertEqual(2, len(nested_progress.started))
+            for started in nested_progress.started:
+                self.assertTrue(started[0].startswith("chart1.xml: chart.xlsx"))
+                self.assertEqual(2, started[1])
+                self.assertEqual("work item", started[2])
             self.assertEqual(
                 [
-                    "xl/worksheets/sheet1.xml replacement 1",
-                    "xl/worksheets/sheet1.xml replacement 2",
-                    "xl/worksheets/sheet1.xml replacement 3",
+                    "Planning part 1 of 2",
+                    "Planning part 2 of 2",
+                    "Applying part 1 of 2",
+                    "Applying part 2 of 2",
                 ],
                 nested_progress.advanced,
             )
-            self.assertEqual(1, nested_progress.cleared)
+            self.assertEqual(2, nested_progress.cleared)
 
     # Verifies FR-2026-08-27-01.
     def test_uses_a_direct_document_background_for_embedded_word_image_ocr(self) -> None:
@@ -305,7 +312,7 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_flowing_word_text_uses_maximal_emphasis_translation_runs(self) -> None:
         class _MappedReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
                 self.replacements = {
                     "abb": "Alpha", "c": "Beta", "d": "γ", "e": "123", "f": "Delta",
                     "g": "Hello,", "h": "World", "i": "漢", "j": "字",
@@ -313,10 +320,10 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
                 }
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
+                self.requests.extend(_single_text_requests(request))
                 if request.is_filename:
-                    return TextReplacementResult(request.text, 1.0)
-                return TextReplacementResult(self.replacements[request.text], 1.0)
+                    return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
+                return replace_each(request, lambda text: TextReplacementItem(self.replacements[text], 1.0))
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -389,11 +396,14 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_flowing_word_structure_fallback_translates_and_reports_debug_details(self) -> None:
         class _PrefixReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
-                return TextReplacementResult(request.text if request.is_filename else f"translated-{request.text}", 1.0)
+                self.requests.extend(_single_text_requests(request))
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem(text if request.is_filename else f"translated-{text}", 1.0),
+                )
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -454,7 +464,7 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_word_caption_cross_references_remain_live_and_share_caption_translation(self) -> None:
         class _MappedReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
                 self.replacements = {
                     "label 1": "Figure 1",
                     "label ": "Figure ",
@@ -468,10 +478,10 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
                 }
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
+                self.requests.extend(_single_text_requests(request))
                 if request.is_filename:
-                    return TextReplacementResult(request.text, 1.0)
-                return TextReplacementResult(self.replacements[request.text], 1.0)
+                    return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
+                return replace_each(request, lambda text: TextReplacementItem(self.replacements[text], 1.0))
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -620,11 +630,11 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_word_field_boundaries_preserve_system_fields_and_safe_joiners(self) -> None:
         class _RecordingIdentityProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
-                return TextReplacementResult(request.text, 1.0)
+                self.requests.extend(_single_text_requests(request))
+                return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -695,13 +705,14 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
     def test_word_toc_result_retains_tabs_and_page_fields_without_generated_spaces(self) -> None:
         class _MappedReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
+                self.requests.extend(_single_text_requests(request))
                 replacements = {"entry one": "Entry One", "entry two": "Entry Two"}
-                return TextReplacementResult(
-                    request.text if request.is_filename else replacements[request.text], 1.0
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem(text if request.is_filename else replacements[text], 1.0),
                 )
 
         with TemporaryDirectory() as temporary_directory:
@@ -1013,15 +1024,15 @@ class FolderReplacementDocxTests(FolderReplacementTestCase):
             self.assertEqual(["ValueError"], entry["exception_cause_types"])
             self.assertEqual(
                 {
-                    "stage": "native_xml",
-                    "container_kind": "office_xml",
+                    "stage": "docx_batch_translation",
+                    "container_kind": "docx_document",
                     "operation": "text_replacement",
-                    "location": {"package_part": "word/document.xml"},
                     "request": {
                         "kind": "text_replacement",
                         "source_language": "en",
                         "target_language": "en",
                         "is_filename": False,
+                        "text_count": 1,
                         "input_character_count": 22,
                     },
                 },

@@ -56,9 +56,13 @@ from pipeline.folder_replacement.pdf import (
 )
 from pipeline.folder_replacement.xlsx import (
     _replace_drawing,
+    apply_xlsx,
+    plan_xlsx,
     replace_xlsx_bytes,
-    xlsx_native_text_request_total,
+    xlsx_work_item_total,
 )
+from pipeline.folder_replacement.planning import PhaseProgress, child_unit_id, plan_and_apply
+from pipeline.text_replacement import TextUnit, TranslationEngine
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
@@ -110,8 +114,8 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
             with ZipFile(path) as archive:
                 source_large_sheet = archive.read("xl/worksheets/sheet2.xml")
 
-            request_total = xlsx_native_text_request_total(
-                path.read_bytes(), "preserve-source-formatting", xlsx_translation_mode="fast"
+            plan = plan_xlsx(
+                path.read_bytes(), None, "en", "fr", xlsx_translation_mode="fast"
             )
             provider = _RecordingReplacementProvider(replacement_text="Translated")
             translated, replacements = replace_xlsx_bytes(
@@ -123,7 +127,7 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
                 xlsx_translation_mode="fast",
             )
 
-        self.assertEqual(2, request_total)
+        self.assertEqual(("Small first", "Small last"), plan.texts)
         self.assertEqual(2, replacements)
         self.assertEqual(["Small first", "Small last"], [request.text for request in provider.requests])
         output = load_workbook(BytesIO(translated))
@@ -134,7 +138,7 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
         with ZipFile(BytesIO(translated)) as archive:
             self.assertEqual(source_large_sheet, archive.read("xl/worksheets/sheet2.xml"))
 
-    # Verifies FR-2026-09-04-01.
+    # Verifies FR-2026-10-22-07's plan, translate and apply progress for a root workbook.
     def test_fast_mode_reports_all_source_level_progress_stages(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -171,16 +175,19 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
 
         self.assertEqual(1, result.processed_files)
         self.assertEqual(1, len(progress_bars))
-        self.assertEqual(3, progress_bars[0].total)
         self.assertEqual(
             [
-                "xl/worksheets/sheet1.xml replacement 1",
-                "chart cache synchronization",
-                "package write",
+                "Planning part 1 of 2",
+                "Planning part 2 of 2",
+                "Translating batch 1 of 1",
+                "Translating batch 1 of 1",
+                "Applying part 1 of 2",
+                "Applying part 2 of 2",
             ],
             progress_bars[0].postfixes,
         )
-        self.assertEqual(3, progress_bars[0].updates)
+        self.assertEqual(4, progress_bars[0].total)
+        self.assertEqual(5, progress_bars[0].updates)
         self.assertTrue(progress_bars[0].closed)
         skipped = [
             entry for entry in diagnostic["entries"]
@@ -188,8 +195,8 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
         ]
         self.assertEqual(["Skipped"], [entry["worksheet_name"] for entry in skipped])
 
-    # Verifies FR-2026-09-03-01 and FR-2026-09-03-05.
-    def test_embedded_workbook_request_total_excludes_numeric_looking_text(self) -> None:
+    # Verifies FR-2026-09-03-05 and FR-2026-10-22-04's rule that a plan lists only requested text.
+    def test_embedded_workbook_plan_excludes_numeric_looking_text(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "workbook.xlsx"
             workbook = Workbook()
@@ -200,15 +207,16 @@ class FolderReplacementXlsxTests(FolderReplacementTestCase):
             worksheet["A3"] = "123"
             workbook.save(path)
 
-            request_total = xlsx_native_text_request_total(
-                path.read_bytes(), "preserve-basic-layout-source-font"
+            plan = plan_xlsx(
+                path.read_bytes(), None, "en", "fr",
+                document_text_layout="preserve-basic-layout-source-font",
             )
             provider = _RecordingReplacementProvider(replacement_text="translated")
             translated, _replacements = replace_xlsx_bytes(
                 path.read_bytes(), provider, "en", "fr", "preserve-basic-layout-source-font"
             )
 
-        self.assertEqual(1, request_total)
+        self.assertEqual(("Label",), plan.texts)
         self.assertEqual(["Label"], [request.text for request in provider.requests])
         output = load_workbook(BytesIO(translated))
         output_sheet = output.active

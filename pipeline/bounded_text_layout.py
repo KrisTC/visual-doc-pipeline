@@ -17,7 +17,7 @@ import regex  # type: ignore[import-untyped]
 import skia  # type: ignore[import-not-found]
 
 from pipeline.portable_fonts import optional_static_typefaces
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
+from pipeline.text_replacement import TextReplacementProvider, replace_text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FONT_DIRECTORY = PROJECT_ROOT / "tests" / "assets" / "fonts"
@@ -156,6 +156,33 @@ class PortableTextUnsupportedError(ValueError):
         self.characters = characters
         self.selected_faces = selected_faces
         self.replacement_text = replacement_text
+
+
+def unsupported_text_diagnostic(
+    error: PortableTextUnsupportedError,
+    source_text: str,
+    container_kind: str,
+    **location: object,
+) -> dict[str, object]:
+    """Build the debug entry for a text container retained unchanged (FR-2026-08-27-09)."""
+    return {
+        "source_text": source_text,
+        "replacement_text": error.replacement_text,
+        "kind": "unsupported",
+        "reason_code": error.reason_code,
+        "container_kind": container_kind,
+        **location,
+        "candidate_faces": list(error.selected_faces),
+        "characters": error.characters,
+        "code_points": [f"U+{ord(character):04X}" for character in error.characters],
+    }
+
+
+def bounded_text_box_text(text_box: BoundedTextBox) -> str:
+    """Return a text box's paragraphs as plain text, one paragraph per line."""
+    return "\n".join(
+        "".join(run.text for run in paragraph.runs) for paragraph in text_box.paragraphs
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,10 +511,13 @@ def _same_family(left: str, right: str) -> bool:
     )
 
 
+_TAB_WIDTH_IN_SPACES = 4
+
+
 def _glyphs_available(typeface: skia.Typeface, text: str) -> bool:
     font = skia.Font(typeface)
     for character in text:
-        if character in {"\n", "\r", "\v"}:
+        if character in {"\n", "\r", "\v", "\t"}:
             continue
         glyphs = font.textToGlyphs(character)
         if not glyphs or int(glyphs[0]) == 0:
@@ -931,8 +961,9 @@ def _replace_paragraph(
     source_text = "".join(run.text for run in paragraph.runs)
     if not source_text.strip():
         return paragraph
-    replacement = provider.replace(
-        TextReplacementRequest(source_text, False, source_language, target_language)
+    replacement = replace_text(
+        provider, source_text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     )
     dominant_run = max(
         paragraph.runs,
@@ -1186,7 +1217,7 @@ def _measure(text: str, style: _Style, typefaces: dict[str, skia.Typeface]) -> f
     font.setEmbolden(style.bold)
     if style.italic:
         font.setSkewX(-0.2)
-    return float(font.measureText(text))
+    return float(font.measureText(text.replace("\t", " " * _TAB_WIDTH_IN_SPACES)))
 
 
 def _classification(run: BoundedTextRun) -> str:

@@ -56,6 +56,7 @@ from pipeline.folder_replacement.pdf import (
 )
 from pipeline.folder_replacement.xlsx import _replace_drawing
 from pipeline.folder_replacement.docx import _validate_docx_embedded_fonts
+from pipeline import bounded_text_layout
 from pipeline.bounded_text_layout import (
     BoundedTextBox,
     BoundedTextParagraph,
@@ -68,9 +69,11 @@ from pipeline.portable_fonts import static_noto_bytes
 from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelPoint
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.text_replacement import (
+    TextReplacementItem,
     TextReplacementProvider,
     TextReplacementRequest,
     TextReplacementResult,
+    replace_each,
 )
 from pipeline.text_replacement_plugins.character_mask import CharacterMaskProvider
 
@@ -85,9 +88,19 @@ from folder_replacement_test_support import (
     _MappedReplacementProvider,
     _RecordedProgress,
     _RecordingReplacementProvider,
+    _SingleTextRequest,
     _VectorOutlineOcrProvider,
+    _single_text_requests,
     _synthetic_pdf_visual_region,
 )
+
+
+class _NoSourceFaceManager:
+    """A Skia font-manager double that has no installed source faces."""
+
+    def matchFamilyStyle(self, family: str, style: skia.FontStyle) -> None:
+        return None
+
 
 class FolderReplacementPptxTests(FolderReplacementTestCase):
     # Verifies FR-2026-08-27-01.
@@ -171,7 +184,8 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             )
 
             self.assertEqual(1, result.processed_files)
-            self.assertEqual(6, result.replaced_native_text_items)
+            # FR-2026-10-22-08: the six slide items, plus the layout and master text.
+            self.assertGreater(result.replaced_native_text_items, 6)
             output = output_root / "deck.pptx"
             output_presentation = Presentation(str(output))
             normalized_text_shape = next(
@@ -280,12 +294,12 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
     def test_pptx_table_uses_a_common_scale_and_writes_safe_fit_diagnostics(self) -> None:
         class _TableReplacementProvider:
             def __init__(self) -> None:
-                self.requests: list[TextReplacementRequest] = []
+                self.requests: list[_SingleTextRequest] = []
 
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                self.requests.append(request)
+                self.requests.extend(_single_text_requests(request))
                 if request.is_filename:
-                    return TextReplacementResult(request.text, 1.0)
+                    return replace_each(request, lambda text: TextReplacementItem(text, 1.0))
                 replacements = {
                     "header": "Header",
                     "short": "Short",
@@ -293,7 +307,8 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
                     "merged": "Merged replacement text. " * 6,
                     "fallback": "Fallback replacement",
                 }
-                return TextReplacementResult(replacements[request.text], 1.0)
+                # Layout and master text (FR-2026-10-22-08) is not under test here.
+                return replace_each(request, lambda text: TextReplacementItem(replacements.get(text, text), 1.0))
 
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -360,7 +375,15 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             self.assertEqual(body_short_size, body_long_size)
             self.assertAlmostEqual(header_size / body_short_size, 1.5, places=2)
             self.assertTrue(output_table.cell(2, 0).is_merge_origin)
-            self.assertEqual(6, len([request for request in provider.requests if not request.is_filename]))
+            # The two identical "header" cells are requested once per batch.
+            table_texts = {"header", "short", "long", "merged", "fallback"}
+            self.assertEqual(
+                5,
+                len([
+                    request for request in provider.requests
+                    if not request.is_filename and request.text in table_texts
+                ]),
+            )
             with ZipFile(output) as archive:
                 self.assertIn(b"noAutofit", archive.read("ppt/slides/slide1.xml"))
 
@@ -862,13 +885,18 @@ class FolderReplacementPptxTests(FolderReplacementTestCase):
             themed_run.font.size = Pt(24)
             presentation.save(str(source))
 
-            self._run(
-                input_root,
-                output_root,
-                _EmptyOcrProvider(),
-                _RecordingReplacementProvider(replacement_text="Replacement text " * 20),
-                document_text_layout="preserve-basic-layout-source-font",
-            )
+            # The host's installed fonts (the theme font resolves to Calibri on
+            # Windows) would make a source face available, so use an empty manager.
+            with patch.object(
+                bounded_text_layout, "_default_source_font_manager", return_value=_NoSourceFaceManager()
+            ):
+                self._run(
+                    input_root,
+                    output_root,
+                    _EmptyOcrProvider(),
+                    _RecordingReplacementProvider(replacement_text="Replacement text " * 20),
+                    document_text_layout="preserve-basic-layout-source-font",
+                )
 
             output_presentation = Presentation(str(output_root / "deck.pptx"))
             output_shapes = output_presentation.slides[0].shapes

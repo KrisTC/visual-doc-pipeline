@@ -344,7 +344,7 @@ Automated build checks shall verify lockfile use, digest-pinned bases, final use
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-09-10 |
-| Related Requirements | TR-2026-08-01-01, TR-2026-08-01-03, TR-2026-08-01-04, TR-2026-09-07-01, SR-2026-08-01-01, SR-2026-08-21-02, SR-2026-09-08-01 |
+| Related Requirements | TR-2026-08-01-01, TR-2026-08-01-03, TR-2026-08-01-04, TR-2026-09-07-01, SR-2026-08-01-01, SR-2026-08-21-02, SR-2026-09-08-01, FR-2026-08-27-04 |
 
 ### Description
 
@@ -365,10 +365,14 @@ checks, failing the workflow when any check fails:
    profile.  The CI dependency installation shall not resolve, upgrade, or
    lock dependencies.
 3. Run `scripts/typecheck-python.py`.
-4. Run the complete automated test suite through `scripts/run-tests.sh`.
-5. Build both named OCI image targets, `cpu` and `gpu`, from the repository
+4. Download the optional portable fonts with
+   `scripts/bootstrap_runtime_assets.py --fonts-only`, so the tests run against
+   the same Noto Sans Math and Noto Sans Symbols 2 faces that fitted layout
+   requires at runtime (FR-2026-08-27-04).
+5. Run the complete automated test suite through `scripts/run-tests.sh`.
+6. Build both named OCI image targets, `cpu` and `gpu`, from the repository
    `Dockerfile` for `linux/amd64`.  The workflow shall not run either image,
-   download runtime model assets, require credentials, or require a GPU.
+   download PaddleOCR or other OCR model assets, require credentials, or require a GPU.
 
 The workflow shall run with the minimum GitHub token permissions needed to
 read the repository and shall not receive repository secrets, deployment
@@ -389,7 +393,9 @@ Pull-request CI gives contributors and reviewers repeatable evidence that a
 change preserves the dependency controls, Python quality gates, test suite,
 and both distributable container definitions before it is merged.  Keeping
 untrusted pull-request code in a read-only, secret-free workflow limits the
-effect of contributions from forks.
+effect of contributions from forks.  Downloading the verified optional fonts
+before the tests keeps the fitted-layout fallback path under test; without them
+the fallback is silently skipped on the runner and tests pass without exercising it.
 
 ### Notes
 

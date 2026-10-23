@@ -399,3 +399,30 @@ Synthetic tests shall verify read-only inspection with caching disabled,
 no cache creation or content disclosure, and unchanged cache opt-in behaviour.
 
 ---
+
+## SR-2026-10-22-01
+
+| Property | Value |
+|----------|-------|
+| Title | Keep batched translation within the existing remote-data boundary |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-22 |
+| Related Requirements | SR-2026-08-24-01, SR-2026-08-27-01, FR-2026-10-22-02, FR-2026-10-22-03, FR-2026-10-22-06 |
+
+### Description
+
+Batched translation shall not widen the remote-data boundary of SR-2026-08-24-01. The Google Cloud Translation provider shall use only the synchronous `translateText` operation, which requires no Cloud Storage bucket, and shall send only the texts being translated, the source and target language tags, and the configured project and operation parameters. Combining several texts in one request shall not add source paths, document or unit identifiers, part names, metadata, OCR confidence, image bytes, or credentials to what is sent.
+
+Diagnostics, log lines, metrics, progress labels, and the nested-document depth-limit entry added by FR-2026-10-22-02, FR-2026-10-22-03, FR-2026-10-22-05, and FR-2026-10-22-06 shall contain counts, durations, and package part names or depths only, and shall never contain request text, translated text, cache keys, credentials, or project identifiers. Batch composition and quota-wait handling shall not create new persisted data beyond the provider-result cache that SR-2026-08-27-01 already governs, which continues to store only normalized successful per-text results under unchanged keys.
+
+### Rationale
+
+Batching changes how many texts travel in one request, not which data may leave the machine. The synchronous operation avoids a Cloud Storage dependency that would store source text in an additional remote location, and content-free diagnostics keep the added request, retry and progress detail from leaking document content.
+
+### Verification
+
+Synthetic tests with a mocked Google client shall verify that a batched request carries only text and the permitted parameters, that `batchTranslateText` and `translateDocument` are never called, and that logs, diagnostics, and metrics for batches and quota waits contain no text, keys, or credentials.
+
+---

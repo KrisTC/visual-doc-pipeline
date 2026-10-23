@@ -214,14 +214,14 @@ cache synchronization shall derive worksheet values only for chart-referenced
 cells rather than scan every cell in every worksheet.
 
 For a standalone XLSX processed in `fast` mode, the folder-replacement Current
-progress row shall advance once for every eligible replacement request, using
-the same exact count and part-identifying labels as the embedded-workbook
-progress row. It shall additionally include chart-cache synchronization and
-final package output. It shall calculate that total before processing using the
-same selection rules, advance an item only after the corresponding work
-completes, and not report 100% while a remaining fast-mode stage is running.
-The active-operation label shall identify the active worksheet or package stage
-without exposing source text.
+progress row shall cover the plan, translate, and apply steps of
+FR-2026-10-22-07, using the same part-identifying labels as the
+embedded-workbook progress row. It shall additionally include chart-cache
+synchronization and final package output. It shall calculate the plan and apply
+totals before each step using the same selection rules, advance an item only
+after the corresponding work completes, and not report 100% while a remaining
+fast-mode stage is running. The active-operation label shall identify the
+active worksheet or package stage without exposing source text.
 
 When diagnostics are enabled, the source diagnostic sidecar shall contain one
 safe `xlsx_fast_mode_worksheet_skipped` entry for every large worksheet skipped

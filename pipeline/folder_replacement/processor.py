@@ -7,17 +7,17 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import os
+import random
 import sys
+import time
 from time import perf_counter
 from typing import Protocol
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZipFile
 
-from PIL import Image
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
 from pipeline.ocr import OcrProvider
-from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.folder_replacement.failure_diagnostics import (
     ContextualOcrProvider,
     ContextualTextReplacementProvider,
@@ -31,17 +31,22 @@ from pipeline.provider_cache import (
 )
 from pipeline.provider_metrics import MeteredOcrProvider, MeteredTextReplacementProvider, RunMetrics
 from pipeline.terminal_progress import LiveProgress
-from pipeline.text_replacement import TextReplacementProvider, TextReplacementRequest
-from pipeline.vector_text import VectorReplacementResult, replace_vector_text
-from pipeline.folder_replacement.office_xml import replace_office_xml_text
-from pipeline.folder_replacement.docx import replace_docx_file
-from pipeline.folder_replacement.pdf import pdf_work_total, replace_pdf_file
-from pipeline.folder_replacement.pptx import replace_pptx_file
-from pipeline.folder_replacement.xlsx import replace_xlsx_file, xlsx_native_text_request_total
+from pipeline.text_replacement import TextReplacementProvider, TranslationEngine, replace_text
+from pipeline.vector_text import VectorReplacementResult
+from pipeline.folder_replacement.docx import DocxResult, apply_docx, docx_work_item_total, plan_docx
+from pipeline.folder_replacement.pdf import apply_pdf, pdf_work_total, plan_pdf
+from pipeline.folder_replacement.pptx import PptxResult, apply_pptx, plan_pptx, pptx_work_item_total
+from pipeline.folder_replacement.xlsx import XlsxResult, apply_xlsx, plan_xlsx, xlsx_work_item_total
 from pipeline.folder_replacement.bitmap import (
-    replace_bitmap_bytes as _process_bitmap_bytes,
-    replace_bitmap_file as _process_bitmap_file,
-    replace_image as _process_bitmap_image,
+    apply_bitmap,
+    plan_bitmap_file,
+    save_bitmap_file,
+)
+from pipeline.folder_replacement.planning import PhaseProgress, plan_and_apply
+from pipeline.folder_replacement.vector import (
+    append_vector_diagnostics,
+    apply_vector,
+    plan_vector,
 )
 from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
@@ -50,6 +55,21 @@ OFFICE_DOCUMENT_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
 DOCUMENT_EXTENSIONS = OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
 VECTOR_EXTENSIONS = frozenset({".emf", ".svg", ".wmf"})
 TEXT_REPLACEMENT_MINIMUM_CONFIDENCE = 0.65
+PROGRESS_WRITE_RETRY_SECONDS = 5.0
+PROGRESS_WRITE_INITIAL_DELAY_SECONDS = 0.05
+PROGRESS_WRITE_MAX_DELAY_SECONDS = 1.0
+
+
+class ProgressWriteError(OSError):
+    """A progress snapshot could not be written within the retry period."""
+
+    def __init__(self, path: Path, elapsed_seconds: float, cause: OSError) -> None:
+        super().__init__(
+            f"Could not write progress file {path} after {elapsed_seconds:.1f} seconds: {cause}. "
+            "Another process, such as endpoint-security software, may be holding the file open."
+        )
+        self.path = path
+        self.elapsed_seconds = elapsed_seconds
 
 
 class ProgressReporter(Protocol):
@@ -160,10 +180,11 @@ def replace_input_folder(
     completed_sources = 0
     overall_progress = 0
     overall_eta_seconds: float | None = None
+    overall_eta_status = _eta_status(None, display is not None)
 
     def update_overall_state(current_file_progress: int = 0) -> None:
         """Keep the JSON Overall state aligned with the Rich Overall task."""
-        nonlocal overall_progress, overall_eta_seconds
+        nonlocal overall_progress, overall_eta_seconds, overall_eta_status
         if display is not None:
             overall_progress, overall_eta_seconds = display.overall_state()
         elif eligible_source_count:
@@ -173,11 +194,23 @@ def replace_input_folder(
                 / (eligible_source_count * 100)
             )
             overall_eta_seconds = None
+        overall_eta_status = _eta_status(overall_eta_seconds, display is not None)
+
+    progress_warning_shown = False
 
     def publish_progress() -> None:
-        _write_progress_file(
-            output_root, overall_progress, overall_eta_seconds, progress_entries
-        )
+        # A progress snapshot is monitoring output: a lock that outlasts the retry
+        # period skips this snapshot, and the next one supersedes it.
+        nonlocal progress_warning_shown
+        try:
+            _write_progress_file(
+                output_root, overall_progress, overall_eta_seconds, progress_entries,
+                eta_status=overall_eta_status,
+            )
+        except ProgressWriteError as error:
+            if not progress_warning_shown:
+                progress_warning_shown = True
+                print(f"Warning: {error} Progress updates continue to be attempted.", file=sys.stderr)
 
     publish_progress()
     try:
@@ -246,7 +279,7 @@ def replace_input_folder(
         try:
             progress_entry["status"] = "processing"
             progress_entry["progress"] = 0
-            progress_entry["eta_seconds"] = None
+            _set_entry_eta(progress_entry, None, display is not None)
             update_overall_state()
             publish_progress()
             source_work_total = _source_work_total(
@@ -255,6 +288,7 @@ def replace_input_folder(
                 xlsx_translation_mode=xlsx_translation_mode,
             )
             completed_work = 0
+            reported_progress = 0
             if show_progress:
                 if display is not None:
                     progress = display.start_current(
@@ -263,30 +297,49 @@ def replace_input_folder(
                 else:
                     make_progress = progress_factory or _make_progress_bar
                     progress = make_progress(source_work_total, relative_source_path.name)
-            progress_entry["eta_seconds"] = (
-                None if display is None else display.current_state()[1]
+            _set_entry_eta(
+                progress_entry,
+                None if display is None else display.current_state()[1],
+                display is not None,
             )
             update_overall_state()
             publish_progress()
             print(f"Processing: {relative_source_path}")
 
             def work_completed(label: str) -> None:
-                nonlocal completed_work
+                nonlocal completed_work, reported_progress
                 completed_work += 1
                 file_progress = min(
-                    100, int(completed_work * 100 / source_work_total)
+                    99, int(completed_work * 100 / source_work_total)
                 )
-                progress_entry["progress"] = file_progress
+                progress_entry["progress"] = max(reported_progress, file_progress)
+                progress_entry["details"] = label
                 if progress is not None:
                     progress.set_postfix_str(label)
                     progress.update()
                     if display is not None:
                         display.set_overall_from_current(completed_sources)
                 if display is not None:
-                    file_progress, progress_entry["eta_seconds"] = display.current_state()
-                    progress_entry["progress"] = file_progress
+                    file_progress, current_eta = display.current_state()
+                    _set_entry_eta(progress_entry, current_eta, True)
+                file_progress = max(reported_progress, min(99, file_progress))
+                reported_progress = file_progress
+                progress_entry["progress"] = file_progress
                 update_overall_state(file_progress)
                 publish_progress()
+
+            def set_work_label(label: str) -> None:
+                progress_entry["details"] = label
+                if progress is not None:
+                    progress.set_postfix_str(label)
+                publish_progress()
+
+            def grow_work_total(count: int) -> None:
+                nonlocal source_work_total
+                source_work_total += count
+                set_total = getattr(progress, "set_total", None)
+                if callable(set_total):
+                    set_total(source_work_total)
 
             if failure_context is not None:
                 failure_context.set_location(
@@ -312,17 +365,18 @@ def replace_input_folder(
                         container_kind="bitmap_file",
                         operation="ocr",
                     )
-                image_regions = _replace_bitmap_file(
-                    source_path,
-                    temporary_destination,
-                    processing_ocr,
-                    processing_replacement,
-                    source_language,
-                    target_language,
-                    typeface,
+                plan = plan_bitmap_file(source_path, processing_ocr, source_language)
+                work_completed("Planning image 1 of 1")
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                image_regions = plan_and_apply(
+                    plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_bitmap(plan, translate, typeface, target_language),
+                    phase_progress,
                 )
+                save_bitmap_file(plan, temporary_destination)
                 result.replaced_image_regions += image_regions
-                work_completed("bitmap")
+                work_completed("Applying image 1 of 1")
             elif extension in VECTOR_EXTENSIONS:
                 if failure_context is not None:
                     failure_context.set_location(
@@ -330,33 +384,31 @@ def replace_input_folder(
                         container_kind="vector_graphic",
                         operation="text_replacement",
                     )
-                vector_result = replace_vector_text(
+                vector_plan = plan_vector(
                     source_path.read_bytes(),
                     extension,
-                    lambda text: _replace_native_text(
-                        text, processing_replacement, source_language, target_language
-                    ),
+                    processing_ocr,
                     source_language,
-                    lambda image: _replace_image_text(
-                        image,
-                        processing_ocr,
-                        processing_replacement,
-                        source_language,
-                        target_language,
-                        typeface,
-                    ),
+                    target_language,
                     document_text_layout=document_text_layout,
-                    replacement_provider=processing_replacement,
-                    target_language=target_language,
+                    diagnostics=document_diagnostics if diagnostics_enabled else None,
+                )
+                work_completed("Planning vector graphic 1 of 1")
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                vector_result = plan_and_apply(
+                    vector_plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_vector(vector_plan, translate, typeface),
+                    phase_progress,
                 )
                 temporary_destination.write_bytes(vector_result.data)
                 result.replaced_native_text_items += vector_result.replaced_text_items
                 result.replaced_image_regions += vector_result.replaced_image_regions
                 if diagnostics_enabled:
-                    _append_vector_diagnostics(document_diagnostics, vector_result, None)
+                    append_vector_diagnostics(document_diagnostics, vector_result, None)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     result.retained_vector_graphics += 1
-                work_completed("vector graphic")
+                work_completed("Applying vector graphic 1 of 1")
             elif extension == ".pdf":
                 if failure_context is not None:
                     failure_context.set_location(
@@ -364,54 +416,115 @@ def replace_input_folder(
                         container_kind="pdf_document",
                         operation="text_replacement",
                     )
-                native_items, image_regions = replace_pdf_file(
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                pdf_diagnostics = document_diagnostics if diagnostics_enabled else None
+                pdf_plan = plan_pdf(
                     source_path,
-                    temporary_destination,
                     processing_ocr,
-                    processing_replacement,
                     source_language,
                     target_language,
-                    typeface,
-                    work_completed,
                     document_text_layout=document_text_layout,
-                    diagnostics=document_diagnostics if diagnostics_enabled else None,
+                    progress=phase_progress,
+                )
+                native_items, image_regions = plan_and_apply(
+                    pdf_plan,
+                    TranslationEngine(processing_replacement, source_language, target_language),
+                    lambda translate: apply_pdf(
+                        pdf_plan, translate, typeface, temporary_destination,
+                        progress=phase_progress, diagnostics=pdf_diagnostics,
+                    ),
+                    phase_progress,
                 )
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
             else:
+                phase_progress = PhaseProgress(work_completed, set_work_label, grow_work_total)
+                engine = TranslationEngine(processing_replacement, source_language, target_language)
+                office_diagnostics = document_diagnostics if diagnostics_enabled else None
+                office_result: DocxResult | XlsxResult | PptxResult
                 if extension == ".docx":
-                    native_items, image_regions, retained_vectors = replace_docx_file(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                    document_plan = plan_docx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
                         nested_progress=display,
-                        xlsx_translation_mode=xlsx_translation_mode,
+                        failure_context=failure_context,
+                    )
+                    office_result = plan_and_apply(
+                        document_plan,
+                        engine,
+                        lambda translate: apply_docx(
+                            document_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics, nested_progress=display,
+                        ),
+                        phase_progress,
                     )
                 elif extension == ".xlsx":
-                    office_handler = replace_xlsx_file
-                    native_items, image_regions, retained_vectors = office_handler(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
-                        nested_progress=display,
+                    workbook_plan = plan_xlsx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
                         xlsx_translation_mode=xlsx_translation_mode,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
+                        nested_progress=display,
+                        failure_context=failure_context,
+                    )
+                    office_result = plan_and_apply(
+                        workbook_plan,
+                        engine,
+                        lambda translate: apply_xlsx(
+                            workbook_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics,
+                        ),
+                        phase_progress,
                     )
                 else:
-                    native_items, image_regions, retained_vectors = replace_pptx_file(
-                        source_path, temporary_destination, processing_ocr, processing_replacement,
-                        source_language, target_language, typeface, work_completed,
-                        document_text_layout=document_text_layout, failure_context=failure_context,
+                    presentation_plan = plan_pptx(
+                        source_path.read_bytes(),
+                        processing_ocr,
+                        source_language,
+                        target_language,
+                        document_text_layout=document_text_layout,
+                        diagnostics=office_diagnostics,
+                        progress=phase_progress,
                         nested_progress=display,
-                        diagnostics=document_diagnostics if diagnostics_enabled else None,
+                        failure_context=failure_context,
                     )
+                    office_result = plan_and_apply(
+                        presentation_plan,
+                        engine,
+                        lambda translate: apply_pptx(
+                            presentation_plan, translate, typeface,
+                            progress=phase_progress, failure_context=failure_context,
+                            diagnostics=office_diagnostics,
+                        ),
+                        phase_progress,
+                    )
+                temporary_destination.write_bytes(office_result.data)
+                native_items = office_result.native_items
+                image_regions = office_result.image_regions
+                retained_vectors = office_result.retained_vectors
+                for media_part, media_vector in office_result.vector_results:
+                    if diagnostics_enabled:
+                        append_vector_diagnostics(document_diagnostics, media_vector, media_part)
+                    if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
+                        print(f"Retained vector without editable text: {source_path}", file=sys.stderr)
                 result.replaced_native_text_items += native_items
                 result.replaced_image_regions += image_regions
                 result.retained_vector_graphics += retained_vectors
             os.replace(temporary_destination, destination)
         except (BadZipFile, OSError, RuntimeError, ValueError) as error:
             progress_entry["status"] = "failed"
+            progress_entry["details"] = str(error)
             result.failed_files += 1
             result.failures.append(f"{source_path}: {error}")
             print(f"Failed: {source_path}: {error}", file=sys.stderr)
@@ -460,6 +573,8 @@ def replace_input_folder(
                     _document_totals_since(counts_before, result), document_diagnostics, result,
                     run_activity={
                         "document_processing_seconds": document_seconds,
+                        "unique_texts": run_metrics.unique_texts,
+                        "plan_misses": run_metrics.plan_misses,
                         "providers": run_metrics.report(document_seconds),
                     },
                     cache_inventory=inventory,
@@ -471,9 +586,11 @@ def replace_input_folder(
                 progress.close()
             completed_sources += 1
             if progress_entry["status"] == "completed":
-                progress_entry["eta_seconds"] = 0
+                _set_entry_eta(progress_entry, 0, False)
+                progress_entry.pop("details", None)
             else:
                 progress_entry.pop("eta_seconds", None)
+                progress_entry.pop("eta_status", None)
             update_overall_state()
             publish_progress()
     finally:
@@ -482,29 +599,72 @@ def replace_input_folder(
     return result
 
 
+def _eta_status(eta_seconds: float | None, estimating: bool) -> str | None:
+    """Label an unknown ETA, but only when a progress display is producing estimates."""
+    return "Calculating" if estimating and eta_seconds is None else None
+
+
+def _set_entry_eta(entry: ProgressEntry, eta_seconds: float | None, estimating: bool) -> None:
+    entry["eta_seconds"] = eta_seconds
+    status = _eta_status(eta_seconds, estimating)
+    if status is None:
+        entry.pop("eta_status", None)
+    else:
+        entry["eta_status"] = status
+
+
 def _write_progress_file(
     output_root: Path,
     progress: int,
     eta_seconds: float | None,
     entries: ProgressEntries,
+    eta_status: str | None = None,
 ) -> None:
-    """Atomically publish a complete machine-readable folder-progress snapshot."""
+    """Atomically publish a complete machine-readable folder-progress snapshot.
+
+    Raises ``ProgressWriteError`` if the file stays unwritable for the retry period.
+    """
     progress_path = output_root / "progress.json"
     temporary_path = progress_path.with_name(f".{progress_path.name}.tmp")
-    temporary_path.write_text(
-        json.dumps(
-            {
-                "progress": progress,
-                "eta_seconds": eta_seconds,
-                "files": entries,
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary_path, progress_path)
+    document: dict[str, object] = {"progress": progress, "eta_seconds": eta_seconds}
+    if eta_status is not None:
+        document["eta_status"] = eta_status
+    document["files"] = entries
+    content = json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+
+    def publish() -> None:
+        temporary_path.write_text(content, encoding="utf-8")
+        os.replace(temporary_path, progress_path)
+
+    _retry_progress_write(publish, progress_path)
+
+
+def _retry_progress_write(
+    action: Callable[[], None],
+    path: Path,
+    *,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> None:
+    """Retry a progress write with bounded jittered backoff while the file is locked."""
+    sleep = sleep or time.sleep
+    monotonic = monotonic or time.monotonic
+    started_at = monotonic()
+    deadline = started_at + PROGRESS_WRITE_RETRY_SECONDS
+    delay_seconds = PROGRESS_WRITE_INITIAL_DELAY_SECONDS
+    while True:
+        try:
+            action()
+            return
+        except OSError as error:
+            current_time = monotonic()
+            if current_time >= deadline:
+                raise ProgressWriteError(path, current_time - started_at, error) from error
+            jittered_delay_seconds = min(
+                PROGRESS_WRITE_MAX_DELAY_SECONDS, delay_seconds * random.uniform(0.8, 1.2)
+            )
+            sleep(min(jittered_delay_seconds, deadline - current_time))
+            delay_seconds = min(PROGRESS_WRITE_MAX_DELAY_SECONDS, delay_seconds * 2)
 
 
 def _diagnostic_options(
@@ -594,27 +754,6 @@ def _write_document_diagnostic(
     result.diagnostic_sidecars.append(sidecar)
 
 
-def _append_vector_diagnostics(
-    diagnostics: list[dict[str, object]],
-    vector_result: VectorReplacementResult,
-    package_part: str | None,
-) -> None:
-    """Attach vector-local diagnostic locations to their source-document report."""
-    for entry in vector_result.diagnostics:
-        diagnostic = dict(entry)
-        location: dict[str, object] = {}
-        location_value = diagnostic.get("location")
-        if isinstance(location_value, dict):
-            location = {
-                key: value for key, value in location_value.items() if isinstance(key, str)
-            }
-        if package_part is not None:
-            location["package_part"] = package_part
-        if location:
-            diagnostic["location"] = location
-        diagnostics.append(diagnostic)
-
-
 def _validate_roots(input_root: Path, output_root: Path) -> None:
     if not input_root.is_dir():
         raise ValueError(f"Input root does not exist or is not a directory: {input_root}")
@@ -641,13 +780,9 @@ def _destination_path(
     target_language: str,
     reserved_paths: set[Path],
 ) -> Path:
-    replacement_name = replacement_provider.replace(
-        TextReplacementRequest(
-            text=source_path.name,
-            is_filename=True,
-            source_language=source_language,
-            target_language=target_language,
-        )
+    replacement_name = replace_text(
+        replacement_provider, source_path.name, is_filename=True,
+        source_language=source_language, target_language=target_language,
     ).text
     _validate_filename(replacement_name)
     if Path(replacement_name).suffix.lower() != source_path.suffix.lower():
@@ -682,26 +817,19 @@ def _source_work_total(
 ) -> int:
     """Return the native-text plus embedded-raster work units for one source file."""
     extension = source_path.suffix.lower()
-    if extension in BITMAP_EXTENSIONS:
-        return 1
-    if extension in VECTOR_EXTENSIONS:
-        return 1
+    if extension in BITMAP_EXTENSIONS or extension in VECTOR_EXTENSIONS:
+        return 2
     if extension == ".docx":
         with ZipFile(source_path) as archive:
-            return 4 + sum(
-                _is_office_bitmap_part(name) or _is_office_vector_part(name)
-                for name in archive.namelist()
-            )
+            return 2 * docx_work_item_total(archive.namelist())
     if extension in OFFICE_DOCUMENT_EXTENSIONS:
-        if extension == ".xlsx" and xlsx_translation_mode == "fast":
-            return xlsx_native_text_request_total(
-                source_path.read_bytes(), document_text_layout, xlsx_translation_mode
-            ) + 2
+        if extension == ".xlsx":
+            with ZipFile(source_path) as archive:
+                return 2 * xlsx_work_item_total(
+                    archive.namelist(), document_text_layout, xlsx_translation_mode
+                )
         with ZipFile(source_path) as archive:
-            return 1 + sum(
-                _is_office_bitmap_part(name) or _is_office_vector_part(name)
-                for name in archive.namelist()
-            )
+            return 2 * pptx_work_item_total(archive.namelist())
     return pdf_work_total(source_path)
 
 
@@ -710,199 +838,13 @@ def _make_progress_bar(total: int, label: str) -> ProgressReporter:
     raise RuntimeError("A Rich live display is required when no test progress factory is supplied.")
 
 
-def _replace_bitmap_file(
-    source: Path,
-    destination: Path,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-) -> int:
-    return _process_bitmap_file(source, destination, ocr_provider, replacement_provider, source_language, target_language, typeface)
-
-
-def _replace_image_text(
-    image: Image.Image,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-) -> int:
-    return _process_bitmap_image(image, ocr_provider, replacement_provider, source_language, target_language, typeface)
-
-
-def _replace_office_file(
-    source: Path,
-    destination: Path,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-    work_completed: Callable[[str], None],
-    *,
-    document_text_layout: str = "preserve-source-formatting",
-    replace_native_xml: bool = True,
-    skip_native_xml_part: Callable[[str], bool] | None = None,
-    ocr_backgrounds: Mapping[str, RgbColour] | None = None,
-    failure_context: FailureContext | None = None,
-    nested_progress: NestedProgressReporter | None = None,
-    diagnostics: list[dict[str, object]] | None = None,
-) -> tuple[int, int, int]:
-    native_items = 0
-    image_regions = 0
-    embedded_image_index = 0
-    vector_graphic_index = 0
-    retained_vectors = 0
-    with ZipFile(source) as source_archive, ZipFile(destination, "w", ZIP_DEFLATED) as destination_archive:
-        for entry in source_archive.infolist():
-            if failure_context is not None:
-                failure_context.set_location(
-                    stage="office_package_read",
-                    container_kind="office_package_part",
-                    operation="read",
-                    package_part=entry.filename,
-                )
-            data = source_archive.read(entry.filename)
-            if _is_office_bitmap_part(entry.filename):
-                embedded_image_index += 1
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="embedded_bitmap",
-                        container_kind="embedded_bitmap",
-                        operation="ocr",
-                        package_part=entry.filename,
-                        item_index=embedded_image_index,
-                    )
-                if nested_progress is not None:
-                    nested_progress.start_nested(entry.filename, 3, "stage")
-                try:
-                    data, replaced = _replace_bitmap_bytes(
-                        data,
-                        ocr_provider,
-                        replacement_provider,
-                        source_language,
-                        target_language,
-                        typeface,
-                        DEFAULT_OCR_BACKGROUND
-                        if ocr_backgrounds is None
-                        else ocr_backgrounds.get(entry.filename, DEFAULT_OCR_BACKGROUND),
-                        None if nested_progress is None else nested_progress.advance_nested,
-                    )
-                finally:
-                    if nested_progress is not None:
-                        nested_progress.clear_nested()
-                image_regions += replaced
-                work_completed(f"embedded image {embedded_image_index}")
-            elif _is_office_vector_part(entry.filename):
-                vector_graphic_index += 1
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="embedded_vector",
-                        container_kind="embedded_vector",
-                        operation="text_replacement",
-                        package_part=entry.filename,
-                        item_index=vector_graphic_index,
-                    )
-                vector_result = replace_vector_text(
-                    data,
-                    Path(entry.filename).suffix,
-                    lambda text: _replace_native_text(
-                        text, replacement_provider, source_language, target_language
-                    ),
-                    source_language,
-                    lambda image: _replace_image_text(
-                        image,
-                        ocr_provider,
-                        replacement_provider,
-                        source_language,
-                        target_language,
-                        typeface,
-                    ),
-                    document_text_layout=document_text_layout,
-                    replacement_provider=replacement_provider,
-                    target_language=target_language,
-                )
-                data = vector_result.data
-                native_items += vector_result.replaced_text_items
-                image_regions += vector_result.replaced_image_regions
-                if diagnostics is not None:
-                    _append_vector_diagnostics(diagnostics, vector_result, entry.filename)
-                if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
-                    retained_vectors += 1
-                    print(f"Retained vector without editable text: {source}", file=sys.stderr)
-                work_completed(f"vector graphic {vector_graphic_index}")
-            elif (
-                replace_native_xml
-                and entry.filename.endswith(".xml")
-                and not (skip_native_xml_part and skip_native_xml_part(entry.filename))
-            ):
-                if failure_context is not None:
-                    failure_context.set_location(
-                        stage="native_xml",
-                        container_kind="office_xml",
-                        operation="text_replacement",
-                        package_part=entry.filename,
-                    )
-                data, replaced = replace_office_xml_text(
-                    data, replacement_provider, source_language, target_language
-                )
-                native_items += replaced
-            if failure_context is not None:
-                failure_context.set_location(
-                    stage="office_package_write",
-                    container_kind="office_package_part",
-                    operation="write",
-                    package_part=entry.filename,
-                )
-            destination_archive.writestr(entry, data)
-    work_completed("native text")
-    return native_items, image_regions, retained_vectors
-
-
-def _is_office_bitmap_part(part_name: str) -> bool:
-    return "/media/" in part_name and Path(part_name).suffix.lower() in BITMAP_EXTENSIONS
-
-
-def _is_office_vector_part(part_name: str) -> bool:
-    return "/media/" in part_name and Path(part_name).suffix.lower() in VECTOR_EXTENSIONS
-
-
-def _replace_bitmap_bytes(
-    data: bytes,
-    ocr_provider: OcrProvider,
-    replacement_provider: TextReplacementProvider,
-    source_language: str,
-    target_language: str,
-    typeface: skia.Typeface,
-    ocr_background: RgbColour = DEFAULT_OCR_BACKGROUND,
-    nested_completed: Callable[[str], None] | None = None,
-) -> tuple[bytes, int]:
-    return _process_bitmap_bytes(
-        data,
-        ocr_provider,
-        replacement_provider,
-        source_language,
-        target_language,
-        typeface,
-        ocr_background,
-        nested_completed,
-    )
-
-
 def _replace_native_text(
     text: str,
     replacement_provider: TextReplacementProvider,
     source_language: str,
     target_language: str,
 ) -> str:
-    return replacement_provider.replace(
-        TextReplacementRequest(
-            text=text,
-            is_filename=False,
-            source_language=source_language,
-            target_language=target_language,
-        )
+    return replace_text(
+        replacement_provider, text, is_filename=False,
+        source_language=source_language, target_language=target_language,
     ).text
