@@ -11,6 +11,7 @@ import re
 import sys
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree
@@ -21,7 +22,8 @@ from pipeline.ocr import BoundingPolygon, OcrProviderFactory, OcrResult, OcrText
 from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr.provider import LocalContractTestSkip
-from scripts.prepare_ocr_evaluation_inputs import PreparationResult
+from pipeline.terminal_progress import CurrentProgress
+from scripts.prepare_ocr_evaluation_inputs import PreparationProgress, PreparationResult
 
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ocr_evaluations.py"
@@ -75,6 +77,89 @@ class FakeOcrProvider:
                 ),
             )
         )
+
+
+class RecordingDisplay:
+    """Records the LiveProgress calls made by the evaluator without rendering anything."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[object, ...]] = []
+        self.closed = False
+        self._current_name: str | None = None
+        self._advances: dict[str, int] = {}
+
+    def __enter__(self) -> "RecordingDisplay":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.closed = True
+
+    @property
+    def current(self) -> CurrentProgress:
+        return CurrentProgress(self)  # type: ignore[arg-type]
+
+    def start_overall(self, total: int | None, unit: str = "task") -> None:
+        self.events.append(("overall", total))
+
+    def set_overall_total(self, total: int) -> None:
+        self.events.append(("overall_total", total))
+
+    def advance_overall(self, count: int = 1) -> None:
+        self.events.append(("overall_advance",))
+
+    def start_current(self, name: str, total: int | None, unit: str) -> CurrentProgress:
+        self._current_name = name
+        self.events.append(("current", name, total))
+        return self.current
+
+    def set_current_label(self, label: str) -> None:
+        self.events.append(("label", label))
+
+    def advance_current(self, count: float = 1) -> None:
+        self.events.append(("advance",))
+        if self._current_name is not None:
+            self._advances[self._current_name] = self._advances.get(self._current_name, 0) + 1
+
+    def set_current_total(self, total: int) -> None:
+        self.events.append(("current_total", total))
+
+    def clear_current(self) -> None:
+        self.events.append(("clear",))
+
+    def stage_names(self) -> list[str]:
+        names: list[str] = []
+        for event in self.events:
+            if event[0] == "current" and (not names or names[-1] != event[1]):
+                names.append(str(event[1]))
+        return names
+
+    def totals_for(self, name: str) -> list[object]:
+        return [event[2] for event in self.events if event[0] == "current" and event[1] == name]
+
+    def advances_in(self, name: str) -> int:
+        return self._advances.get(name, 0)
+
+    def overall_advances(self) -> int:
+        return self.events.count(("overall_advance",))
+
+
+def _recording_factory(displays: list[RecordingDisplay]) -> Callable[[], RecordingDisplay]:
+    def create() -> RecordingDisplay:
+        display = RecordingDisplay()
+        displays.append(display)
+        return display
+
+    return create
+
+
+def _make_images(root: Path, count: int) -> tuple[Path, Path]:
+    """Create synthetic English images named image-01.png onward; return input and output roots."""
+    input_root = root / "input"
+    language_root = input_root / "en"
+    language_root.mkdir(parents=True)
+    for number in range(1, count + 1):
+        Image.new("RGB", (80, 60), "red").save(language_root / f"image-{number:02d}.png")
+    return input_root, root / "output"
 
 
 class RunOcrEvaluationsTests(unittest.TestCase):
@@ -177,6 +262,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 source_root: Path,
                 prepared_output_root: Path,
                 include_patterns: tuple[str, ...],
+                progress: PreparationProgress,
             ) -> PreparationResult:
                 calls.append((source_root, include_patterns))
                 language_root = prepared_output_root / "en"
@@ -267,9 +353,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             image_path = Path(temporary_directory) / "input" / "ja" / "image.png"
             image_path.parent.mkdir(parents=True)
             Image.new("RGB", (8, 6), "white").save(image_path)
-            image = ocr_evaluation.EvaluationImage(
-                "ja", image_path, Path("ja"), Path("ja/image.png")
-            )
+            image = ocr_evaluation.EvaluationImage("ja", image_path, Path("ja/image.png"))
             entry = ocr_evaluation.ViewerEntry(
                 image, True, (0.9,), ("日本語\nSecond",), True
             )
@@ -336,6 +420,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             Path("outputs/evaluations/ocr/output"),
             ocr_provider_name="google_cloud_vision",
             include_patterns=("en/*.png", "ja/*.pptx", "en/extra.docx"),
+            max_images=25,
         )
 
     # Verifies FR-2026-08-04-02.
@@ -369,6 +454,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 source_root: Path,
                 prepared_output_root: Path,
                 include_patterns: tuple[str, ...],
+                progress: PreparationProgress,
             ) -> PreparationResult:
                 calls.append((source_root, prepared_output_root, include_patterns))
                 (prepared_output_root / "en").mkdir(parents=True)
@@ -394,11 +480,11 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             provider_root = Path(temporary_directory) / "output" / "fake"
             first = ocr_evaluation.EvaluationImage(
                 "en", Path(temporary_directory) / "input" / "en" / "a" / "same.png",
-                Path("en/a"), Path("en/a/same.png"),
+                Path("en/a/same.png"),
             )
             second = ocr_evaluation.EvaluationImage(
                 "en", Path(temporary_directory) / "input" / "en" / "b" / "same.png",
-                Path("en/b"), Path("en/b/same.png"),
+                Path("en/b/same.png"),
             )
             result = OcrResult(
                 (
@@ -423,25 +509,309 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 ocr_evaluation._region_element_id(second, 1),
             )
 
-    # Verifies FR-2026-08-02-01.
-    def test_groups_progress_by_language_directory_and_its_immediate_folders(self) -> None:
+    # Verifies FR-2026-10-26-03.
+    def test_progress_stages_cover_prepare_ocr_and_every_text_replacement_provider(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
-            input_root = Path(temporary_directory) / "input"
-            direct_image = input_root / "en" / "direct.png"
-            nested_image = input_root / "en" / "documents" / "nested" / "nested.png"
-            direct_image.parent.mkdir(parents=True)
-            nested_image.parent.mkdir(parents=True)
-            Image.new("RGB", (2, 2), "red").save(direct_image)
-            Image.new("RGB", (2, 2), "red").save(nested_image)
-
-            groups = ocr_evaluation.progress_groups(
-                ocr_evaluation.discover_evaluation_images(input_root)
+            input_root, output_root = _make_images(Path(temporary_directory), 2)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+            replacement_names = (
+                ocr_evaluation.TextReplacementProviderFactory.discover_default_plugins()
+                .local_evaluation_provider_names
             )
+            displays: list[RecordingDisplay] = []
 
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            display = displays[0]
             self.assertEqual(
-                {"en": 1, "en/documents": 1},
-                {folder.as_posix(): len(images) for folder, images in groups.items()},
+                ["Prepare inputs", "OCR"]
+                + [f"Text replacement: {name}" for name in replacement_names],
+                display.stage_names(),
             )
+            self.assertEqual(("overall", None), display.events[0])
+            self.assertIn(("overall_total", 2 + len(replacement_names)), display.events)
+            self.assertEqual(2 + len(replacement_names), display.overall_advances())
+            self.assertEqual([2], display.totals_for("OCR"))
+            for name in replacement_names:
+                self.assertEqual([2], display.totals_for(f"Text replacement: {name}"))
+            self.assertIn(("label", "Writing viewer: fake"), display.events)
+            self.assertTrue(display.closed)
+
+    # Verifies FR-2026-10-26-03.
+    def test_progress_shows_only_text_replacement_stages_when_ocr_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            (output_root / "fake" / "text-replacement.html").unlink()
+            replacement_count = len(
+                ocr_evaluation.TextReplacementProviderFactory.discover_default_plugins()
+                .local_evaluation_provider_names
+            )
+            displays: list[RecordingDisplay] = []
+
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            stages = displays[0].stage_names()
+            self.assertEqual("Prepare inputs", stages[0])
+            self.assertEqual(1 + replacement_count, len(stages))
+            self.assertNotIn("OCR", stages)
+            self.assertNotIn("Clean up", stages)
+            self.assertIn(("overall_total", 1 + replacement_count), displays[0].events)
+
+    # Verifies FR-2026-10-26-03.
+    def test_progress_shows_only_prepare_stage_when_every_output_is_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            displays: list[RecordingDisplay] = []
+            output = StringIO()
+
+            with (
+                patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)),
+                redirect_stdout(output),
+            ):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            self.assertEqual(["Prepare inputs"], displays[0].stage_names())
+            self.assertIn(("overall_total", 1), displays[0].events)
+            self.assertIn("Skipping fake", output.getvalue())
+
+    # Verifies FR-2026-10-26-03.
+    def test_cleanup_stage_counts_files_removed_from_an_existing_provider_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            provider_root = output_root / "fake"
+            (provider_root / "index.html").unlink()
+            file_count = sum(1 for path in provider_root.rglob("*") if path.is_file())
+            displays: list[RecordingDisplay] = []
+
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            display = displays[0]
+            self.assertEqual(["Prepare inputs", "Clean up", "OCR"], display.stage_names()[:3])
+            self.assertEqual([None, file_count], display.totals_for("Clean up"))
+            self.assertIn(("label", "Scanning"), display.events)
+            self.assertIn(("label", "fake"), display.events)
+
+    # Verifies FR-2026-10-26-03.
+    def test_cleanup_failure_closes_the_display_before_the_error_propagates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            (output_root / "fake" / "index.html").unlink()
+            displays: list[RecordingDisplay] = []
+
+            with (
+                patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)),
+                patch.object(ocr_evaluation, "_remove_tree", side_effect=OSError("locked")),
+            ):
+                with self.assertRaises(OSError):
+                    ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            self.assertTrue(displays[0].closed)
+
+    # Verifies FR-2026-10-26-03.
+    def test_text_replacement_totals_exclude_images_whose_ocr_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            Image.new("RGB", (80, 60), "black").save(input_root / "en" / "failed.png")
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            displays: list[RecordingDisplay] = []
+
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            display = displays[0]
+            self.assertEqual([2], display.totals_for("OCR"))
+            replacement_stages = [
+                name for name in display.stage_names() if name.startswith("Text replacement: ")
+            ]
+            self.assertTrue(replacement_stages)
+            for name in replacement_stages:
+                self.assertEqual([1], display.totals_for(name))
+                self.assertEqual(1, display.advances_in(name))
+
+    # Verifies FR-2026-10-26-03.
+    def test_text_replacement_failure_still_advances_the_current_row_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 2)
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            displays: list[RecordingDisplay] = []
+
+            with (
+                patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)),
+                patch.object(
+                    ocr_evaluation, "_write_text_replacement_artifacts",
+                    side_effect=ValueError("synthetic"),
+                ),
+            ):
+                ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            display = displays[0]
+            for name in display.stage_names():
+                if name.startswith("Text replacement: "):
+                    self.assertEqual(2, display.advances_in(name))
+
+    # Verifies FR-2026-10-26-03.
+    def test_prepare_stage_is_active_while_preparation_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            displays: list[RecordingDisplay] = []
+
+            def prepare_inputs(
+                source_root: Path,
+                prepared_output_root: Path,
+                include_patterns: tuple[str, ...],
+                progress: PreparationProgress,
+            ) -> PreparationResult:
+                self.assertEqual(1, len(displays))
+                self.assertEqual(
+                    [("overall", None), ("current", "Prepare inputs", None)],
+                    displays[0].events[:2],
+                )
+                progress.start_step("Preparing", 2)
+                progress.advance()
+                progress.advance()
+                (prepared_output_root / "en").mkdir(parents=True)
+                return PreparationResult()
+
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.prepare_and_evaluate_ocr_inputs(
+                    root / "input", root / "output", OcrProviderFactory(), prepare_inputs
+                )
+
+            self.assertIn(("label", "Preparing"), displays[0].events)
+            self.assertEqual(2, displays[0].events.count(("advance",)))
+
+    # Verifies FR-2026-10-26-04.
+    def test_default_limit_keeps_the_first_25_images_and_reports_the_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 27)
+            provider = FakeOcrProvider()
+            output = StringIO()
+
+            with redirect_stdout(output):
+                result = ocr_evaluation.evaluate_ocr_inputs(
+                    input_root, output_root, OcrProviderFactory({"fake": lambda: provider})
+                )
+
+            self.assertEqual(25, result.successful_images)
+            self.assertEqual(25, provider.calls)
+            self.assertTrue((output_root / "fake" / "en" / "image-25.png.json").is_file())
+            self.assertFalse((output_root / "fake" / "en" / "image-26.png.json").exists())
+            self.assertIn(
+                "Limiting evaluation to the first 25 of 27 eligible images", output.getvalue()
+            )
+            self.assertIn("--max-images 0", output.getvalue())
+            self.assertIn("--include", output.getvalue())
+            viewer = (output_root / "fake" / "index.html").read_text(encoding="utf-8")
+            self.assertNotIn("image-26.png", viewer)
+
+    # Verifies FR-2026-10-26-04.
+    def test_zero_limit_evaluates_every_image_without_a_notice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 27)
+            provider = FakeOcrProvider()
+            output = StringIO()
+
+            with redirect_stdout(output):
+                result = ocr_evaluation.evaluate_ocr_inputs(
+                    input_root, output_root, OcrProviderFactory({"fake": lambda: provider}),
+                    max_images=0,
+                )
+
+            self.assertEqual(27, result.successful_images)
+            self.assertNotIn("Limiting evaluation", output.getvalue())
+
+    # Verifies FR-2026-10-26-04.
+    def test_limit_applies_after_include_selection_and_in_sorted_order(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 6)
+            provider = FakeOcrProvider()
+            selected = tuple(Path(f"en/image-{number:02d}.png") for number in (6, 3, 5, 2))
+
+            result = ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, OcrProviderFactory({"fake": lambda: provider}),
+                selected_image_paths=selected, max_images=2,
+            )
+
+            self.assertEqual(2, result.successful_images)
+            provider_root = output_root / "fake" / "en"
+            self.assertTrue((provider_root / "image-02.png.json").is_file())
+            self.assertTrue((provider_root / "image-03.png.json").is_file())
+            self.assertFalse((provider_root / "image-05.png.json").exists())
+
+    # Verifies FR-2026-10-26-04.
+    def test_changing_the_limit_regenerates_provider_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 4)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory, max_images=2)
+            unchanged = ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, factory, max_images=2
+            )
+            changed = ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, factory, max_images=3
+            )
+
+            self.assertEqual(1, unchanged.skipped_providers)
+            self.assertEqual(0, changed.skipped_providers)
+            self.assertEqual(5, provider.calls)
+            self.assertTrue(all(path.exists() for path in input_root.rglob("*.png")))
+
+    # Verifies FR-2026-10-26-04 and FR-2026-10-24-02.
+    def test_limit_applies_to_an_explicitly_selected_vision_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 3)
+            provider = FakeOcrProvider()
+
+            ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root,
+                OcrProviderFactory({"google_cloud_vision": lambda: provider}),
+                ocr_provider_name="google_cloud_vision", max_images=2,
+            )
+
+            self.assertEqual(2, provider.calls)
+
+    # Verifies FR-2026-10-26-04.
+    def test_max_images_option_defaults_to_25_and_rejects_invalid_values(self) -> None:
+        with patch.object(sys, "argv", ["ocr_evaluations.py"]):
+            self.assertEqual(25, ocr_evaluation.parse_arguments().max_images)
+        with patch.object(sys, "argv", ["ocr_evaluations.py", "--max-images", "0"]):
+            self.assertEqual(0, ocr_evaluation.parse_arguments().max_images)
+        for value in ("-1", "many", "2.5"):
+            error_output = StringIO()
+            with (
+                patch.object(sys, "argv", ["ocr_evaluations.py", "--max-images", value]),
+                patch.object(sys, "stderr", error_output),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                ocr_evaluation.parse_arguments()
+            self.assertEqual(2, raised.exception.code)
+            self.assertIn("--max-images", error_output.getvalue())
+
+    # Verifies FR-2026-10-26-04.
+    def test_help_documents_the_image_limit_default_and_zero(self) -> None:
+        output = StringIO()
+        with patch.object(sys, "argv", ["ocr_evaluations.py", "--help"]), redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                ocr_evaluation.parse_arguments()
+        help_text = " ".join(output.getvalue().split())
+        self.assertIn("--max-images N", help_text)
+        self.assertIn("default: 25", help_text)
+        self.assertIn("0 means no limit", help_text)
 
     # Verifies FR-2026-08-01-03 and FR-2026-08-02-13.
     def test_generates_visual_artifacts_failure_json_viewer_and_checksum_cache(self) -> None:

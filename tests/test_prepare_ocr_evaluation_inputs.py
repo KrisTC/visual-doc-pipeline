@@ -195,6 +195,44 @@ class PrepareOcrEvaluationInputsTests(unittest.TestCase):
             self.assertFalse(stale_document_directory.exists())
             self.assertTrue((retained_directory / "extra.txt").is_file())
 
+    # Verifies FR-2026-10-26-03.
+    def test_reports_scanning_then_counted_preparation_progress(self) -> None:
+        class Recorder:
+            def __init__(self) -> None:
+                self.steps: list[tuple[str, int | None]] = []
+                self.advances = 0
+
+            def start_step(self, label: str, total: int | None) -> None:
+                self.steps.append((label, total))
+
+            def advance(self) -> None:
+                self.advances += 1
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "sample-data"
+            output_root = root / "prepared"
+            language_root = source_root / "en"
+            language_root.mkdir(parents=True)
+            bitmap = language_root / "source.png"
+            Image.new("RGB", (8, 8), "red").save(bitmap)
+            self._create_docx(language_root / "real.docx", bitmap)
+            stale = output_root / "en" / "stale"
+            stale.mkdir(parents=True)
+            (stale / "extra.txt").write_text("remove", encoding="ascii")
+            recorder = Recorder()
+
+            ocr_preparation.prepare_evaluation_inputs(
+                source_root, output_root, progress=recorder
+            )
+
+            labels = [label for label, _ in recorder.steps]
+            self.assertEqual("Scanning sources", labels[0])
+            self.assertIsNone(recorder.steps[0][1])
+            self.assertIn(("Preparing", 2), recorder.steps)
+            self.assertLess(labels.index("Scanning sources"), labels.index("Preparing"))
+            self.assertGreaterEqual(recorder.advances, 2)
+
     @staticmethod
     def _create_docx(path: Path, image_path: Path) -> None:
         document = Document()

@@ -1504,8 +1504,10 @@ The command-specific row mappings are:
   post-native-pass layout rewrite, chart-cache synchronization, and final
   package write. These source-level steps shall remain on the Current row;
   only embedded XLSX native-text processing belongs on the Nested row.
-- OCR evaluation: the overall row counts all non-cached provider/image
-  evaluations; the current row counts those for the active progress folder.
+- OCR evaluation: as defined by FR-2026-10-26-03. The overall row counts the
+  command's stages (input preparation, cleanup, OCR, and each
+  text-replacement provider); the current row counts the files of the active
+  stage.
 - Native text-replacement evaluation: the overall row counts all eligible
   presentations; the current row counts those in the active source-language
   directory.

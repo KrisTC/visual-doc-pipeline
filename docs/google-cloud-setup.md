@@ -80,7 +80,7 @@ A selected document contributes all its embedded bitmap images. Repeated options
 
 Open `outputs/evaluations/ocr/output/google_cloud_vision/index.html` to inspect the original recognized text. The separate `text-replacement.html` page shows local replacement previews translated to English. The OCR viewer marks recognized text as not translatable by the browser.
 
-Without `--include`, the evaluator prepares the normal corpus from `sample-data/` and sends every eligible image, including confidential samples, to Google Cloud Vision. Its results remain under the ignored `outputs/evaluations/ocr/output/google_cloud_vision/` directory. Running `ocr_evaluations.py` without `--ocr` excludes the Cloud Vision provider. The evaluator's text-replacement stage uses only locally eligible replacement providers.
+Without `--include`, the evaluator prepares the normal corpus from `sample-data/` and sends up to 25 eligible images (the `--max-images` default; `0` removes the cap), including confidential samples, to Google Cloud Vision. Its results remain under the ignored `outputs/evaluations/ocr/output/google_cloud_vision/` directory. Running `ocr_evaluations.py` without `--ocr` excludes the Cloud Vision provider. The evaluator's text-replacement stage uses only locally eligible replacement providers.
 
 The provider derives regions from Cloud Vision words, detected breaks, and word geometry. It groups text on one visual line, while separating adjacent text at a clearly different size. Text wrapped onto another line is returned as another region. The evaluator displays detected line breaks in extracted text.
 

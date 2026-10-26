@@ -313,7 +313,7 @@ class GoogleCloudVisionOcrProviderTests(unittest.TestCase):
         self.assertEqual(("Hi!",), tuple(planned.units())[0].texts)
         self.assertEqual(["Hi!"], [item.text for item in first.text_items])
         evaluation_image = ocr_evaluations.EvaluationImage(
-            "en", Path("input/en/image.png"), Path("en"), Path("en/image.png")
+            "en", Path("input/en/image.png"), Path("en/image.png")
         )
         evaluation_payload = ocr_evaluations._successful_payload(
             first, image, Path(self.temporary_directory.name) / "output", evaluation_image

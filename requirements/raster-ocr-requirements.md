@@ -138,7 +138,7 @@ Automated tests shall mock Paddle runtime availability and engine behavior to ve
 
 ### Description
 
-The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin eligible for automatic local evaluation when no path filter is supplied. Explicit provider selection and exclusions are governed by FR-2026-08-04-02 and FR-2026-10-24-02; path filtering is governed by FR-2026-10-24-03. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
+The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin eligible for automatic local evaluation when no path filter is supplied. The number of images evaluated per run is limited by FR-2026-10-26-04. Explicit provider selection and exclusions are governed by FR-2026-08-04-02 and FR-2026-10-24-02; path filtering is governed by FR-2026-10-24-03. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
 
 The command shall use the existing OCR-provider factory and OCR task request and response abstractions in `pipeline/ocr/`. It shall not implement, discover, or invoke provider-specific OCR logic independently.
 
@@ -169,9 +169,11 @@ Each provider root shall contain a checksum representing its complete evaluation
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-02 |
-| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01, FR-2026-09-03-01 |
+| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01, FR-2026-09-03-01, FR-2026-10-26-03 |
 
 ### Description
+
+FR-2026-10-26-03 supersedes the row mapping in this requirement with stage-based rows covering OCR and text replacement.
 
 The OCR-evaluation command shall render terminal progress as defined by
 FR-2026-09-03-01. Its overall bar shall contain every non-cached
@@ -954,6 +956,129 @@ Automated tests shall use synthetic images, synthetic OCR results, and temporary
 - the OCR viewer embeds the SVG through `<object>` with the `:target` highlight style;
 - the replacement page's mask option uses the SVG and the script swaps between `<object>` and `<img>`; and
 - a provider root with the previous format version is regenerated.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-03
+
+| Property | Value |
+|----------|-------|
+| Title | Report every stage of OCR evaluation in its progress display |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-01, FR-2026-08-02-13, FR-2026-09-03-01 |
+
+### Description
+
+The OCR-evaluation command prepares its inputs, removes superseded provider output, runs an OCR stage, and then runs the text-replacement artifact stage of FR-2026-08-02-13. Its terminal progress shall cover every one of these through the Rich display of FR-2026-09-03-01, so that no phase that can take noticeable time runs without a visible, named progress row. It shall replace the progress-row mapping of FR-2026-08-02-01 as follows. The nested row is not used.
+
+The live display shall start before input preparation begins, rather than after cleanup, and shall close before the command's final summary or error.
+
+**Overall row.** Its units are the stages that have work in this run, in execution order:
+
+1. One **Prepare inputs** stage, always present. It covers OCR-evaluation input preparation (FR-2026-08-02-05), input discovery, and the input-tree checksum.
+2. One **Clean up** stage, present only when at least one existing provider root is to be removed before regeneration.
+3. One **OCR** stage, present only when at least one OCR provider's OCR artifacts are not current.
+4. One **text-replacement** stage for each text-replacement provider that FR-2026-08-02-13 invokes, present only when at least one OCR provider root needs its text-replacement artifacts regenerated. This includes a root whose OCR artifacts are current but whose text-replacement artifacts are missing or stale.
+
+A stage shall advance the overall row once, after it completes. A stage absent for the reasons above shall not contribute a unit. Which later stages exist is known only after the Prepare inputs stage finishes, so the overall row shall be indeterminate until then and shall then show its final total. It shall not show a percentage or ETA before that point.
+
+**Current row.** While a stage is active, the current row shall count that stage's files and shall describe the stage, not a folder:
+
+- For the Prepare inputs stage, a unit is one source file that preparation copies or extracts, or one image that discovery or checksumming reads. Where the total is not known in advance, the row shall be indeterminate and show the count completed so far and a detail label naming the active step (`Preparing`, `Discovering`, or `Checksumming`), never leaving the row without a label.
+- For the Clean up stage, a unit is one file removed from an existing provider root. The command shall first count the files to be removed, showing an indeterminate row labelled `Scanning` while it does so, and then show a determinate row. Its detail label shall show the provider whose root is being removed. A file that cannot be removed shall still propagate its error exactly as the command does today, after the live display closes.
+- For the OCR stage, a unit is one non-cached OCR-provider/image evaluation, across every OCR provider being run. This is the unit count that FR-2026-08-02-01 used for its overall row.
+- For a text-replacement stage, a unit is one successful OCR-result image in an OCR provider root that needs text-replacement regeneration, processed with that stage's text-replacement provider. An image whose OCR status is failed or unsupported has no replacement artifacts and shall not be counted.
+
+The current row's description shall name the stage: `Prepare inputs`, `Clean up`, `OCR`, or `Text replacement: <provider name>`. It shall be reset when the stage completes. For the OCR and text-replacement stages, its detail label shall show the OCR provider and the image's file name, using the label-length handling that FR-2026-09-03-01 defines. Each unit shall advance the current row once, whether the file succeeds, fails, or is skipped within its stage.
+
+When the OCR or a text-replacement stage has finished its files and is writing provider viewers and cache markers, its current row shall remain visible with a detail label `Writing viewer: <provider name>`. This label adds no units.
+
+**Scheduling.** The current row's per-file counts for one text-replacement stage require that stage to finish its images before the next text-replacement provider starts. The command may reorder or restructure its replacement work to achieve this. Every artifact it generates, its content, the format-version and cache-freshness markers, the viewers, and the continue-on-failure behaviour of FR-2026-08-01-03 and FR-2026-08-02-13 shall be unchanged by progress reporting.
+
+The existing one-line skipped-provider status of FR-2026-08-02-01 shall remain, shall be written through the live display's console, and the command shall report any skipped text-replacement stage in the same way. When Prepare inputs is the only stage, the display shall close as soon as it completes.
+
+### Rationale
+
+Text replacement is repeated for every text-replacement provider and can take as long as OCR on a large corpus. A language-folder progress row says nothing about which of these stages is active. Showing one overall unit per stage and a per-file current row for that stage lets a reviewer see which condition is running and how far through the corpus it is.
+
+Removing a large provider output tree before regeneration can take about a minute, and with no output the command appeared to hang. Input preparation, discovery, and checksumming can be equally slow on a large corpus. Naming these phases lets a reviewer tell that the command is busy rather than stuck.
+
+### Notes
+
+This requirement replaces the folder-based current-row mapping in FR-2026-08-02-01 and the OCR-evaluation bullet of FR-2026-09-03-01 for this command. The language-folder grouping is no longer a progress concept. Other behaviour of those requirements, including the Overall, Current, and ETA rendering and the non-interactive plain-text fallback, remains in force.
+
+The OCR stage's current row spans every OCR provider, so a run with two OCR providers has one OCR unit on the overall row and `images x 2` units on the current row.
+
+### Verification
+
+Automated tests shall use synthetic input trees, fake OCR providers, registered local test text-replacement providers, and mocked rendering boundaries. They shall verify:
+
+- the overall total and advancement for a full run: Prepare inputs, Clean up, OCR, and one unit for each text-replacement provider, with the overall row indeterminate until preparation finishes;
+- current-row totals and descriptions for every stage, with the per-stage reset between stages, including the indeterminate `Scanning` row followed by a determinate Clean up row when a synthetic provider root with known files is removed;
+- that the live display is already active during Prepare inputs and Clean up, using mocked preparation and file-removal boundaries, so a slow removal is visible;
+- a run whose OCR artifacts are current but whose text-replacement artifacts are stale, which shows only the Prepare inputs and text-replacement stages and no Clean up or OCR stage;
+- a run in which every provider output is current, which shows only the Prepare inputs stage and writes the skipped-provider lines above the display;
+- the `Writing viewer` detail label without an extra unit;
+- that a removal failure closes the display before the error propagates;
+- that failed and unsupported-language images are excluded from text-replacement totals, and that a failure within a stage still advances the current row once;
+- that a text-replacement stage completes all its images before the next provider begins; and
+- generated artifacts unchanged from those produced before this requirement.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-04
+
+| Property | Value |
+|----------|-------|
+| Title | Limit the number of images in an OCR-evaluation run |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-05, FR-2026-10-24-02, FR-2026-10-24-03, FR-2026-10-26-03 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall accept an optional `--max-images N` option, where `N` is a non-negative integer. When the option is absent, `N` shall be 25. A value of 0 shall mean no limit. A negative or non-integer value shall be rejected as a command-line error that names the option, before any preparation or OCR work begins.
+
+The limit shall apply to the number of bitmap images evaluated in one run. It shall be applied to the images that remain after the `--include` selection of FR-2026-10-24-03, whether or not `--include` is given. When more than `N` images remain, the command shall keep the first `N` in the command's existing deterministic discovery order, which is language directory and then sorted path, and shall drop the rest. The kept images shall be used for the input-tree checksum, OCR requests, text-replacement artifacts, viewers, and progress totals (FR-2026-10-26-03), so a dropped image shall not be OCR'd, replaced, listed in a viewer, or counted.
+
+The limit shall apply equally to every selected OCR provider, including an explicitly selected `google_cloud_vision` under FR-2026-10-24-02, so the default run sends at most 25 images to that provider.
+
+When the limit drops any image, the command shall write one line through the live display's console before the OCR stage starts. The line shall state the number kept, the number eligible, and that `--max-images 0` removes the limit and `--include` narrows the selection. The command shall write no such line when nothing is dropped. The command help shall document the option, its default, and the meaning of 0.
+
+Because the checksum covers the kept image set (FR-2026-10-24-03), a provider output root generated with a different limit or selection shall be treated as out of date and regenerated.
+
+### Rationale
+
+The evaluation was written for a small corpus. A real corpus of tens of documents, each containing many images, makes the default all-images run too slow for the quick manual review the command exists to support. A modest default limit keeps a bare run quick and bounded, while an explicit option and `--include` allow a larger or narrower run.
+
+### Notes
+
+The limit takes the first `N` images in sorted order and does not sample across languages or documents. A bare run can therefore cover only the first language directory or document whose images fill the limit, and a reviewer who wants other languages should use `--include`. A different selection strategy may be considered separately.
+
+Input preparation (FR-2026-08-02-05) is unchanged and still copies or extracts every selected source file. The limit reduces evaluation work, not preparation work. The new option is an evaluation-command option; FR-2026-08-02-05 still forbids preparation-specific options.
+
+Changing the limit changes the evaluated image set and so regenerates provider output (see Description). It shall not delete files in the input root.
+
+### Verification
+
+Automated tests shall use synthetic source trees and fake OCR providers. They shall verify:
+
+- the default of 25, an explicit limit, and 0 for no limit, with a synthetic tree larger than 25 images;
+- rejection of negative and non-integer values before any preparation or provider call;
+- that the first `N` images are kept in language-directory then sorted-path order, and that the rest are not passed to a provider, replaced, listed in a viewer, or counted in progress totals;
+- the limit applied after `--include`, and with no filter;
+- the dropped-image notice, including its counts, and its absence when nothing is dropped;
+- that a change of limit regenerates a previously generated provider root; and
+- that the limit applies to an explicitly selected `google_cloud_vision` fake provider.
 
 Tests shall not use confidential samples or derived artifacts.
 

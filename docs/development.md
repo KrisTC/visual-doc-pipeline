@@ -116,6 +116,8 @@ For a manual Cloud Vision OCR evaluation, follow the [Google Cloud setup guide](
 
 This sends the prepared evaluation images, including confidential samples, to Google. Add `--include 'ja/example.pptx'` to process only a matching source document and its embedded images; the path is relative to `sample-data/`.
 
+By default each run processes at most the first 25 images (after `--include` filtering, in sorted order). Use `--max-images N` to change the cap or `--max-images 0` for no limit. Preparation, cleanup, OCR and each text-replacement provider are shown as stages in the live progress display.
+
 Generate colour-estimation pages:
 
 ```sh

@@ -12,7 +12,6 @@ import os
 import re
 import shutil
 import sys
-from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,10 +42,18 @@ from pipeline.folder_replacement.filters import parse_include_patterns
 from pipeline.provider_cache import source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
-from pipeline.text_region_colours import estimate_replacement_colours
+from pipeline.text_region_colours import TextRegionColourEstimate, estimate_replacement_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
-from pipeline.text_replacement import TextReplacementProviderFactory, replace_text
-from scripts.prepare_ocr_evaluation_inputs import PreparationResult, prepare_evaluation_inputs
+from pipeline.text_replacement import (
+    TextReplacementProvider,
+    TextReplacementProviderFactory,
+    replace_text,
+)
+from scripts.prepare_ocr_evaluation_inputs import (
+    PreparationProgress,
+    PreparationResult,
+    prepare_evaluation_inputs,
+)
 from scripts.ocr_text_replacement_evaluations import _load_default_typeface
 
 
@@ -68,6 +75,11 @@ MAXIMUM_PROGRESS_LABEL_LENGTH = 44
 TEXT_CLIP_CONTEXT_PIXELS = 20
 TEXT_REPLACEMENT_MINIMUM_CONFIDENCE = 0.65
 EXCLUDED_EVALUATION_PROVIDERS = frozenset({"no_ocr", "google_cloud_vision"})
+DEFAULT_MAX_IMAGES = 25
+PREPARE_STAGE = "Prepare inputs"
+CLEANUP_STAGE = "Clean up"
+OCR_STAGE = "OCR"
+TEXT_REPLACEMENT_STAGE_PREFIX = "Text replacement: "
 
 
 @dataclass
@@ -86,7 +98,6 @@ class EvaluationImage:
 
     language: str
     path: Path
-    progress_folder: Path
     relative_path: Path
 
 
@@ -133,33 +144,25 @@ def discover_evaluation_images(
         for image_path in candidate_paths:
             if image_path.is_file() and image_path.suffix.lower() in BITMAP_EXTENSIONS:
                 relative_path = image_path.relative_to(input_root)
-                relative_to_language = image_path.relative_to(language_directory)
-                progress_folder = (
-                    language_directory.relative_to(input_root)
-                    if len(relative_to_language.parts) == 1
-                    else language_directory.relative_to(input_root)
-                    / relative_to_language.parts[0]
-                )
                 images.append(
                     EvaluationImage(
                         language=language,
                         path=image_path,
-                        progress_folder=progress_folder,
                         relative_path=relative_path,
                     )
                 )
     return images
 
 
-def progress_groups(images: list[EvaluationImage]) -> dict[Path, list[EvaluationImage]]:
-    """Group images by their language directory or its immediate child folder."""
-    groups: defaultdict[Path, list[EvaluationImage]] = defaultdict(list)
-    for image in images:
-        groups[image.progress_folder].append(image)
-    return dict(groups)
+def limit_images(images: list[EvaluationImage], maximum: int) -> list[EvaluationImage]:
+    """Keep the first images in discovery order; a maximum of 0 keeps them all."""
+    return images if maximum == 0 else images[:maximum]
 
 
-def input_tree_checksum(images: list[EvaluationImage]) -> str:
+def input_tree_checksum(
+    images: list[EvaluationImage],
+    on_image: Callable[[], None] | None = None,
+) -> str:
     """Return a deterministic SHA-256 checksum for the eligible input image tree."""
     digest = hashlib.sha256()
     for image in images:
@@ -171,6 +174,8 @@ def input_tree_checksum(images: list[EvaluationImage]) -> str:
             for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
                 digest.update(chunk)
         digest.update(b"\0")
+        if on_image is not None:
+            on_image()
     return digest.hexdigest()
 
 
@@ -181,16 +186,76 @@ def evaluate_ocr_inputs(
     *,
     ocr_provider_name: str | None = None,
     selected_image_paths: tuple[Path, ...] | None = None,
+    max_images: int = DEFAULT_MAX_IMAGES,
+    display: LiveProgress | None = None,
 ) -> EvaluationRunResult:
-    """Evaluate local providers by default or one explicitly selected provider."""
+    """Evaluate local providers by default or one explicitly selected provider.
+
+    A caller that has already started the live display (with the Prepare inputs
+    stage active and an indeterminate overall row) passes it; otherwise this
+    function runs its own display.
+    """
+    if display is not None:
+        return _evaluate_stages(
+            display, input_root, output_root, factory,
+            ocr_provider_name, selected_image_paths, max_images,
+        )
+    with LiveProgress() as own_display:
+        _start_prepare_stage(own_display)
+        return _evaluate_stages(
+            own_display, input_root, output_root, factory,
+            ocr_provider_name, selected_image_paths, max_images,
+        )
+
+
+class _PrepareStageProgress:
+    """Show the steps of the Prepare inputs stage on the live display's current row."""
+
+    def __init__(self, display: LiveProgress) -> None:
+        self._display = display
+
+    def start_step(self, label: str, total: int | None) -> None:
+        self._display.start_current(PREPARE_STAGE, total, "file")
+        self._display.set_current_label(label)
+
+    def advance(self) -> None:
+        self._display.advance_current()
+
+
+def _start_prepare_stage(display: LiveProgress) -> None:
+    display.start_overall(None, "stage")
+    _PrepareStageProgress(display).start_step("Starting", None)
+
+
+def _evaluate_stages(
+    display: LiveProgress,
+    input_root: Path,
+    output_root: Path,
+    factory: OcrProviderFactory | None,
+    ocr_provider_name: str | None,
+    selected_image_paths: tuple[Path, ...] | None,
+    max_images: int,
+) -> EvaluationRunResult:
+    """Finish Prepare inputs, then run the cleanup, OCR, and text-replacement stages."""
     if selected_image_paths == ():
         return EvaluationRunResult()
-    images = discover_evaluation_images(input_root, selected_image_paths)
-    checksum = input_tree_checksum(images)
+    prepare_progress = _PrepareStageProgress(display)
+    prepare_progress.start_step("Loading plugins", None)
     provider_factory = factory or OcrProviderFactory.discover_default_plugins()
     text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
     result = EvaluationRunResult()
-    providers_to_run: list[tuple[str, Path]] = []
+
+    prepare_progress.start_step("Discovering", None)
+    discovered_images = discover_evaluation_images(input_root, selected_image_paths)
+    images = limit_images(discovered_images, max_images)
+    prepare_progress.start_step("Checksumming", len(images))
+    checksum = input_tree_checksum(images, display.advance_current)
+    if len(images) < len(discovered_images):
+        print(
+            f"Limiting evaluation to the first {len(images)} of {len(discovered_images)} "
+            "eligible images; use --max-images 0 to remove the limit or --include "
+            "to narrow the selection."
+        )
 
     if ocr_provider_name is None:
         provider_names = tuple(
@@ -204,103 +269,156 @@ def evaluate_ocr_inputs(
         raise OcrProviderNotFoundError(
             f"No OCR provider is registered under {ocr_provider_name!r}."
         )
+    providers_to_run: list[tuple[str, Path]] = []
+    replacement_roots: list[Path] = []
     for provider_name in provider_names:
         provider_root = _provider_output_root(output_root, provider_name)
-        if _provider_output_is_current(provider_root, checksum):
+        ocr_is_current = _provider_output_is_current(provider_root, checksum)
+        if ocr_is_current:
             result.skipped_providers += 1
             print(f"Skipping {provider_name}: OCR input checksum unchanged.")
-            continue
+        else:
+            providers_to_run.append((provider_name, provider_root))
+        # Regenerating OCR output removes the provider root, and so its replacement artifacts.
+        if not ocr_is_current or not _text_replacement_output_is_current(provider_root, checksum):
+            replacement_roots.append(provider_root)
 
-        providers_to_run.append((provider_name, provider_root))
+    replacement_provider_names = (
+        text_replacement_factory.local_evaluation_provider_names if replacement_roots else ()
+    )
+    roots_to_remove = [
+        (provider_name, provider_root)
+        for provider_name, provider_root in providers_to_run
+        if provider_root.exists()
+    ]
+    display.set_overall_total(
+        1
+        + (1 if roots_to_remove else 0)
+        + (1 if providers_to_run else 0)
+        + len(replacement_provider_names)
+    )
+    display.advance_overall()
+    display.clear_current()
 
+    if roots_to_remove:
+        _remove_provider_roots(display, roots_to_remove)
+        display.advance_overall()
+        display.clear_current()
+
+    if providers_to_run:
+        _run_ocr_stage(display, provider_factory, providers_to_run, images, checksum, result)
+        display.advance_overall()
+        display.clear_current()
+
+    if replacement_provider_names:
+        _run_text_replacement_stages(
+            display,
+            replacement_roots,
+            images,
+            text_replacement_factory,
+            replacement_provider_names,
+            checksum,
+        )
+
+    return result
+
+
+def _count_files(root: Path) -> int:
+    return sum(len(file_names) for _, _, file_names in os.walk(root))
+
+
+def _remove_tree(root: Path, on_file_removed: Callable[[], None]) -> None:
+    """Remove a directory tree, reporting each removed file."""
+    for directory, directory_names, file_names in os.walk(root, topdown=False):
+        for file_name in file_names:
+            os.unlink(os.path.join(directory, file_name))
+            on_file_removed()
+        for directory_name in directory_names:
+            path = os.path.join(directory, directory_name)
+            if not os.path.islink(path):
+                os.rmdir(path)
+            elif os.name == "nt":
+                os.rmdir(path)  # Windows directory links are removed as directories
+            else:
+                os.unlink(path)
+    os.rmdir(root)
+
+
+def _remove_provider_roots(
+    display: LiveProgress, roots_to_remove: list[tuple[str, Path]]
+) -> None:
+    """Remove superseded provider output with per-file progress."""
+    display.start_current(CLEANUP_STAGE, None, "file")
+    display.set_current_label("Scanning")
+    for _, provider_root in roots_to_remove:
+        if not provider_root.is_dir():
+            raise ValueError(f"Provider output path is not a directory: {provider_root}")
+    total = sum(_count_files(provider_root) for _, provider_root in roots_to_remove)
+    display.start_current(CLEANUP_STAGE, total, "file")
+    for provider_name, provider_root in roots_to_remove:
+        display.set_current_label(provider_name)
+        _remove_tree(provider_root, display.advance_current)
+
+
+def _run_ocr_stage(
+    display: LiveProgress,
+    provider_factory: OcrProviderFactory,
+    providers_to_run: list[tuple[str, Path]],
+    images: list[EvaluationImage],
+    checksum: str,
+    result: EvaluationRunResult,
+) -> None:
+    """Run every selected OCR provider over every kept image."""
+    progress = display.start_current(OCR_STAGE, len(images) * len(providers_to_run), "evaluation")
     providers: list[tuple[str, Path, OcrProvider]] = []
-    entries_by_provider: dict[str, list[ViewerEntry]] = {}
     for provider_name, provider_root in providers_to_run:
-        if provider_root.exists():
-            if not provider_root.is_dir():
-                raise ValueError(f"Provider output path is not a directory: {provider_root}")
-            shutil.rmtree(provider_root)
+        display.set_current_label(f"Loading {provider_name}")
         provider_root.mkdir(parents=True)
         providers.append((provider_name, provider_root, provider_factory.create(provider_name)))
-        entries_by_provider[provider_name] = []
 
-    if providers:
-        with LiveProgress() as display:
-            display.start_overall(len(images) * len(providers), "evaluation")
-            for folder, folder_images in progress_groups(images).items():
-                progress = display.start_current(
-                    _progress_label(folder.as_posix()),
-                    len(folder_images) * len(providers),
-                    "evaluation",
-                )
-                for provider_name, provider_root, provider in providers:
-                    entries_by_provider[provider_name].extend(
-                        _evaluate_provider(
-                            provider_name,
-                            provider,
-                            folder_images,
-                            provider_root,
-                            result,
-                            progress,
-                            display.advance_overall,
-                        )
-                    )
-                display.clear_current()
+    entries_by_provider: dict[str, list[ViewerEntry]] = {}
+    for provider_name, provider_root, provider in providers:
+        entries_by_provider[provider_name] = _evaluate_provider(
+            provider_name, provider, images, provider_root, result, progress
+        )
 
     for provider_name, provider_root, _ in providers:
+        display.set_current_label(f"Writing viewer: {provider_name}")
         _write_viewer(provider_root, entries_by_provider[provider_name])
         (provider_root / CHECKSUM_FILENAME).write_text(f"{checksum}\n", encoding="ascii")
         (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
             f"{_artifact_format_version(provider_name)}\n", encoding="ascii"
         )
 
-    replacement_typeface: skia.Typeface | None = None
-    for provider_name in provider_names:
-        provider_root = _provider_output_root(output_root, provider_name)
-        if _text_replacement_output_is_current(provider_root, checksum):
-            continue
-        if replacement_typeface is None:
-            replacement_typeface = _load_default_typeface()
-        replacement_entries = _regenerate_text_replacement_artifacts(
-            provider_root,
-            images,
-            text_replacement_factory,
-            replacement_typeface,
-        )
-        _write_text_replacement_viewer(
-            provider_root,
-            replacement_entries,
-            text_replacement_factory.local_evaluation_provider_names,
-        )
-        (provider_root / TEXT_REPLACEMENT_CHECKSUM_FILENAME).write_text(
-            f"{checksum}\n", encoding="ascii"
-        )
-        (provider_root / TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
-            f"{TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION}\n", encoding="ascii"
-        )
-
-    return result
-
 
 def prepare_and_evaluate_ocr_inputs(
     input_root: Path,
     output_root: Path,
     factory: OcrProviderFactory | None = None,
-    prepare_inputs: Callable[[Path, Path, tuple[str, ...]], PreparationResult] = prepare_evaluation_inputs,
+    prepare_inputs: Callable[
+        [Path, Path, tuple[str, ...], PreparationProgress], PreparationResult
+    ] = prepare_evaluation_inputs,
     *,
     ocr_provider_name: str | None = None,
     include_patterns: tuple[str, ...] = (),
+    max_images: int = DEFAULT_MAX_IMAGES,
 ) -> EvaluationRunResult:
     """Prepare the standard sample corpus, then evaluate the resulting input images."""
-    preparation = prepare_inputs(Path("sample-data"), input_root, include_patterns)
-    selected_image_paths = preparation.selected_image_paths if include_patterns else None
-    return evaluate_ocr_inputs(
-        input_root,
-        output_root,
-        factory,
-        ocr_provider_name=ocr_provider_name,
-        selected_image_paths=selected_image_paths,
-    )
+    with LiveProgress() as display:
+        _start_prepare_stage(display)
+        preparation = prepare_inputs(
+            Path("sample-data"), input_root, include_patterns, _PrepareStageProgress(display)
+        )
+        selected_image_paths = preparation.selected_image_paths if include_patterns else None
+        return evaluate_ocr_inputs(
+            input_root,
+            output_root,
+            factory,
+            ocr_provider_name=ocr_provider_name,
+            selected_image_paths=selected_image_paths,
+            max_images=max_images,
+            display=display,
+        )
 
 
 def _progress_label(value: str) -> str:
@@ -362,7 +480,6 @@ def _evaluate_provider(
     provider_root: Path,
     result: EvaluationRunResult,
     progress: EvaluationProgress,
-    overall_completed: Callable[[], None] | None = None,
 ) -> list[ViewerEntry]:
     entries: list[ViewerEntry] = []
     for image in images:
@@ -409,8 +526,6 @@ def _evaluate_provider(
             )
         finally:
             progress.update(1)
-            if overall_completed is not None:
-                overall_completed()
     return entries
 
 
@@ -467,109 +582,186 @@ def _write_visual_artifacts(
         )
 
 
+@dataclass
+class _PendingReplacement:
+    """One successful OCR image awaiting each text-replacement provider's artifacts."""
+
+    image: EvaluationImage
+    ocr_result: OcrResult | None
+    failed: bool
+    eligible_text_items: tuple[tuple[int, OcrText], ...] = ()
+    estimates: tuple[TextRegionColourEstimate, ...] | None = None
+
+
 def _write_text_replacement_artifacts(
     provider_root: Path,
-    evaluation_image: EvaluationImage,
+    item: _PendingReplacement,
     source_image: Image.Image,
-    result: OcrResult,
-    text_replacement_factory: TextReplacementProviderFactory,
+    replacement_provider: TextReplacementProvider,
+    provider_index: int,
     replacement_typeface: skia.Typeface,
 ) -> None:
-    """Write complete and region-clipped local replacements for every default provider."""
-    eligible_text_items = tuple(
-        (region_index, text_item)
-        for region_index, text_item in enumerate(result.text_items, start=1)
-        if text_item.confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
-    )
-    estimates = estimate_replacement_colours(
-        source_image, [text_item for _, text_item in eligible_text_items]
-    )
+    """Write the complete and region-clipped replacement artifacts for one provider."""
+    evaluation_image = item.image
+    assert item.ocr_result is not None
     artifact_directory = _replacement_artifact_directory(provider_root, evaluation_image)
-    artifact_directory.mkdir(parents=True, exist_ok=True)
+    if provider_index == 1:
+        if artifact_directory.exists():
+            shutil.rmtree(artifact_directory)
+        artifact_directory.mkdir(parents=True, exist_ok=True)
+        item.eligible_text_items = tuple(
+            (region_index, text_item)
+            for region_index, text_item in enumerate(item.ocr_result.text_items, start=1)
+            if text_item.confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
+        )
+        item.estimates = tuple(
+            estimate_replacement_colours(
+                source_image, [text_item for _, text_item in item.eligible_text_items]
+            )
+        )
+    assert item.estimates is not None
     with source_cache_scope(evaluation_image.path):
-        for provider_index, provider_name in enumerate(
-            text_replacement_factory.local_evaluation_provider_names, start=1
+        updated_image = source_image.copy()
+        replacements: list[TextRegionReplacement] = []
+        for (_, text_item), estimate in zip(
+            item.eligible_text_items, item.estimates, strict=True
         ):
-            provider = text_replacement_factory.create(provider_name)
-            updated_image = source_image.copy()
-            replacements: list[TextRegionReplacement] = []
-            for (_, text_item), estimate in zip(eligible_text_items, estimates, strict=True):
-                replacement = replace_text(
-                    provider, text_item.text, is_filename=False,
-                    source_language=evaluation_image.language, target_language="en",
-                )
-                replacements.append(
-                    TextRegionReplacement(
-                        text_region=text_item,
-                        colour_estimate=estimate,
-                        replacement_text=replacement.text,
-                    )
-                )
-            replace_text_regions(
-                updated_image, replacements, replacement_typeface, target_language="en"
+            replacement = replace_text(
+                replacement_provider, text_item.text, is_filename=False,
+                source_language=evaluation_image.language, target_language="en",
             )
-            updated_image.save(
-                _replacement_complete_image_path(provider_root, evaluation_image, provider_index),
-                format="PNG",
-            )
-            for region_index, text_item in eligible_text_items:
-                bounds = _padded_clipped_bounds(source_image, text_item.bounding_polygon.vertices)
-                updated_image.crop(bounds).save(
-                    _replacement_text_clip_path(
-                        provider_root, evaluation_image, region_index, provider_index
-                    ),
-                    format="PNG",
+            replacements.append(
+                TextRegionReplacement(
+                    text_region=text_item,
+                    colour_estimate=estimate,
+                    replacement_text=replacement.text,
                 )
+            )
+        replace_text_regions(
+            updated_image, replacements, replacement_typeface, target_language="en"
+        )
+    updated_image.save(
+        _replacement_complete_image_path(provider_root, evaluation_image, provider_index),
+        format="PNG",
+    )
+    for region_index, text_item in item.eligible_text_items:
+        bounds = _padded_clipped_bounds(source_image, text_item.bounding_polygon.vertices)
+        updated_image.crop(bounds).save(
+            _replacement_text_clip_path(
+                provider_root, evaluation_image, region_index, provider_index
+            ),
+            format="PNG",
+        )
 
 
-def _regenerate_text_replacement_artifacts(
-    provider_root: Path,
-    images: list[EvaluationImage],
-    text_replacement_factory: TextReplacementProviderFactory,
-    replacement_typeface: skia.Typeface,
-) -> list[ViewerEntry]:
-    """Rebuild replacement artifacts from cached OCR JSON without calling OCR."""
-    entries: list[ViewerEntry] = []
+def _plan_text_replacement(
+    provider_root: Path, images: list[EvaluationImage]
+) -> tuple[list[_PendingReplacement], dict[Path, ViewerEntry]]:
+    """Read cached OCR JSON without calling OCR, separating usable results from failures."""
+    pending: list[_PendingReplacement] = []
+    failed_entries: dict[Path, ViewerEntry] = {}
     for image in images:
         payload = json.loads(_result_json_path(provider_root, image).read_text(encoding="utf-8"))
         if not isinstance(payload, dict) or payload.get("status") != "succeeded":
-            entries.append(ViewerEntry(image, False, (), (), False))
+            failed_entries[image.relative_path] = ViewerEntry(image, False, (), (), False)
             continue
-
         try:
-            ocr_result = _ocr_result_from_cached_payload(payload)
-            with Image.open(image.path) as opened_image:
-                source_image = opened_image.copy()
-            artifact_directory = _replacement_artifact_directory(provider_root, image)
-            if artifact_directory.exists():
-                shutil.rmtree(artifact_directory)
-            _write_text_replacement_artifacts(
-                provider_root,
-                image,
-                source_image,
-                ocr_result,
-                text_replacement_factory,
-                replacement_typeface,
-            )
+            ocr_result: OcrResult | None = _ocr_result_from_cached_payload(payload)
         except (KeyError, OSError, TypeError, ValueError):
-            replacement_succeeded = False
-        else:
-            replacement_succeeded = True
+            ocr_result = None
+        pending.append(_PendingReplacement(image, ocr_result, failed=ocr_result is None))
+    return pending, failed_entries
 
+
+def _run_text_replacement_stages(
+    display: LiveProgress,
+    provider_roots: list[Path],
+    images: list[EvaluationImage],
+    text_replacement_factory: TextReplacementProviderFactory,
+    replacement_provider_names: tuple[str, ...],
+    checksum: str,
+) -> None:
+    """Run one stage per text-replacement provider across every root needing replacement."""
+    plans = [(root, *_plan_text_replacement(root, images)) for root in provider_roots]
+    total = sum(len(pending) for _, pending, _ in plans)
+    replacement_typeface: skia.Typeface | None = None
+
+    for provider_index, replacement_name in enumerate(replacement_provider_names, start=1):
+        display.start_current(
+            f"{TEXT_REPLACEMENT_STAGE_PREFIX}{replacement_name}", total, "image"
+        )
+        if replacement_typeface is None:
+            display.set_current_label("Loading typeface")
+            replacement_typeface = _load_default_typeface()
+        display.set_current_label(f"Loading {replacement_name}")
+        replacement_provider = text_replacement_factory.create(replacement_name)
+        for provider_root, pending, _ in plans:
+            for item in pending:
+                display.set_current_label(
+                    f"{provider_root.name}: {_progress_label(item.image.path.name)}"
+                )
+                try:
+                    if not item.failed:
+                        with Image.open(item.image.path) as opened_image:
+                            source_image = opened_image.copy()
+                        _write_text_replacement_artifacts(
+                            provider_root, item, source_image, replacement_provider,
+                            provider_index, replacement_typeface,
+                        )
+                except (KeyError, OSError, TypeError, ValueError):
+                    item.failed = True
+                finally:
+                    display.advance_current()
+
+        if provider_index == len(replacement_provider_names):
+            for provider_root, pending, failed_entries in plans:
+                display.set_current_label(f"Writing viewer: {provider_root.name}")
+                _write_text_replacement_report(
+                    provider_root, images, pending, failed_entries,
+                    replacement_provider_names, checksum,
+                )
+        display.advance_overall()
+        display.clear_current()
+
+
+def _write_text_replacement_report(
+    provider_root: Path,
+    images: list[EvaluationImage],
+    pending: list[_PendingReplacement],
+    failed_entries: dict[Path, ViewerEntry],
+    replacement_provider_names: tuple[str, ...],
+    checksum: str,
+) -> None:
+    """Write one provider root's replacement viewer and freshness markers."""
+    pending_by_path = {item.image.relative_path: item for item in pending}
+    entries: list[ViewerEntry] = []
+    for image in images:
+        item = pending_by_path.get(image.relative_path)
+        if item is None:
+            entries.append(failed_entries[image.relative_path])
+            continue
+        succeeded = not item.failed
+        ocr_result = item.ocr_result
         entries.append(
             ViewerEntry(
                 image,
                 True,
                 tuple(text_item.confidence for text_item in ocr_result.text_items)
-                if replacement_succeeded
+                if succeeded and ocr_result is not None
                 else (),
                 tuple(text_item.text for text_item in ocr_result.text_items)
-                if replacement_succeeded
+                if succeeded and ocr_result is not None
                 else (),
-                replacement_succeeded,
+                succeeded,
             )
         )
-    return entries
+    _write_text_replacement_viewer(provider_root, entries, replacement_provider_names)
+    (provider_root / TEXT_REPLACEMENT_CHECKSUM_FILENAME).write_text(
+        f"{checksum}\n", encoding="ascii"
+    )
+    (provider_root / TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+        f"{TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION}\n", encoding="ascii"
+    )
 
 
 def _ocr_result_from_cached_payload(payload: dict[object, object]) -> OcrResult:
@@ -1004,6 +1196,16 @@ def _relative_url(path: Path, from_directory: Path) -> str:
         return path.resolve().as_uri()
 
 
+def _non_negative_integer(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not an integer") from None
+    if number < 0:
+        raise argparse.ArgumentTypeError("must be 0 or greater")
+    return number
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1020,6 +1222,16 @@ def parse_arguments() -> argparse.Namespace:
         default=[],
         metavar="PATTERN",
         help="Include matching source paths relative to sample-data; may repeat or use commas.",
+    )
+    parser.add_argument(
+        "--max-images",
+        type=_non_negative_integer,
+        default=DEFAULT_MAX_IMAGES,
+        metavar="N",
+        help=(
+            "Evaluate at most N images, taking the first N in language-directory and "
+            f"sorted-path order after --include (default: {DEFAULT_MAX_IMAGES}; 0 means no limit)."
+        ),
     )
     parser.add_argument(
         "--input-root", type=Path, default=Path("outputs/evaluations/ocr/input")
@@ -1048,6 +1260,7 @@ def main() -> int:
             arguments.output_root,
             ocr_provider_name=arguments.ocr,
             include_patterns=arguments.include_patterns,
+            max_images=arguments.max_images,
         )
     except OcrProviderNotFoundError as error:
         print(str(error), file=sys.stderr)

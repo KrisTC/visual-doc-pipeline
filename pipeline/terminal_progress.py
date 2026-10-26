@@ -99,11 +99,16 @@ class LiveProgress:
         """Return an adapter for legacy single-task reporting boundaries."""
         return CurrentProgress(self)
 
-    def start_overall(self, total: int, unit: str = "task") -> None:
-        """Show the complete invocation's task count."""
+    def start_overall(self, total: int | None, unit: str = "task") -> None:
+        """Show the complete invocation's task count; None stays indeterminate."""
         self._overall = self._progress.add_task(
             "Overall", total=total, detail=unit, visible=True
         )
+
+    def set_overall_total(self, total: int) -> None:
+        """Fix the overall total once the invocation's tasks are known."""
+        if self._overall is not None:
+            self._progress.update(self._overall, total=total)
 
     def advance_overall(self, count: int = 1) -> None:
         if self._overall is not None:
