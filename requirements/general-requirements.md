@@ -15,7 +15,7 @@ Shared folder-processing, layout, diagnostics, caching, and development-workflow
 
 ### Description
 
-The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported.
+The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported, and Office temporary owner files as defined by FR-2026-10-26-01.
 
 The command shall accept a text-replacement-provider name, defaulting to `google_cloud_translate`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined. Its `--help` output shall display one command-options section containing each option's concise description and default, together with separate, non-duplicative text-replacement-provider, OCR-provider, and document-text-layout reference sections. The provider sections shall list every name discovered from the default plugin directories, with its discovered plugin description when one is declared. The document-text-layout reference section shall list every accepted value; the usage and command-option entry shall use the metavar `LAYOUT` rather than repeat those values. When stdout is an interactive terminal whose `TERM` is not `dumb` and `NO_COLOR` is unset, it shall use ANSI colour without colouring descriptions: section headings shall be bold, option names bold cyan, choice names bold green, and default-value annotations yellow. It shall emit plain text when stdout is not interactive, `TERM` is `dumb`, or `NO_COLOR` is set.
 
@@ -91,8 +91,9 @@ top-level `progress` integer percentage, a top-level `eta_seconds` value, and
 a `files` object. The top-level `progress` value shall use the same completed share and integer
 percentage as the Rich Overall bar. The `files` object shall map each
 input-relative POSIX path to its entry. A file that will not be processed,
-including an unsupported file, a provider-cache sidecar, or one excluded by the
-include patterns, shall have status `skipped`.
+including an unsupported file, a provider-cache sidecar, an Office temporary
+owner file (FR-2026-10-26-01), or one excluded by the include patterns, shall
+have status `skipped`.
 Each remaining file shall initially have status `queued`. When processing of a
 file starts, its status shall change to `processing` and it shall have a
 `progress` property containing an integer percentage from `0` through `100`.
@@ -2023,4 +2024,32 @@ A consumer of `progress.json` could previously see only a rough status for a fil
 
 Automated tests shall use synthetic documents, a mocked provider and a mocked clock. They shall verify that `details` follows the label of each plan, translate, apply and rate-limit step, is absent before the first label and after completion, holds the stderr failure message without the source path for a failed file, and is absent for queued and skipped files; that `eta_status` is `Calculating` exactly when `eta_seconds` is `null` and the progress display is enabled, including when an estimate reverts to `null`, and is absent when `eta_seconds` is a number, in completed, failed, queued and skipped entries, and when terminal progress is disabled; and that every observed progress-file write is valid JSON.
 
+---
+
+## FR-2026-10-26-01
+
+| Property | Value |
+|----------|-------|
+| Title | Skip Office temporary owner files during folder replacement |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-04 |
+
+### Description
+
+The folder-replacement command shall treat a file whose name starts with `~$` as an Office temporary owner (lock) file, which Word, Excel and PowerPoint create beside an open document, and shall skip it even when its extension is a supported document extension. The check shall apply to the file's own name only, at any depth, and shall be case-sensitive to the literal prefix `~$`. A directory whose name starts with `~$` shall not by itself exclude the files below it.
+
+A skipped owner file is ineligible, as an unsupported file is under FR-2026-08-03-03. It shall not be read, processed, or written to the output folder; it shall not be reported as a failed file or cause a non-zero exit; it shall not count toward the overall progress total of FR-2026-08-03-04; and its `progress.json` entry shall have status `skipped`. The skip applies regardless of the include patterns.
+
+### Rationale
+
+An owner file has a document extension but holds only a short user and machine name, not an OOXML package, so processing it always fails and makes a run exit non-zero for a file the user cannot meaningfully convert. Such files appear whenever a source folder is copied while a document is open.
+
+### Verification
+
+Automated tests shall use synthetic input folders only. They shall verify that a `~$`-prefixed `.docx`, `.xlsx` and `.pptx` file, at the input root and in a subfolder, produces no output file, no failure, a zero exit status, a `skipped` progress entry and no contribution to the overall total; that a similarly named file without the `~$` prefix, and a file below a `~$`-prefixed directory, are still processed; and that the skip applies when an include pattern matches the owner file.
+
+---
 ---

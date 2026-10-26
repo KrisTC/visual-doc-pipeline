@@ -547,6 +547,52 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertEqual(1, stderr.getvalue().count("Warning: Could not write progress file"))
             self.assertNotIn("Failed:", stderr.getvalue())
 
+    # Verifies FR-2026-10-26-01.
+    def test_skips_office_temporary_owner_files(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            nested_root = input_root / "nested"
+            owner_directory = input_root / "~$folder"
+            nested_root.mkdir(parents=True)
+            owner_directory.mkdir()
+            for owner_file in (
+                input_root / "~$report.docx",
+                input_root / "~$book.xlsx",
+                nested_root / "~$deck.pptx",
+            ):
+                owner_file.write_bytes(b"\x05synthetic owner")
+            self._write_png(input_root / "plain.png")
+            self._write_png(input_root / "~$matched.png")
+            self._write_png(owner_directory / "inside.png")
+
+            result = self._run(
+                input_root,
+                output_root,
+                _EmptyOcrProvider(),
+                _RecordingReplacementProvider(),
+                include_patterns=("*.docx", "*.png", "nested/*"),
+            )
+
+            self.assertEqual(2, result.processed_files)
+            self.assertEqual(0, result.failed_files)
+            self.assertEqual([], result.failures)
+            self.assertEqual(
+                ["inside.png", "plain.png"],
+                sorted(path.name for path in output_root.rglob("*.png")),
+            )
+            self.assertFalse(
+                any(path.name.startswith("~$") and path.is_file() for path in output_root.rglob("*"))
+            )
+            progress = json.loads((output_root / "progress.json").read_text(encoding="utf-8"))
+            self.assertEqual(100, progress["progress"])
+            self.assertEqual(
+                2, sum(entry["status"] == "completed" for entry in progress["files"].values())
+            )
+            for skipped in ("~$report.docx", "~$book.xlsx", "nested/~$deck.pptx", "~$matched.png"):
+                self.assertEqual({"status": "skipped"}, progress["files"][skipped])
+
     # Verifies FR-2026-08-03-03.
     def test_processes_supported_files_ignores_others_and_resolves_filename_collisions(self) -> None:
         with TemporaryDirectory() as temporary_directory:

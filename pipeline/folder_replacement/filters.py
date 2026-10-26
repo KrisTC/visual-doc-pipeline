@@ -25,6 +25,11 @@ def parse_include_patterns(option_values: Iterable[str]) -> tuple[str, ...]:
     return patterns
 
 
+def is_office_owner_file(path: Path) -> bool:
+    """Return whether a file is an Office temporary owner (lock) file."""
+    return path.name.startswith("~$")
+
+
 def matches_include_patterns(
     relative_source_path: Path, include_patterns: tuple[str, ...]
 ) -> bool:
