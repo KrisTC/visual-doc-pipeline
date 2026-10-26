@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import importlib.util
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -16,6 +19,7 @@ from pipeline.ocr import BoundingPolygon, OcrProviderFactory, OcrResult, OcrText
 from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr.provider import LocalContractTestSkip
+from scripts.prepare_ocr_evaluation_inputs import PreparationResult
 
 
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "ocr_evaluations.py"
@@ -72,6 +76,254 @@ class FakeOcrProvider:
 
 
 class RunOcrEvaluationsTests(unittest.TestCase):
+    # Verifies FR-2026-10-24-02 and SR-2026-10-24-01.
+    def test_default_excludes_google_cloud_vision(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            image_path = input_root / "en" / "image.png"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (80, 60), "red").save(image_path)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"google_cloud_vision": lambda: provider})
+
+            result = ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+
+            self.assertEqual(0, result.processed_images)
+            self.assertEqual(0, provider.calls)
+            self.assertFalse((output_root / "google_cloud_vision").exists())
+
+    # Verifies FR-2026-10-24-02.
+    def test_explicit_google_cloud_vision_selection_writes_only_its_viewer(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            image_path = input_root / "en" / "image.png"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (80, 60), "red").save(image_path)
+            vision_provider = FakeOcrProvider()
+            other_provider = FakeOcrProvider()
+            factory = OcrProviderFactory(
+                {
+                    "google_cloud_vision": lambda: vision_provider,
+                    "other": lambda: other_provider,
+                }
+            )
+
+            result = ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, factory, ocr_provider_name="google_cloud_vision"
+            )
+
+            self.assertEqual(1, result.successful_images)
+            self.assertEqual(1, vision_provider.calls)
+            self.assertEqual(0, other_provider.calls)
+            self.assertTrue((output_root / "google_cloud_vision" / "index.html").is_file())
+            self.assertFalse((output_root / "other").exists())
+
+    # Verifies FR-2026-10-24-03.
+    def test_filtered_evaluation_uses_only_selected_images_and_checksum(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            language_root = input_root / "en"
+            language_root.mkdir(parents=True)
+            Image.new("RGB", (80, 60), "red").save(language_root / "first.png")
+            Image.new("RGB", (80, 60), "blue").save(language_root / "second.png")
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+
+            first = ocr_evaluation.evaluate_ocr_inputs(
+                input_root,
+                output_root,
+                factory,
+                selected_image_paths=(Path("en/first.png"),),
+            )
+            second = ocr_evaluation.evaluate_ocr_inputs(
+                input_root,
+                output_root,
+                factory,
+                selected_image_paths=(Path("en/first.png"),),
+            )
+            third = ocr_evaluation.evaluate_ocr_inputs(
+                input_root,
+                output_root,
+                factory,
+                selected_image_paths=(Path("en/second.png"),),
+            )
+
+            self.assertEqual(1, first.successful_images)
+            self.assertEqual(1, second.skipped_providers)
+            self.assertEqual(1, third.successful_images)
+            self.assertEqual(2, provider.calls)
+            provider_root = output_root / "fake" / "en"
+            self.assertFalse((provider_root / "first.png.json").exists())
+            self.assertTrue((provider_root / "second.png.json").is_file())
+
+    # Verifies FR-2026-10-24-03.
+    def test_preparation_passes_selected_source_images_to_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "prepared"
+            output_root = root / "output"
+            provider = FakeOcrProvider()
+            calls: list[tuple[Path, tuple[str, ...]]] = []
+
+            def prepare_inputs(
+                source_root: Path,
+                prepared_output_root: Path,
+                include_patterns: tuple[str, ...],
+            ) -> PreparationResult:
+                calls.append((source_root, include_patterns))
+                language_root = prepared_output_root / "en"
+                language_root.mkdir(parents=True)
+                Image.new("RGB", (80, 60), "red").save(language_root / "selected.png")
+                Image.new("RGB", (80, 60), "blue").save(language_root / "old.png")
+                return PreparationResult(selected_image_paths=(Path("en/selected.png"),))
+
+            result = ocr_evaluation.prepare_and_evaluate_ocr_inputs(
+                input_root,
+                output_root,
+                OcrProviderFactory({"fake": lambda: provider}),
+                prepare_inputs,
+                include_patterns=("en/selected.png",),
+            )
+
+            self.assertEqual([(Path("sample-data"), ("en/selected.png",))], calls)
+            self.assertEqual(1, result.successful_images)
+            self.assertEqual(1, provider.calls)
+            self.assertFalse((output_root / "fake" / "en" / "old.png.json").exists())
+
+    # Verifies FR-2026-10-24-03.
+    def test_empty_filter_preserves_existing_output_without_provider_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            output_root = root / "output"
+            provider_root = output_root / "fake"
+            provider_root.mkdir(parents=True)
+            sentinel = provider_root / "existing.txt"
+            sentinel.write_text("retained", encoding="ascii")
+            provider = FakeOcrProvider()
+
+            result = ocr_evaluation.evaluate_ocr_inputs(
+                root / "missing-input",
+                output_root,
+                OcrProviderFactory({"fake": lambda: provider}),
+                selected_image_paths=(),
+            )
+
+            self.assertEqual(0, result.processed_images)
+            self.assertEqual(0, provider.calls)
+            self.assertEqual("retained", sentinel.read_text(encoding="ascii"))
+
+    # Verifies FR-2026-10-24-03.
+    def test_vision_old_line_artifacts_are_regenerated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            image_path = input_root / "en" / "image.png"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (80, 60), "red").save(image_path)
+            checksum = ocr_evaluation.input_tree_checksum(
+                ocr_evaluation.discover_evaluation_images(input_root)
+            )
+            provider_root = output_root / "google_cloud_vision"
+            provider_root.mkdir(parents=True)
+            (provider_root / "index.html").write_text("old", encoding="ascii")
+            (provider_root / ocr_evaluation.CHECKSUM_FILENAME).write_text(
+                f"{checksum}\n", encoding="ascii"
+            )
+            (provider_root / ocr_evaluation.ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+                "4-vision-line-v4\n", encoding="ascii"
+            )
+            provider = FakeOcrProvider()
+
+            result = ocr_evaluation.evaluate_ocr_inputs(
+                input_root,
+                output_root,
+                OcrProviderFactory({"google_cloud_vision": lambda: provider}),
+                ocr_provider_name="google_cloud_vision",
+            )
+
+            self.assertEqual(1, result.successful_images)
+            self.assertEqual(1, provider.calls)
+            self.assertEqual(
+                ocr_evaluation.VISION_ARTIFACT_FORMAT_VERSION,
+                (provider_root / ocr_evaluation.ARTIFACT_FORMAT_VERSION_FILENAME)
+                .read_text(encoding="ascii")
+                .strip(),
+            )
+
+    # Verifies FR-2026-08-02-02 and FR-2026-10-24-03.
+    def test_viewer_displays_detected_line_breaks(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            provider_root = Path(temporary_directory) / "vision"
+            provider_root.mkdir()
+            image = ocr_evaluation.EvaluationImage(
+                "ja", Path("input/ja/image.png"), Path("ja"), Path("ja/image.png")
+            )
+            entry = ocr_evaluation.ViewerEntry(
+                image, True, (0.9,), ("日本語\nSecond",), True
+            )
+
+            ocr_evaluation._write_viewer(provider_root, [entry])
+
+            viewer = (provider_root / "index.html").read_text(encoding="utf-8")
+            self.assertIn("white-space: pre-wrap", viewer)
+            self.assertIn('<html lang="en" translate="no">', viewer)
+            self.assertIn('<meta name="google" content="notranslate">', viewer)
+            self.assertIn(
+                '<td class="extracted-text notranslate" lang="ja" translate="no">'
+                "日本語\nSecond</td>",
+                viewer,
+            )
+
+    # Verifies FR-2026-10-24-02.
+    def test_help_states_that_explicit_vision_selection_sends_images_to_google(self) -> None:
+        output = StringIO()
+        with patch.object(sys, "argv", ["ocr_evaluations.py", "--help"]), redirect_stdout(output):
+            with self.assertRaises(SystemExit) as raised:
+                ocr_evaluation.parse_arguments()
+        self.assertEqual(0, raised.exception.code)
+        self.assertIn("sends input image content to Google", " ".join(output.getvalue().split()))
+
+    # Verifies FR-2026-10-24-02.
+    def test_cli_selects_vision_without_requiring_paddle_models(self) -> None:
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "ocr_evaluations.py",
+                    "--ocr",
+                    "google_cloud_vision",
+                    "--include",
+                    "en/*.png,ja/*.pptx",
+                    "--include",
+                    "en/extra.docx",
+                ],
+            ),
+            patch.object(ocr_evaluation, "require_runtime_assets") as require_assets,
+            patch.object(
+                ocr_evaluation,
+                "prepare_and_evaluate_ocr_inputs",
+                return_value=ocr_evaluation.EvaluationRunResult(),
+            ) as evaluate,
+        ):
+            self.assertEqual(0, ocr_evaluation.main())
+        require_assets.assert_called_once_with(
+            "en", "google_cloud_vision", "preserve-source-formatting"
+        )
+        evaluate.assert_called_once_with(
+            Path("outputs/evaluations/ocr/input"),
+            Path("outputs/evaluations/ocr/output"),
+            ocr_provider_name="google_cloud_vision",
+            include_patterns=("en/*.png", "ja/*.pptx", "en/extra.docx"),
+        )
+
     # Verifies FR-2026-08-04-02.
     def test_excludes_the_no_ocr_provider_from_automatic_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -96,18 +348,23 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             root = Path(temporary_directory)
             input_root = root / "input"
             output_root = root / "output"
-            calls: list[tuple[Path, Path]] = []
+            calls: list[tuple[Path, Path, tuple[str, ...]]] = []
             factory = OcrProviderFactory()
 
-            def prepare_inputs(source_root: Path, prepared_output_root: Path) -> None:
-                calls.append((source_root, prepared_output_root))
+            def prepare_inputs(
+                source_root: Path,
+                prepared_output_root: Path,
+                include_patterns: tuple[str, ...],
+            ) -> PreparationResult:
+                calls.append((source_root, prepared_output_root, include_patterns))
                 (prepared_output_root / "en").mkdir(parents=True)
+                return PreparationResult()
 
             result = ocr_evaluation.prepare_and_evaluate_ocr_inputs(
                 input_root, output_root, factory, prepare_inputs
             )
 
-            self.assertEqual([(Path("sample-data"), input_root)], calls)
+            self.assertEqual([(Path("sample-data"), input_root, ())], calls)
             self.assertEqual(0, result.successful_images)
 
     # Verifies FR-2026-08-02-03.

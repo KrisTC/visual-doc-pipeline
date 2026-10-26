@@ -290,7 +290,7 @@ class CliEntryPointTests(unittest.TestCase):
                     input_folder,
                     root / "output",
                     ("--ocr", "missing"),
-                    "Unknown OCR provider 'missing'. Available OCR providers: no_ocr, paddleocr.",
+                    "Unknown OCR provider 'missing'. Available OCR providers: google_cloud_vision, no_ocr, paddleocr.",
                 ),
                 (
                     input_folder,

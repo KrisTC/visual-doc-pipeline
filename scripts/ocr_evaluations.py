@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate local visual OCR evaluations for every registered provider."""
+"""Generate visual OCR evaluations for local or explicitly selected providers."""
 
 from __future__ import annotations
 
@@ -36,14 +36,16 @@ from pipeline.ocr import (
     OcrText,
     PixelPoint,
 )
+from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.languages import discover_language_directories
+from pipeline.folder_replacement.filters import parse_include_patterns
 from pipeline.provider_cache import source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
 from pipeline.text_region_colours import estimate_text_region_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, replace_text
-from scripts.prepare_ocr_evaluation_inputs import prepare_evaluation_inputs
+from scripts.prepare_ocr_evaluation_inputs import PreparationResult, prepare_evaluation_inputs
 from scripts.ocr_text_replacement_evaluations import _load_default_typeface
 
 
@@ -52,7 +54,8 @@ BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", "
 
 CHECKSUM_FILENAME = ".input.sha256"
 ARTIFACT_FORMAT_VERSION_FILENAME = ".artifact-format-version"
-ARTIFACT_FORMAT_VERSION = "3"
+ARTIFACT_FORMAT_VERSION = "4"
+VISION_ARTIFACT_FORMAT_VERSION = "4-vision-auto-language-v1"
 TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
@@ -63,7 +66,7 @@ TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
 TEXT_CLIP_CONTEXT_PIXELS = 20
 TEXT_REPLACEMENT_MINIMUM_CONFIDENCE = 0.65
-EXCLUDED_EVALUATION_PROVIDERS = frozenset({"no_ocr"})
+EXCLUDED_EVALUATION_PROVIDERS = frozenset({"no_ocr", "google_cloud_vision"})
 
 
 @dataclass
@@ -107,7 +110,10 @@ class EvaluationProgress(Protocol):
         """Advance the completed evaluation count."""
 
 
-def discover_evaluation_images(input_root: Path) -> list[EvaluationImage]:
+def discover_evaluation_images(
+    input_root: Path,
+    selected_image_paths: tuple[Path, ...] | None = None,
+) -> list[EvaluationImage]:
     """Discover supported input images below the established language directories."""
     if not input_root.is_dir():
         raise ValueError(f"Input root does not exist or is not a directory: {input_root}")
@@ -115,7 +121,15 @@ def discover_evaluation_images(input_root: Path) -> list[EvaluationImage]:
     images: list[EvaluationImage] = []
     for language_directory in discover_language_directories(input_root):
         language = language_directory.name
-        for image_path in sorted(language_directory.rglob("*")):
+        if selected_image_paths is None:
+            candidate_paths = sorted(language_directory.rglob("*"))
+        else:
+            candidate_paths = sorted(
+                input_root / relative_path
+                for relative_path in selected_image_paths
+                if (input_root / relative_path).is_relative_to(language_directory)
+            )
+        for image_path in candidate_paths:
             if image_path.is_file() and image_path.suffix.lower() in BITMAP_EXTENSIONS:
                 relative_path = image_path.relative_to(input_root)
                 relative_to_language = image_path.relative_to(language_directory)
@@ -163,20 +177,32 @@ def evaluate_ocr_inputs(
     input_root: Path,
     output_root: Path,
     factory: OcrProviderFactory | None = None,
+    *,
+    ocr_provider_name: str | None = None,
+    selected_image_paths: tuple[Path, ...] | None = None,
 ) -> EvaluationRunResult:
-    """Evaluate every eligible input image with every discovered OCR provider."""
-    images = discover_evaluation_images(input_root)
+    """Evaluate local providers by default or one explicitly selected provider."""
+    if selected_image_paths == ():
+        return EvaluationRunResult()
+    images = discover_evaluation_images(input_root, selected_image_paths)
     checksum = input_tree_checksum(images)
     provider_factory = factory or OcrProviderFactory.discover_default_plugins()
     text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
     result = EvaluationRunResult()
     providers_to_run: list[tuple[str, Path]] = []
 
-    provider_names = tuple(
-        name
-        for name in provider_factory.provider_names
-        if name not in EXCLUDED_EVALUATION_PROVIDERS
-    )
+    if ocr_provider_name is None:
+        provider_names = tuple(
+            name
+            for name in provider_factory.provider_names
+            if name not in EXCLUDED_EVALUATION_PROVIDERS
+        )
+    elif ocr_provider_name in provider_factory.provider_names:
+        provider_names = (ocr_provider_name,)
+    else:
+        raise OcrProviderNotFoundError(
+            f"No OCR provider is registered under {ocr_provider_name!r}."
+        )
     for provider_name in provider_names:
         provider_root = _provider_output_root(output_root, provider_name)
         if _provider_output_is_current(provider_root, checksum):
@@ -224,7 +250,7 @@ def evaluate_ocr_inputs(
         _write_viewer(provider_root, entries_by_provider[provider_name])
         (provider_root / CHECKSUM_FILENAME).write_text(f"{checksum}\n", encoding="ascii")
         (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
-            f"{ARTIFACT_FORMAT_VERSION}\n", encoding="ascii"
+            f"{_artifact_format_version(provider_name)}\n", encoding="ascii"
         )
 
     replacement_typeface: skia.Typeface | None = None
@@ -259,11 +285,21 @@ def prepare_and_evaluate_ocr_inputs(
     input_root: Path,
     output_root: Path,
     factory: OcrProviderFactory | None = None,
-    prepare_inputs: Callable[[Path, Path], object] = prepare_evaluation_inputs,
+    prepare_inputs: Callable[[Path, Path, tuple[str, ...]], PreparationResult] = prepare_evaluation_inputs,
+    *,
+    ocr_provider_name: str | None = None,
+    include_patterns: tuple[str, ...] = (),
 ) -> EvaluationRunResult:
     """Prepare the standard sample corpus, then evaluate the resulting input images."""
-    prepare_inputs(Path("sample-data"), input_root)
-    return evaluate_ocr_inputs(input_root, output_root, factory)
+    preparation = prepare_inputs(Path("sample-data"), input_root, include_patterns)
+    selected_image_paths = preparation.selected_image_paths if include_patterns else None
+    return evaluate_ocr_inputs(
+        input_root,
+        output_root,
+        factory,
+        ocr_provider_name=ocr_provider_name,
+        selected_image_paths=selected_image_paths,
+    )
 
 
 def _progress_label(value: str) -> str:
@@ -291,7 +327,15 @@ def _provider_output_is_current(provider_root: Path, checksum: str) -> bool:
         and (provider_root / ARTIFACT_FORMAT_VERSION_FILENAME).read_text(
             encoding="ascii"
         ).strip()
-        == ARTIFACT_FORMAT_VERSION
+        == _artifact_format_version(provider_root.name)
+    )
+
+
+def _artifact_format_version(provider_name: str) -> str:
+    return (
+        VISION_ARTIFACT_FORMAT_VERSION
+        if provider_name == "google_cloud_vision"
+        else ARTIFACT_FORMAT_VERSION
     )
 
 
@@ -653,9 +697,10 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
         _viewer_entry_html(provider_root, entry) for entry in entries
     )
     document = f"""<!doctype html>
-<html lang="en">
+<html lang="en" translate="no">
 <head>
   <meta charset="utf-8">
+  <meta name="google" content="notranslate">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>OCR evaluation</title>
   <style>
@@ -667,6 +712,7 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
     img {{ border: 1px solid #cbd5e1; height: auto; max-width: 100%; }} figcaption {{ font-size: .9rem; }}
     table {{ border-collapse: collapse; margin-top: 1rem; width: 100%; }} th, td {{ border: 1px solid #cbd5e1; padding: .5rem; text-align: left; vertical-align: top; }}
     th {{ background: #f1f5f9; }} td img {{ max-height: 120px; }}
+    .extracted-text {{ white-space: pre-wrap; }}
     .confidence {{ text-align: right; white-space: nowrap; width: 7ch; }}
   </style>
 </head>
@@ -871,7 +917,7 @@ def _text_region_row(
     escaped_clip_path = html.escape(clip_path, quote=True)
     return f"""<tr>
   <td><a href="{escaped_clip_path}" target="_blank" rel="noopener"><img alt="Detected text {index}" src="{escaped_clip_path}"></a></td>
-  <td>{html.escape(text)}</td>
+  <td class="extracted-text notranslate" lang="{html.escape(image.language, quote=True)}" translate="no">{html.escape(text)}</td>
   <td class="confidence">{confidence:.2%}</td>
 </tr>"""
 
@@ -883,22 +929,51 @@ def _relative_url(path: Path, from_directory: Path) -> str:
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--ocr",
+        metavar="PROVIDER",
+        help=(
+            "Evaluate only this OCR provider. Selecting google_cloud_vision "
+            "sends input image content to Google."
+        ),
+    )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help="Include matching source paths relative to sample-data; may repeat or use commas.",
+    )
+    parser.add_argument(
         "--input-root", type=Path, default=Path("outputs/evaluations/ocr/input")
     )
     parser.add_argument(
         "--output-root", type=Path, default=Path("outputs/evaluations/ocr/output")
     )
-    return parser.parse_args()
+    arguments = parser.parse_args()
+    try:
+        arguments.include_patterns = parse_include_patterns(arguments.include)
+    except ValueError as error:
+        parser.error(str(error))
+    return arguments
 
 
 def main() -> int:
     arguments = parse_arguments()
     try:
-        require_runtime_assets("en", "paddleocr", "preserve-source-formatting")
+        require_runtime_assets("en", arguments.ocr or "paddleocr", "preserve-source-formatting")
     except RuntimeAssetsRequiredError as error:
         print(str(error), file=sys.stderr)
         return 2
-    result = prepare_and_evaluate_ocr_inputs(arguments.input_root, arguments.output_root)
+    try:
+        result = prepare_and_evaluate_ocr_inputs(
+            arguments.input_root,
+            arguments.output_root,
+            ocr_provider_name=arguments.ocr,
+            include_patterns=arguments.include_patterns,
+        )
+    except OcrProviderNotFoundError as error:
+        print(str(error), file=sys.stderr)
+        return 2
     print(
         "OCR evaluation complete: "
         f"{result.successful_images} successful image(s), "

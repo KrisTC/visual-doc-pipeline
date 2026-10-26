@@ -28,6 +28,56 @@ SPECIFICATION.loader.exec_module(ocr_preparation)
 
 
 class PrepareOcrEvaluationInputsTests(unittest.TestCase):
+    # Verifies FR-2026-10-24-03.
+    def test_filter_prepares_only_selected_sources_and_retains_other_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "sample-data"
+            output_root = root / "prepared"
+            language_root = source_root / "en"
+            language_root.mkdir(parents=True)
+            selected_bitmap = language_root / "selected.png"
+            other_bitmap = language_root / "other.png"
+            Image.new("RGB", (8, 8), "red").save(selected_bitmap)
+            Image.new("RGB", (8, 8), "blue").save(other_bitmap)
+            self._create_docx(language_root / "selected.docx", selected_bitmap)
+            self._create_docx(language_root / "other.docx", other_bitmap)
+            ocr_preparation.prepare_evaluation_inputs(source_root, output_root)
+            other_output = output_root / "en" / "other.docx" / "image-0001.png"
+            original_other_bytes = other_output.read_bytes()
+            shutil.rmtree(output_root / "en" / "selected.docx")
+
+            result = ocr_preparation.prepare_evaluation_inputs(
+                source_root,
+                output_root,
+                ("en/selected.png", "en/selected.docx"),
+            )
+
+            self.assertEqual(1, result.copied_bitmaps)
+            self.assertEqual(1, result.processed_documents)
+            self.assertEqual(1, result.extracted_images)
+            self.assertEqual(0, result.removed_directories)
+            self.assertEqual(
+                (Path("en/selected.docx/image-0001.png"), Path("en/selected.png")),
+                result.selected_image_paths,
+            )
+            self.assertEqual(original_other_bytes, other_output.read_bytes())
+
+            repeated = ocr_preparation.prepare_evaluation_inputs(
+                source_root, output_root, ("en/selected.docx",)
+            )
+            self.assertEqual(1, repeated.skipped_documents)
+            self.assertEqual(
+                (Path("en/selected.docx/image-0001.png"),),
+                repeated.selected_image_paths,
+            )
+
+            no_match = ocr_preparation.prepare_evaluation_inputs(
+                source_root, output_root, ("en/missing*",)
+            )
+            self.assertEqual((), no_match.selected_image_paths)
+            self.assertEqual(original_other_bytes, other_output.read_bytes())
+
     # Verifies FR-2026-08-01-01.
     def test_copies_and_extracts_raster_images_then_skips_unchanged_documents(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

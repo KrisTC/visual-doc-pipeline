@@ -137,7 +137,7 @@ For Google Cloud Translation, the fixed credential mount sets
 overrides; for example, an operator can select another supported European
 location with `--env GOOGLE_CLOUD_TRANSLATION_LOCATION=europe-west3`. The
 batching, deadline and quota variables described in
-[Google Cloud Translation setup](google-cloud-translation-setup.md) can be
+[Google Cloud setup](google-cloud-setup.md) can be
 passed the same way.
 Credentials are never copied into image layers, output, or the runtime cache.
 

@@ -44,20 +44,20 @@ Consumers must handle absent `extra` keys. Do not use `extra` to change the mean
 
 ## Provider plugin shape
 
-Each module in `pipeline/ocr_plugins/` provides a `register_providers(factory)` function. Register a constructor rather than an instance so the factory creates a fresh provider when requested.
+Each package directory in `pipeline/ocr_plugins/` provides a `create_provider()` function and a `SHORT_NAME`. The directory name is the selectable provider name. The factory calls the function to create a fresh provider when requested.
 
 Providers must also declare `supported_languages` as a `frozenset` of BCP 47 language tags, `supports_local_contract_test` as a boolean, `skipped_local_contract_angles` as a `frozenset` of integer rotations, and `skipped_local_contract_cases` as a `frozenset` of `LocalContractTestSkip` values. The generic synthetic contract test runs every supported English and Japanese case for providers marked `True`. A skipped angle or case is still reported as an individual skipped case; use it only for an explicit, temporary capability limitation. Set `supports_local_contract_test` to `False` for remote or credential-dependent providers; they are excluded from the default local suite.
 
 The contract test renders its phrases with the repository-owned Noto test-font pack in `tests/assets/fonts/`; it never depends on an operating-system font or downloads fonts during a test run. It runs each case across its defined slide-style foreground and background colour combinations.
 
 ```python
-from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest, OcrResult
 from pipeline.ocr.provider import LocalContractTestCase, LocalContractTestSkip
 
+SHORT_NAME = "example"
+
 
 class ExampleProvider:
-    name = "example"
     supported_languages = frozenset({"en"})
     supports_local_contract_test = True
     skipped_local_contract_angles = frozenset[int]()
@@ -75,11 +75,13 @@ class ExampleProvider:
         return OcrResult(())
 
 
-def register_providers(factory: OcrProviderFactory) -> None:
-    factory.register(ExampleProvider.name, ExampleProvider)
+def create_provider() -> ExampleProvider:
+    return ExampleProvider()
 ```
 
 Provider names must be unique. The factory rejects duplicate names and raises `OcrProviderNotFoundError` when a requested provider is unavailable.
+
+The built-in `google_cloud_vision` provider uses the same Google credentials as Cloud Translation. It is excluded from automatic local evaluation; see the [Google Cloud setup guide](google-cloud-setup.md) for explicit evaluation.
 
 ## Optional result-cache identity
 

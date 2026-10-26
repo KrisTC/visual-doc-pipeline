@@ -217,7 +217,7 @@ Cloud translation requires an external trust boundary and credentials. Restricti
 
 ### Notes
 
-The project shall provide a concise Google Cloud Translation setup guide. It shall direct a developer to obtain a service-account credential JSON file, store the file in an approved local folder outside the repository, and run `uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file ../credentials/credential.json` to validate the file and configure the provider. The helper shall derive the default project ID from the credential file's `project_id` value. It shall direct the administrator to enable billing and the Cloud Translation API and assign the service account **Cloud Translation API User** (`roles/cloudtranslate.user`) through the project role picker. It shall link to Google's [Cloud Translation setup guide](https://docs.cloud.google.com/translate/docs/setup), [Cloud Translation authentication guide](https://docs.cloud.google.com/translate/docs/authentication), [Cloud Translation access-control guide](https://docs.cloud.google.com/translate/docs/access-control), [Application Default Credentials guide](https://docs.cloud.google.com/docs/authentication/provide-credentials-adc), [Cloud Translation API page](https://console.cloud.google.com/apis/library/translate.googleapis.com), and [Google Cloud billing page](https://console.cloud.google.com/billing). The guide shall not contain a project-specific URL, API key, credential file, access token, or service-account private-key value.
+The project shall provide a unified Google Cloud setup guide with shared credential and configuration instructions and a separate Translation section. It shall direct a developer to obtain a service-account credential JSON file, store the file in an approved local folder outside the repository, and run `uv run --no-sync python scripts/configure_google_cloud_translation.py --credential-file ../credentials/credential.json` to validate the file and configure the provider. The helper shall derive the default project ID from the credential file's `project_id` value. It shall direct the administrator to enable billing and the Cloud Translation API and assign the service account **Cloud Translation API User** (`roles/cloudtranslate.user`) through the project role picker. It shall link to Google's [Cloud Translation setup guide](https://docs.cloud.google.com/translate/docs/setup), [Cloud Translation authentication guide](https://docs.cloud.google.com/translate/docs/authentication), [Cloud Translation access-control guide](https://docs.cloud.google.com/translate/docs/access-control), [Application Default Credentials guide](https://docs.cloud.google.com/docs/authentication/provide-credentials-adc), [Cloud Translation API page](https://console.cloud.google.com/apis/library/translate.googleapis.com), and [Google Cloud billing page](https://console.cloud.google.com/billing). The guide shall not contain a project-specific URL, API key, credential file, access token, or service-account private-key value.
 
 `.env.local` may set `GOOGLE_CLOUD_TRANSLATION_LOCATION` to a supported continental-European location. When it is absent, the provider uses `europe-west1` and Google's EU multi-regional endpoint. The EU endpoint keeps at-rest data and machine-learning processing within continental Europe; it does not remove the developer's responsibility to confirm that their organization approves the configured project, identity, location, and applicable Google Cloud service terms. The endpoint configuration shall follow Google's [Global and multi-regional endpoints documentation](https://docs.cloud.google.com/translate/docs/advanced/endpoints).
 
@@ -424,5 +424,42 @@ Batching changes how many texts travel in one request, not which data may leave 
 ### Verification
 
 Synthetic tests with a mocked Google client shall verify that a batched request carries only text and the permitted parameters, that `batchTranslateText` and `translateDocument` are never called, and that logs, diagnostics, and metrics for batches and quota waits contain no text, keys, or credentials.
+
+---
+
+## SR-2026-10-24-01
+
+| Property | Value |
+|----------|-------|
+| Title | Google Cloud Vision credentials and remote-image boundary |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-10-24-01, FR-2026-10-24-02, SR-2026-08-24-01 |
+
+### Description
+
+The Google Cloud Vision OCR provider shall use the same Google credentials and project configuration as the Google Cloud Translation provider under SR-2026-08-24-01: `GOOGLE_APPLICATION_CREDENTIALS` shall reference the local service-account credential JSON, and `GOOGLE_CLOUD_PROJECT` may override the project ID otherwise derived from that credential file. It shall use `GOOGLE_CLOUD_TRANSLATION_LOCATION` as its location setting. When unset or empty, the effective Vision location shall be the EU multi-region (`eu`), matching the translation provider's default European location. A configured location accepted by the Translation provider's continental-European rule shall select the Vision EU endpoint; any other location shall fail before a network request. This feature shall add no separate Vision credential, project, or location environment variable.
+
+The provider shall authenticate with Google Application Default Credentials from the configured service-account file. It shall not read or support `GOOGLE_API_KEY`. It shall not create credentials, service accounts, projects, IAM bindings, Cloud Storage buckets, or other Google Cloud resources. The configured project shall have the Vision API enabled and billing configured as required by Google. The unified Google Cloud setup guide shall give a separate Vision section with explicit steps to enable the Vision API and grant the runtime service account Service Usage Consumer (`roles/serviceusage.serviceUsageConsumer`) on the configured project for quota and billing consumption, distinguishing that role from the existing Cloud Translation API User role. It shall link to Google's setup and authentication guides and shall not recommend broad project roles or a Cloud Storage role for inline-image annotation.
+
+The provider may transmit a user-authorized source image to the Cloud Vision EU endpoint only when the user selects `google_cloud_vision` for pipeline processing or explicitly selects it with `scripts/ocr_evaluations.py --ocr google_cloud_vision`. It shall not transmit a language hint, file paths, filenames, document metadata, replacement text, OCR confidence, evaluation artifacts, or credentials. It shall use only synchronous online image annotation, which does not require Cloud Storage. It shall not persist the submitted image or raw API response beyond the pipeline's normal in-memory request and response handling.
+
+Google documents that synchronous Vision image data is processed in memory and not persisted to disk, that content is used only to provide the Vision API service and is not used to train or improve its features, and that content is not made public or shared with third parties. Google also documents temporary logging of request metadata such as request time and size. Vision API complies with the Cloud Data Processing Addendum. The provider's EU endpoint shall be used so Google documents that OCR resources are stored and processed only in the European Union. These protections permit user-requested processing of confidential samples subject to the user's organization and applicable data-handling obligations. The documentation shall not describe Google Cloud Vision as unconditionally safe for every confidential document.
+
+The provider shall be excluded from automatic all-provider OCR evaluation and the default OCR contract-test suite. Only the explicit evaluator selection in FR-2026-10-24-02 may send evaluation images to Google. Provider errors, logs, and diagnostics shall not disclose source image content, extracted text, credential values or paths, authorization headers, API response bodies, or project identifiers.
+
+### Rationale
+
+Cloud OCR introduces an external image-processing boundary. Reusing the established Google credential configuration and requiring the EU endpoint makes the data flow and regional processing choice explicit while limiting what the provider sends and records.
+
+### Verification
+
+Automated tests shall use synthetic configuration and a mocked Google client. They shall verify credential and project selection, the unset and configured European location mapping to the EU endpoint, rejection of unsupported locations before network access, use of synchronous image annotation only, the request data boundary, evaluation exclusion, and diagnostics free of image, text, credential, path, API-response, and project-ID values. Tests shall not make network calls or require Google credentials.
+
+### Notes
+
+The relevant Google documentation is the [Cloud Vision API Data Usage FAQ](https://docs.cloud.google.com/vision/docs/data-usage), [Cloud Vision OCR and regional endpoint documentation](https://docs.cloud.google.com/vision/docs/ocr), and [Cloud Vision authentication guide](https://docs.cloud.google.com/vision/docs/authentication). The location setting is shared with Translation, but Vision's API location identifier is the EU multi-region `eu`; Translation's regional location value is mapped to that EU endpoint.
 
 ---

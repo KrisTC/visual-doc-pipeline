@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from pypdf import PdfReader
+from pipeline.folder_replacement.filters import matches_include_patterns
 from pipeline.ocr.languages import discover_language_directories
 
 
@@ -43,6 +44,7 @@ class PreparationResult:
     processed_documents: int = 0
     removed_directories: int = 0
     skipped_documents: int = 0
+    selected_image_paths: tuple[Path, ...] = ()
 
 
 class PngSavable(Protocol):
@@ -233,12 +235,17 @@ def _is_expected_or_ancestor(path: Path, expected_directories: set[Path]) -> boo
     )
 
 
-def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> PreparationResult:
+def prepare_evaluation_inputs(
+    source_root: Path,
+    output_root: Path,
+    include_patterns: tuple[str, ...] = (),
+) -> PreparationResult:
     """Copy raster samples and extract embedded raster images from supported documents."""
     if not source_root.is_dir():
         raise ValueError(f"Source root does not exist or is not a directory: {source_root}")
 
     result = PreparationResult()
+    selected_image_paths: list[Path] = []
     language_directories = discover_language_directories(source_root)
     for language_directory in language_directories:
         for source in sorted(
@@ -246,12 +253,16 @@ def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> Preparati
         ):
             relative_source_path = source.relative_to(source_root)
             extension = source.suffix.lower()
+            if not matches_include_patterns(relative_source_path, include_patterns):
+                continue
 
             if extension in BITMAP_EXTENSIONS:
                 destination = output_root / relative_source_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
                 result.copied_bitmaps += 1
+                if include_patterns:
+                    selected_image_paths.append(relative_source_path)
                 continue
 
             if extension not in OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}:
@@ -261,6 +272,12 @@ def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> Preparati
             source_checksum = sha256_file(source)
             if is_unchanged(output_directory, source_checksum):
                 result.skipped_documents += 1
+                if include_patterns:
+                    selected_image_paths.extend(
+                        path.relative_to(output_root)
+                        for path in sorted(output_directory.iterdir())
+                        if path.is_file() and path.suffix.lower() in BITMAP_EXTENSIONS
+                    )
                 continue
 
             if output_directory.exists():
@@ -275,15 +292,19 @@ def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> Preparati
             for index, image in enumerate(extracted_images, start=1):
                 destination = output_directory / f"image-{index:04d}{image.extension}"
                 destination.write_bytes(image.data)
+                if include_patterns:
+                    selected_image_paths.append(destination.relative_to(output_root))
             (output_directory / ".source.sha256").write_text(
                 f"{source_checksum}\n", encoding="ascii"
             )
             result.extracted_images += len(extracted_images)
             result.processed_documents += 1
 
-    result.removed_directories = remove_stale_output_directories(
-        source_root, output_root, language_directories
-    )
+    if not include_patterns:
+        result.removed_directories = remove_stale_output_directories(
+            source_root, output_root, language_directories
+        )
+    result.selected_image_paths = tuple(selected_image_paths)
 
     return result
 

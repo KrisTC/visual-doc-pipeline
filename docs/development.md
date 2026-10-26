@@ -20,7 +20,7 @@ Run the main command locally with explicit input and output folders:
 ```
 
 The default text-replacement provider is Google Cloud Translation. Configure
-credentials first with the [Google Cloud Translation setup guide](google-cloud-translation-setup.md).
+credentials first with the [Google Cloud setup guide](google-cloud-setup.md).
 For local translation, select Argos explicitly:
 
 ```sh
@@ -107,6 +107,14 @@ Generate OCR and text-replacement viewers:
 ```sh
 ./run.sh scripts/ocr_evaluations.py
 ```
+
+For a manual Cloud Vision OCR evaluation, follow the [Google Cloud setup guide](google-cloud-setup.md), then select it explicitly:
+
+```sh
+./run.sh scripts/ocr_evaluations.py --ocr google_cloud_vision
+```
+
+This sends the prepared evaluation images, including confidential samples, to Google. Add `--include 'ja/example.pptx'` to process only a matching source document and its embedded images; the path is relative to `sample-data/`.
 
 Generate colour-estimation pages:
 

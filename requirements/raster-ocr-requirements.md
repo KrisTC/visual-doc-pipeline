@@ -138,7 +138,7 @@ Automated tests shall mock Paddle runtime availability and engine behavior to ve
 
 ### Description
 
-The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
+The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin eligible for automatic local evaluation when no path filter is supplied. Explicit provider selection and exclusions are governed by FR-2026-08-04-02 and FR-2026-10-24-02; path filtering is governed by FR-2026-10-24-03. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
 
 The command shall use the existing OCR-provider factory and OCR task request and response abstractions in `pipeline/ocr/`. It shall not implement, discover, or invoke provider-specific OCR logic independently.
 
@@ -152,7 +152,7 @@ Persisting visual artifacts alongside normalized provider output makes it practi
 
 ### Notes
 
-Evaluation outputs are local generated artifacts and remain ignored by Git. The command may process confidential inputs locally, but it shall not send their contents, paths, metadata, or extracted text to external services or commit them to repository artifacts.
+Evaluation outputs are local generated artifacts and remain ignored by Git. The command may process confidential inputs locally, but it shall not send their contents, paths, metadata, or extracted text to external services or commit them to repository artifacts, except for explicitly selected Google Cloud Vision image processing under SR-2026-10-24-01 and FR-2026-10-24-02.
 
 The static viewer may load jQuery from a CDN. The precise success-status JSON shape and generated-file naming shall be defined by the implementation.
 
@@ -205,7 +205,7 @@ checksum-skipped provider.
 
 ### Description
 
-The static OCR-evaluation viewer shall not render JSON result content inline. For each successful image evaluation, it shall show the detected text-region clips in a table with an image column and an extracted-text column. Each detected region shall occupy one row.
+The static OCR-evaluation viewer shall not render JSON result content inline. For each successful image evaluation, it shall show the detected text-region clips in a table with an image column and an extracted-text column. Each detected region shall occupy one row. It shall present the provider's original recognized text without browser or page translation. The viewer shall mark the page and extracted-text cells as not translatable and shall identify each cell's source language.
 
 ### Rationale
 
@@ -214,6 +214,8 @@ The table gives a compact, legible visual comparison of every detected region an
 ### Notes
 
 The viewer shall retain the input and black-masked comparison images above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
+
+Automated tests shall use synthetic multilingual OCR text and verify that the generated HTML preserves the source text and includes translation-prevention markup.
 
 ---
 
@@ -740,5 +742,113 @@ when a device is requested. The GPU image therefore does not claim CPU fallback;
 the CPU image supplies it using the normal CPU Paddle wheel.
 
 Automated tests shall mock Paddle's CUDA capability boundary and verify image configuration metadata and the validation command's success and failure reporting. A manually run validation on a compatible NVIDIA Linux host shall verify the actual GPU path before a release is published.
+
+---
+
+## FR-2026-10-24-01
+
+| Property | Value |
+|----------|-------|
+| Title | Add Google Cloud Vision OCR provider |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-10-24-03, SR-2026-10-24-01, TR-2026-08-01-01 |
+
+### Description
+
+The default OCR-provider factory shall discover a `google_cloud_vision` provider. The provider shall implement the existing OCR request and response contract and shall be selectable by name without changing the default `paddleocr` provider.
+
+For each supported bitmap-image request, the provider shall use Cloud Vision's synchronous `images:annotate` operation with the `DOCUMENT_TEXT_DETECTION` feature. It shall omit `languageHints` so Vision automatically detects languages, including images that mix Japanese and Latin text. The request's BCP 47 language tag shall still be used for supported-language validation and downstream result context. It shall not use asynchronous annotation or Cloud Storage input or output.
+
+The provider shall encode the input image in a format supported by Cloud Vision, preserve its dimensions and visible pixels under the existing OCR transparency-compositing policy, and check the applicable synchronous API image, pixel-dimension, and request-size limits before transmission. It shall raise `OcrProviderError` when the image cannot be sent within those limits. It shall not resize the image or move it to Cloud Storage to bypass a limit.
+
+The provider shall normalize the API's structured OCR response into the existing text-item contract. FR-2026-10-24-03 defines the intended grouping for translation and replacement. Bounding polygons shall use source-image pixel coordinates and preserve the API's vertex order when reporting an API-supplied polygon. Confidence shall remain normalized to the 0.0-to-1.0 range required by FR-2026-08-01-02. Provider-specific response details may be included in the optional extra-data field when useful to preserve document structure.
+
+The provider shall declare the BCP 47 languages it supports and shall declare itself ineligible for the default local OCR-provider contract test. The provider shall raise `OcrProviderError` for invalid configuration, authentication or authorization failures, API failures, and malformed response structures. A valid response with no detected text shall return an empty OCR result.
+
+### Rationale
+
+Cloud Vision provides dense document OCR through a selectable managed provider while retaining the pipeline's normalized OCR result model and PaddleOCR default.
+Google Vision OCR provider may be more useful when a GPU is not available as the CPU version of PaddleOCR can be very slow.
+
+### Verification
+
+Automated tests shall use synthetic images and a mocked Google client. They shall verify request construction, language-hint omission, normalized response text and order, confidence, source-image polygon conversion, local rejection of an over-limit image, provider failures, and that no network request or credential is required by the default test suite.
+
+---
+
+## FR-2026-10-24-02
+
+| Property | Value |
+|----------|-------|
+| Title | Manually evaluate Google Cloud Vision OCR |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-10-24-01, SR-2026-10-24-01 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall exclude `google_cloud_vision` from its automatic all-provider run. It shall accept `--ocr PROVIDER` to evaluate only the named registered OCR provider, including `google_cloud_vision` when explicitly selected. The command shall continue to prepare the normal evaluation input corpus and write results through its existing provider-specific artifacts and viewer.
+
+An explicit `--ocr google_cloud_vision` run shall process every eligible image selected for the run, including confidential samples when selected, through the Cloud Vision provider under SR-2026-10-24-01. The command help and developer documentation shall state that this selection sends image content to Google. The evaluator shall send no source paths, filenames, metadata, evaluation artifacts, or extracted text to Cloud Vision.
+
+The automatic run shall not instantiate `google_cloud_vision` or make a Vision API call. The explicit run shall not evaluate other OCR providers. It shall continue using only locally eligible text-replacement providers for the post-OCR artifact stage.
+
+### Rationale
+
+An opt-in evaluator run lets the developer compare Cloud Vision OCR against the local visual corpus while preventing a default evaluation from transmitting images.
+
+### Notes
+
+The OCR-result JSON and primary OCR viewer use the provider's recognized text. The separate text-replacement viewer continues to translate to English under FR-2026-08-02-13.
+
+### Verification
+
+Automated tests shall use synthetic images and a fake OCR provider. They shall verify default exclusion, explicit selection, no unrelated provider calls, provider-root artifacts, and that the command help identifies the remote-image boundary. Tests shall not contact Google or read confidential samples.
+
+---
+
+## FR-2026-10-24-03
+
+| Property | Value |
+|----------|-------|
+| Title | Targeted OCR evaluation and Vision text grouping |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-01, FR-2026-08-01-02, FR-2026-08-01-03, FR-2026-08-02-05, FR-2026-10-24-01, FR-2026-10-24-02 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall accept an optional repeatable `--include PATTERN` option using the same comma-separated glob syntax as the folder-replacement command. Patterns shall match supported source-file paths relative to `sample-data/`. A selected document shall select all bitmap images extracted from that document; a selected standalone bitmap shall select that image. With no include pattern, existing all-source behavior shall remain.
+
+For a filtered run, input preparation shall copy or extract only selected source files, and OCR evaluation shall process only images originating from those files, even when prepared images from earlier runs remain under the input root. The filter shall be applied before OCR requests, checksums, and progress totals are calculated. Filtered preparation shall not delete previously prepared files solely because they are outside the current selection. A filter matching no supported source files shall complete successfully without invoking an OCR provider or replacing an existing provider output root.
+
+Provider-specific viewers and generated results from a filtered run shall describe only the selected images. Existing provider-root checksum behavior shall account for the selected image set so that a different selection cannot be mistaken for a current evaluation.
+
+The `google_cloud_vision` provider shall supply one text region per visual line to every caller, including folder replacement and OCR evaluation. It shall combine words and punctuation belonging to one visual line while keeping distinct lines, bullets, and indented entries separate. Text on the same baseline with a gap larger than ordinary word spacing shall form separate regions, including neighboring table cells. Adjacent substantive text at a clearly different visual character size shall also form a separate region; a small bullet or punctuation mark shall not by itself trigger this split. A region's text, confidence, and source-image polygon shall correspond to the same grouped content. Detected spaces shall be retained within a line; detected line breaks shall terminate a region. Grouping shall also use OCR word geometry when break markers alone do not separate visually distinct lines. This grouping shall be derived locally from the existing `DOCUMENT_TEXT_DETECTION` response without another external service. It shall not split a visual line into sentences or join text across visual lines.
+
+The evaluation JSON and viewer shall make detected line breaks visible so the reviewer can distinguish missing OCR breaks from display-only whitespace collapse. When the Vision grouping changes, the evaluator shall regenerate its existing Vision artifacts even when image inputs are unchanged.
+
+### Rationale
+
+The evaluation corpus is large, and an explicit source-path selection lets the developer assess a document or small group without running OCR on unrelated images. Matching source paths lets preparation skip unrelated document extraction as well as provider calls. Word regions are too small for useful translation, while Vision paragraph regions can combine text from visually separate lines and lose bullet or indentation structure. Text with a distinct visual size on the same line may be a separate label and needs its own replacement bounds.
+
+### Notes
+
+The filter selects source files. It cannot target one extracted image within a selected document. A separate `--output-root` can retain results from different selections.
+
+A sentence wrapped across two visual lines is returned as two regions so that each region keeps the geometry of its source line. Sentence-aware grouping may be considered separately after manual review.
+
+### Verification
+
+Automated tests shall use synthetic source trees and fake providers. They shall cover single, repeated, and comma-separated patterns; standalone images and documents; previously prepared excluded images; zero matches; unchanged no-filter behavior; selected-set progress and cache checks; and no provider call for an excluded image.
+
+Synthetic Vision responses shall be used to evaluate line breaks, wrapped text, punctuation, Japanese text, bullets, indentation, multi-column layouts, adjacent table cells with a wider gap than words within a cell, distinct and mildly varying character sizes, confidence, polygon geometry, and reading order. Tests shall verify that line grouping is the same through folder processing and OCR evaluation, that the viewer exposes detected breaks, and that older Vision artifacts are invalidated. Tests shall not contact Google or use confidential samples.
 
 ---
