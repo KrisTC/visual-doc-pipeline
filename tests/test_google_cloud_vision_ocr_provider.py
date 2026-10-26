@@ -299,7 +299,10 @@ class GoogleCloudVisionOcrProviderTests(unittest.TestCase):
         with (
             patch.dict(os.environ, self._environment(GOOGLE_CLOUD_PROJECT="override-project"), clear=True),
             patch.object(google_cloud_vision, "import_module", return_value=module),
-            patch("pipeline.folder_replacement.bitmap.estimate_text_region_colours"),
+            patch(
+                "pipeline.folder_replacement.bitmap.estimate_replacement_colours",
+                side_effect=lambda _image, regions, *_: [Mock() for _ in regions],
+            ),
         ):
             provider = google_cloud_vision.GoogleCloudVisionProvider()
             first = provider.recognize(OcrRequest(image, "en"))

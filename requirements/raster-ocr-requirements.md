@@ -374,6 +374,8 @@ The background classification shall be based on non-text local pixels: low varia
 
 The API documentation may be provided by public model/function docstrings and a repository documentation page. It shall be kept accurate when the public model changes.
 
+The estimator reports the observed colours of whatever image it receives. Raster text replacement applies a page colour to a transparent image before calling it, as FR-2026-10-26-01 specifies.
+
 The local command shall use the existing OCR JSON shape, `bounding_polygon` source-image coordinates, and clip-local `padded_image_path` values. It shall not run OCR, call external services, modify input files, or process files from `sample-data/confidential/`. A missing paired source image, text-region bitmap, invalid JSON, or failed JSON status shall be reported and skipped while other eligible inputs continue. The HTML generator shall escape recognized text and all generated attribute values. It shall reject an absolute or escaping `padded_image_path` rather than link outside the input tree.
 
 The automated test suite shall use repository-owned synthetic images with known colours and shall verify estimates with declared perceptual colour-distance tolerances. It shall cover flat backgrounds, light and dark text, antialiasing, rotated OCR polygons, gradients, patterned backgrounds, transparency, dark text on a high-variation local background, thin dark text beside a lower-contrast fill-like component, text on a strong label panel, and text with an outline or shadow. Tests for the HTML generator shall create synthetic images and OCR-result JSON in a temporary directory; they shall not use `sample-data/` or other real sample files. The user-supplied colour-detection examples may be used for local manual evaluation, but synthetic cases shall provide the automated oracle.
@@ -423,7 +425,7 @@ For a region whose direction differs from a horizontal or vertical axis by no mo
 
 When determining a region's text direction from an OCR polygon edge, the renderer shall normalize equivalent baseline directions modulo 180 degrees before fitting or upright-angle snapping. Reversing the polygon's baseline edge shall not render text upside down.
 
-The colour estimator shall continue to report observed source colours unchanged. To improve the perceived sharpness of light replacement text on dark surfaces, the renderer shall apply a bounded rendering-only lightness adjustment when the text colour's relative luminance exceeds that of an opaque background whose relative luminance is at most `0.35` by at least `0.15`. The adjustment shall preserve the estimated text colour's hue and alpha and move its HSL lightness 65% of the remaining distance toward white. It shall not make any assumed compositing-background choice for an alpha-zero background, and shall not apply to other foreground/background relationships.
+The colour estimator shall continue to report observed source colours unchanged. To improve the perceived sharpness of light replacement text on dark surfaces, the renderer shall apply a bounded rendering-only lightness adjustment when the text colour's relative luminance exceeds that of an opaque background whose relative luminance is at most `0.35` by at least `0.15`. The adjustment shall preserve the estimated text colour's hue and alpha and move its HSL lightness 65% of the remaining distance toward white. For a fully transparent background, the relationship shall be judged against the assumed page colour of FR-2026-10-26-01 instead of being skipped. The adjustment otherwise applies by the existing rules and shall not apply to other foreground/background relationships.
 
 Automated tests shall use synthetic images and fonts only; they shall not use sample data. Tests shall cover in-place modification, background removal, rendered text colour, fitting of both shorter and longer replacement strings, wrapping, rotation, and output bounds. The local command and HTML output shall be verified with temporary synthetic inputs; the supplied examples are for manual visual evaluation only.
 
@@ -569,7 +571,9 @@ Palette images can express alpha as per-palette transparency bytes. Direct conve
 
 ### Notes
 
-The scope is limited to preparing raster pixels for OCR. It does not require general document rendering or composition of arbitrary visual layers. It does not change source-image alpha handling during colour estimation or replacement rendering. Automated tests shall use synthetic transparent raster images and synthetic page or slide backgrounds only, and shall verify that the original image is retained for replacement output.
+The scope is limited to preparing raster pixels for OCR. It does not require general document rendering or composition of arbitrary visual layers. Automated tests shall use synthetic transparent raster images and synthetic page or slide backgrounds only, and shall verify that the original image is retained for replacement output.
+
+FR-2026-10-26-01 extends this page colour to every format handler and also applies it to colour estimation; the original image remains the source for replacement output.
 
 ---
 
@@ -850,5 +854,57 @@ A sentence wrapped across two visual lines is returned as two regions so that ea
 Automated tests shall use synthetic source trees and fake providers. They shall cover single, repeated, and comma-separated patterns; standalone images and documents; previously prepared excluded images; zero matches; unchanged no-filter behavior; selected-set progress and cache checks; and no provider call for an excluded image.
 
 Synthetic Vision responses shall be used to evaluate line breaks, wrapped text, punctuation, Japanese text, bullets, indentation, multi-column layouts, adjacent table cells with a wider gap than words within a cell, distinct and mildly varying character sizes, confidence, polygon geometry, and reading order. Tests shall verify that line grouping is the same through folder processing and OCR evaluation, that the viewer exposes detected breaks, and that older Vision artifacts are invalidated. Tests shall not contact Google or use confidential samples.
+
+---
+
+## FR-2026-10-26-01
+
+| Property | Value |
+|----------|-------|
+| Title | Estimate and render raster replacement text against an assumed page colour |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported DOCX embedded-image defect |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-02-09, FR-2026-08-02-10, FR-2026-08-02-13, FR-2026-08-27-01, FR-2026-09-04-02 |
+
+### Description
+
+Every raster text-replacement operation shall receive an assumed page colour: an opaque sRGB value that stands for whatever shows through the image's transparent pixels. The DOCX and PPTX handlers shall supply the colour that FR-2026-08-27-01 selects. Standalone bitmap, XLSX, and PDF handlers shall supply opaque white, including for PDF vector-content OCR rasters, until a separate requirement defines direct page-colour determination for that format. A handler that cannot determine a colour shall supply opaque white. The same page colour shall be used for OCR flattening under FR-2026-08-27-01 and for the colour estimation in this requirement.
+
+When the source image has any pixel with alpha below 255, colour estimation shall analyse a temporary copy alpha-composited onto the page colour. Hidden RGB values of fully transparent pixels and partially transparent antialiasing pixels shall therefore contribute only the colour they would visibly produce. The source image shall be retained, unmodified, for background wipes, glyph rendering, and output encoding, and FR-2026-09-04-02 shall continue to apply to it. The text-region colour estimator's public contract is unchanged: it reports the observed colours of the image it is given, and the caller is responsible for supplying the composited copy.
+
+The replacement text colour shall always have alpha 255. A region whose immediate background in the source image is fully transparent shall retain a fully transparent wipe colour, so a transparent cell stays transparent in the output and shows the document background. A background that is not fully transparent shall continue to be wiped with its observed stored colour.
+
+When the estimated text-colour confidence is below 0.60 and the region's background shows the page colour (a fully transparent source background, or an opaque background equal to the page colour), the replacement text colour shall be the higher-contrast of opaque black and opaque white against the page colour, using WCAG relative luminance. This fallback shall be selected before the rendering-only lightness adjustment in FR-2026-08-02-10, which shall then apply by its existing rules. Estimated text colours with low confidence on any other background shall be unchanged by this requirement.
+
+The text-replacement artifact stage in FR-2026-08-02-13 shall use the same page-colour behaviour, with opaque white as its page colour.
+
+### Rationale
+
+A transparent PNG in a document can look correct on the page while its stored pixels mislead colour estimation. Antialiasing pixels with low alpha and unrelated hidden RGB can form the apparent text colour, and replacement text drawn with that colour is nearly invisible on any page. The page colour supplies the missing context in one place, keeps the source's transparency in the output, and guarantees legible opaque text.
+
+### Notes
+
+This requirement amends the alpha-handling exclusion in FR-2026-08-27-01 and extends the page-colour source to every format. It does not change estimator output for an image the caller supplies or the alpha-zero background rules in FR-2026-08-02-09. It amends FR-2026-08-02-10 only so that its rendering-only lightness adjustment judges a fully transparent background against the page colour.
+
+The 0.60 threshold is a starting value to be reviewed against the text-colour confidence of correct and incorrect estimates in representative evaluations. Evaluation of a dark-mode page background is out of scope: a transparent cell shows the actual document background, which may be dark.
+
+PDF and XLSX page-colour determination from direct source properties, text-colour fallback on backgrounds other than the page colour, and theme or inherited colour resolution are deferred.
+
+### Verification
+
+Automated tests shall use synthetic images and synthetic page colours only. They shall cover:
+
+- dark glyphs with antialiasing on a fully transparent background, verifying that the chosen text colour is the glyph colour rather than the antialiasing colour and that its alpha is 255;
+- a row of transparent cells beside an opaque-filled row, verifying that the transparent wipe stays alpha 0 and the opaque wipe keeps its colour;
+- a non-white page colour, verifying composited estimation and the original image retained for output;
+- text-colour confidence on both sides of the threshold on a page-colour background, and low-confidence text on a non-page-colour background remaining unchanged;
+- white and black fallback selection against a light and a dark page colour, and the lightness adjustment applying to light text on a transparent background over a dark page colour but not over a light one;
+- default white for standalone bitmap, XLSX, and PDF inputs;
+- identical behaviour through the folder-replacement and OCR-evaluation paths; and
+- the same behaviour for a paletted PNG with per-palette alpha embedded in a synthetic DOCX.
+
+Tests shall not use confidential samples or derived artifacts.
 
 ---

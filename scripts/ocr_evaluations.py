@@ -42,7 +42,7 @@ from pipeline.folder_replacement.filters import parse_include_patterns
 from pipeline.provider_cache import source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
-from pipeline.text_region_colours import estimate_text_region_colours
+from pipeline.text_region_colours import estimate_replacement_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import TextReplacementProviderFactory, replace_text
 from scripts.prepare_ocr_evaluation_inputs import PreparationResult, prepare_evaluation_inputs
@@ -60,7 +60,7 @@ TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "8"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "9"
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
@@ -485,9 +485,8 @@ def _write_text_replacement_artifacts(
         for region_index, text_item in enumerate(result.text_items, start=1)
         if text_item.confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
     )
-    estimates = tuple(
-        estimate_text_region_colours(source_image, text_item)
-        for _, text_item in eligible_text_items
+    estimates = estimate_replacement_colours(
+        source_image, [text_item for _, text_item in eligible_text_items]
     )
     artifact_directory = _replacement_artifact_directory(provider_root, evaluation_image)
     artifact_directory.mkdir(parents=True, exist_ok=True)
@@ -923,7 +922,11 @@ def _text_region_row(
 
 
 def _relative_url(path: Path, from_directory: Path) -> str:
-    return Path(os.path.relpath(path, from_directory)).as_posix()
+    try:
+        return Path(os.path.relpath(path, from_directory)).as_posix()
+    except ValueError:
+        # Windows has no relative path between different drives.
+        return path.resolve().as_uri()
 
 
 def parse_arguments() -> argparse.Namespace:

@@ -132,9 +132,10 @@ Prefer the repository scripts in `scripts/` for development verification so agen
 Common commands:
 
 - `./run.sh scripts/typecheck-python.py`
-- `./run.sh scripts/check-all.py`
+- `./scripts/run-tests.sh`
 
 Use focused test arguments when appropriate instead of running the full suite unnecessarily.
+or ps1 versions for windows.
 
 ---
 

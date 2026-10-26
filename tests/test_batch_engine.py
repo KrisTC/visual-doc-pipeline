@@ -34,7 +34,7 @@ from pipeline.ocr import BoundingPolygon, OcrRequest, OcrResult, OcrText, PixelP
 from pipeline.ocr.image_preparation import opaque_rgb_for_ocr
 from pipeline.provider_cache import CACHE_FILENAME_SUFFIX, CachingTextReplacementProvider, source_cache_scope
 from pipeline.provider_metrics import RunMetrics
-from pipeline.text_region_colours import estimate_text_region_colours
+from pipeline.text_region_colours import estimate_replacement_colours
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import (
     BatchLimits,
@@ -476,10 +476,10 @@ class BitmapPlanApplyTests(unittest.TestCase):
         prepared = [
             TextRegionReplacement(
                 item,
-                estimate_text_region_colours(image, item),
+                colours,
                 provider.replace(TextReplacementRequest((item.text,), False, "en", "en")).items[0].text,  # type: ignore[attr-defined]
             )
-            for item in detected
+            for item, colours in zip(detected, estimate_replacement_colours(image, detected), strict=True)
         ]
         replace_text_regions(image, prepared, _typeface(), "en")
         output = BytesIO()

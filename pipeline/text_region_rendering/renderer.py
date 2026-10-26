@@ -13,8 +13,10 @@ from PIL import Image
 # skia-python does not publish PEP 561 stubs; this is the native rendering boundary.
 import skia  # type: ignore[import-not-found]
 
+from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour
 from pipeline.ocr.models import BoundingPolygon, OcrText, PixelPoint
 from pipeline.text_region_colours import RgbaColour, TextRegionColourEstimate
+from pipeline.text_region_colours.replacement import relative_luminance
 
 
 AXIS_ALIGNMENT_TOLERANCE_DEGREES = 0.01
@@ -109,6 +111,7 @@ def replace_text_region(
     replacement_text: str,
     typeface: skia.Typeface,
     target_language: str,
+    page_colour: RgbColour = DEFAULT_OCR_BACKGROUND,
 ) -> None:
     """Replace visible text in ``text_region`` directly in ``image``.
 
@@ -118,12 +121,14 @@ def replace_text_region(
     create or return an image copy. ``typeface`` is caller-owned and may be
     reused across calls. ``target_language`` is validated and retained at this
     API boundary; language-specific shaping is not implemented yet.
+    ``page_colour`` is what shows through a transparent background.
     """
     replace_text_regions(
         image,
         (TextRegionReplacement(text_region, colour_estimate, replacement_text),),
         typeface,
         target_language,
+        page_colour,
     )
 
 
@@ -156,6 +161,7 @@ def render_replacement_text(
     replacement_text: str,
     typeface: skia.Typeface,
     target_language: str,
+    page_colour: RgbColour = DEFAULT_OCR_BACKGROUND,
 ) -> None:
     """Draw a fitted replacement into one OCR region without wiping its background.
 
@@ -173,6 +179,7 @@ def render_replacement_text(
             colour_estimate,
             replacement_text,
             typeface,
+            page_colour,
         ),
     )
 
@@ -182,12 +189,14 @@ def replace_text_regions(
     replacements: Sequence[TextRegionReplacement],
     typeface: skia.Typeface,
     target_language: str,
+    page_colour: RgbColour = DEFAULT_OCR_BACKGROUND,
 ) -> None:
     """Replace every supplied region in two passes using one shared Skia surface.
 
     The first pass wipes every region's estimated background. The second draws
     every replacement, in the supplied order. The supplied Pillow image is
-    modified directly and no caller-owned image copy is required.
+    modified directly and no caller-owned image copy is required. ``page_colour``
+    is what shows through a transparent background.
     """
     _validate_image(image)
     _validate_target_language(target_language)
@@ -195,7 +204,9 @@ def replace_text_regions(
         return
     _draw_on_image(
         image,
-        lambda canvas: _replace_text_regions_on_canvas(canvas, replacements, typeface),
+        lambda canvas: _replace_text_regions_on_canvas(
+            canvas, replacements, typeface, page_colour
+        ),
     )
 
 
@@ -203,6 +214,7 @@ def _replace_text_regions_on_canvas(
     canvas: skia.Canvas,
     replacements: Sequence[TextRegionReplacement],
     typeface: skia.Typeface,
+    page_colour: RgbColour,
 ) -> None:
     """Perform background then foreground replacement passes on one canvas."""
     for replacement in replacements:
@@ -218,6 +230,7 @@ def _replace_text_regions_on_canvas(
             replacement.colour_estimate,
             replacement.replacement_text,
             typeface,
+            page_colour,
         )
 
 
@@ -227,6 +240,7 @@ def _render_replacement_text_on_canvas(
     colour_estimate: TextRegionColourEstimate,
     replacement_text: str,
     typeface: skia.Typeface,
+    page_colour: RgbColour,
 ) -> None:
     """Render one replacement without modifying pixels outside its text polygon."""
     if not replacement_text:
@@ -240,7 +254,7 @@ def _render_replacement_text_on_canvas(
         path,
         render_plan,
         _render_text_colour(
-            colour_estimate.text_colour, colour_estimate.background_colour
+            colour_estimate.text_colour, colour_estimate.background_colour, page_colour
         ),
     )
 
@@ -328,13 +342,17 @@ def _wipe_background(canvas: skia.Canvas, path: skia.Path, colour: RgbaColour) -
             canvas.restore()
 
 
-def _render_text_colour(text_colour: RgbaColour, background_colour: RgbaColour) -> RgbaColour:
+def _render_text_colour(
+    text_colour: RgbaColour,
+    background_colour: RgbaColour,
+    page_colour: RgbColour = DEFAULT_OCR_BACKGROUND,
+) -> RgbaColour:
     """Return a bounded lightness boost for light text rendered on dark surfaces."""
-    background_luminance = _relative_luminance(background_colour)
-    text_luminance = _relative_luminance(text_colour)
+    if background_colour.alpha == 0:
+        background_colour = RgbaColour(*page_colour)
+    background_luminance = relative_luminance(background_colour)
+    text_luminance = relative_luminance(text_colour)
     if (
-        background_colour.alpha == 0
-        or
         background_luminance > DARK_BACKGROUND_MAXIMUM_LUMINANCE
         or text_luminance - background_luminance < LIGHT_TEXT_MINIMUM_LUMINANCE_DIFFERENCE
     ):
@@ -355,22 +373,6 @@ def _render_text_colour(text_colour: RgbaColour, background_colour: RgbaColour) 
         round(boosted_green * 255.0),
         round(boosted_blue * 255.0),
         text_colour.alpha,
-    )
-
-
-def _relative_luminance(colour: RgbaColour) -> float:
-    """Return WCAG relative luminance for an opaque or translucent sRGB value."""
-    channels = (colour.red / 255.0, colour.green / 255.0, colour.blue / 255.0)
-    linear_channels = tuple(
-        channel / 12.92
-        if channel <= 0.04045
-        else ((channel + 0.055) / 1.055) ** 2.4
-        for channel in channels
-    )
-    return (
-        (0.2126 * linear_channels[0])
-        + (0.7152 * linear_channels[1])
-        + (0.0722 * linear_channels[2])
     )
 
 

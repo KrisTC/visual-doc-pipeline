@@ -281,6 +281,15 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 viewer,
             )
 
+    # Verifies FR-2026-08-01-03 across Windows drives.
+    def test_relative_url_falls_back_to_a_file_url_when_no_relative_path_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "image.png"
+            with patch.object(ocr_evaluation.os.path, "relpath", side_effect=ValueError):
+                url = ocr_evaluation._relative_url(path, Path(temporary_directory) / "viewer")
+
+            self.assertEqual(path.resolve().as_uri(), url)
+
     # Verifies FR-2026-10-24-02.
     def test_help_states_that_explicit_vision_selection_sends_images_to_google(self) -> None:
         output = StringIO()

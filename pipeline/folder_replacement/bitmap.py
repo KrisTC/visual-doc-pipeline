@@ -18,7 +18,7 @@ from pipeline.folder_replacement.common import TEXT_REPLACEMENT_MINIMUM_CONFIDEN
 from pipeline.ocr import OcrProvider, OcrRequest
 from pipeline.ocr.image_preparation import DEFAULT_OCR_BACKGROUND, RgbColour, opaque_rgb_for_ocr
 from pipeline.ocr.models import OcrText
-from pipeline.text_region_colours import estimate_text_region_colours
+from pipeline.text_region_colours import estimate_replacement_colours
 from pipeline.text_region_colours.models import TextRegionColourEstimate
 from pipeline.text_region_rendering import TextRegionReplacement, replace_text_regions
 from pipeline.text_replacement import (
@@ -35,13 +35,15 @@ BITMAP_UNIT_ID = "image"
 class BitmapPlan:
     """The OCR regions of one image that need replacement text.
 
-    ``image`` is modified in place by ``apply_bitmap``.
+    ``image`` is modified in place by ``apply_bitmap``. ``page_colour`` is what shows
+    through the image's transparent pixels.
     """
 
     image: Image.Image
     format_name: str | None
     regions: list[tuple[OcrText, TextRegionColourEstimate]]
     unit_id: str = BITMAP_UNIT_ID
+    page_colour: RgbColour = DEFAULT_OCR_BACKGROUND
 
     def units(self) -> Iterator[TextUnit]:
         """Yield this image's single unit with one text per region, in OCR order."""
@@ -63,14 +65,19 @@ def plan_bitmap(
     detected = ocr.recognize(OcrRequest(ocr_image, source_language)).text_items
     if nested_completed is not None:
         nested_completed("OCR recognition")
-    regions = [
-        (item, estimate_text_region_colours(image, item))
-        for item in detected
-        if item.confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
+    confident = [
+        item for item in detected if item.confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
     ]
+    regions = list(
+        zip(
+            confident,
+            estimate_replacement_colours(image, confident, ocr_background),
+            strict=True,
+        )
+    )
     if nested_completed is not None:
         nested_completed("process OCR results")
-    return BitmapPlan(image, format_name, regions, unit_id)
+    return BitmapPlan(image, format_name, regions, unit_id, ocr_background)
 
 
 def apply_bitmap(
@@ -86,7 +93,7 @@ def apply_bitmap(
         TextRegionReplacement(region, colours, translate(region.text).text)
         for region, colours in plan.regions
     ]
-    replace_text_regions(plan.image, prepared, typeface, target_language)
+    replace_text_regions(plan.image, prepared, typeface, target_language, plan.page_colour)
     if nested_completed is not None:
         nested_completed("render replacement image")
     return len(prepared)

@@ -34,6 +34,15 @@ The values describe pixels stored in the source image. They do not infer a hidde
 
 Confidence is neither a probability nor OCR confidence. `0.0` means the estimator found no usable supporting evidence; `1.0` means the strongest evidence available to this heuristic, not a correctness guarantee. Compare scores only from the same estimator version. Review low-confidence estimates or apply a caller-selected fallback.
 
+## Colours for replacing text
+
+`estimate_replacement_colours(image, text_regions, page_colour=(255, 255, 255))` returns one `TextRegionColourEstimate` per region, ready for the rendering API. Use it instead of `estimate_text_region_colours` when replacing text, particularly in images with transparency.
+
+- `page_colour` is the opaque RGB colour that shows through transparent pixels, such as the document background. It defaults to white.
+- `background_colour` is still the observed background, so a transparent cell stays transparent when it is wiped.
+- `text_colour` is estimated from a copy composited onto `page_colour`, so antialiasing pixels with hidden RGB values are not mistaken for text. It is always opaque.
+- When `text_colour_confidence` is below `0.60` and the background shows the page colour (transparent, or opaque and equal to it), `text_colour` is opaque black or white, whichever contrasts more with `page_colour`.
+
 ## Local example evaluator
 
 Generate local static pages for the supplied examples with:
