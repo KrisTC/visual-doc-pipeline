@@ -28,6 +28,39 @@ SPECIFICATION.loader.exec_module(ocr_preparation)
 
 
 class PrepareOcrEvaluationInputsTests(unittest.TestCase):
+    # Verifies FR-2026-10-26-02.
+    def test_skips_office_temporary_owner_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source_root = root / "sample-data"
+            output_root = root / "prepared"
+            language_root = source_root / "en"
+            language_root.mkdir(parents=True)
+            bitmap = language_root / "source.png"
+            Image.new("RGB", (8, 8), "red").save(bitmap)
+            self._create_docx(language_root / "real.docx", bitmap)
+            for name in ("~$real.docx", "~$deck.pptx", "~$book.xlsx"):
+                (language_root / name).write_bytes(b"\x05synthetic owner")
+            Image.new("RGB", (8, 8), "blue").save(language_root / "~$owner.png")
+
+            for include_patterns in ((), ("en/*.docx", "en/*.pptx", "en/*.xlsx", "en/*.png")):
+                result = ocr_preparation.prepare_evaluation_inputs(
+                    source_root, output_root, include_patterns
+                )
+
+                self.assertEqual(
+                    sorted(
+                        path.relative_to(output_root).as_posix()
+                        for path in output_root.rglob("*.png")
+                    ),
+                    ["en/real.docx/image-0001.png", "en/source.png"],
+                )
+                self.assertFalse(any("~$" in path.name for path in output_root.rglob("*")))
+                self.assertEqual(1, result.copied_bitmaps)
+                self.assertEqual(
+                    1, result.processed_documents + result.skipped_documents
+                )
+
     # Verifies FR-2026-10-24-03.
     def test_filter_prepares_only_selected_sources_and_retains_other_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

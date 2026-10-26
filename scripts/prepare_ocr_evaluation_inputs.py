@@ -24,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from pypdf import PdfReader
-from pipeline.folder_replacement.filters import matches_include_patterns
+from pipeline.folder_replacement.filters import is_office_owner_file, matches_include_patterns
 from pipeline.ocr.languages import discover_language_directories
 
 
@@ -189,8 +189,9 @@ def expected_output_directories(
         expected_directories.add(language_directory.relative_to(source_root))
         for source_path in language_directory.rglob("*"):
             relative_source_path = source_path.relative_to(source_root)
-            if source_path.is_dir() or source_path.suffix.lower() in (
-                OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
+            if source_path.is_dir() or (
+                source_path.suffix.lower() in (OFFICE_DOCUMENT_EXTENSIONS | {".pdf"})
+                and not is_office_owner_file(source_path)
             ):
                 expected_directories.add(relative_source_path)
     return expected_directories
@@ -253,7 +254,9 @@ def prepare_evaluation_inputs(
         ):
             relative_source_path = source.relative_to(source_root)
             extension = source.suffix.lower()
-            if not matches_include_patterns(relative_source_path, include_patterns):
+            if is_office_owner_file(source) or not matches_include_patterns(
+                relative_source_path, include_patterns
+            ):
                 continue
 
             if extension in BITMAP_EXTENSIONS:

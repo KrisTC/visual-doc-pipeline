@@ -15,7 +15,7 @@ Shared folder-processing, layout, diagnostics, caching, and development-workflow
 
 ### Description
 
-The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported, and Office temporary owner files as defined by FR-2026-10-26-01.
+The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported, and Office temporary owner files as defined by FR-2026-10-26-02.
 
 The command shall accept a text-replacement-provider name, defaulting to `google_cloud_translate`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined. Its `--help` output shall display one command-options section containing each option's concise description and default, together with separate, non-duplicative text-replacement-provider, OCR-provider, and document-text-layout reference sections. The provider sections shall list every name discovered from the default plugin directories, with its discovered plugin description when one is declared. The document-text-layout reference section shall list every accepted value; the usage and command-option entry shall use the metavar `LAYOUT` rather than repeat those values. When stdout is an interactive terminal whose `TERM` is not `dumb` and `NO_COLOR` is unset, it shall use ANSI colour without colouring descriptions: section headings shall be bold, option names bold cyan, choice names bold green, and default-value annotations yellow. It shall emit plain text when stdout is not interactive, `TERM` is `dumb`, or `NO_COLOR` is set.
 
@@ -92,7 +92,7 @@ a `files` object. The top-level `progress` value shall use the same completed sh
 percentage as the Rich Overall bar. The `files` object shall map each
 input-relative POSIX path to its entry. A file that will not be processed,
 including an unsupported file, a provider-cache sidecar, an Office temporary
-owner file (FR-2026-10-26-01), or one excluded by the include patterns, shall
+owner file (FR-2026-10-26-02), or one excluded by the include patterns, shall
 have status `skipped`.
 Each remaining file shall initially have status `queued`. When processing of a
 file starts, its status shall change to `processing` and it shall have a
@@ -2026,30 +2026,29 @@ Automated tests shall use synthetic documents, a mocked provider and a mocked cl
 
 ---
 
-## FR-2026-10-26-01
+## FR-2026-10-26-02
 
 | Property | Value |
 |----------|-------|
-| Title | Skip Office temporary owner files during folder replacement |
+| Title | Skip Office temporary owner files in folder replacement and OCR evaluation input preparation |
 | Owner | KrisTC |
 | Status | Implemented |
 | Source | User request |
 | Date Added | 2026-10-26 |
-| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-04 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-04, FR-2026-08-01-01, FR-2026-10-24-03 |
 
 ### Description
 
-The folder-replacement command shall treat a file whose name starts with `~$` as an Office temporary owner (lock) file, which Word, Excel and PowerPoint create beside an open document, and shall skip it even when its extension is a supported document extension. The check shall apply to the file's own name only, at any depth, and shall be case-sensitive to the literal prefix `~$`. A directory whose name starts with `~$` shall not by itself exclude the files below it.
+The folder-replacement command and the OCR evaluation input preparation used by `scripts/ocr_evaluations.py` shall treat a file whose name starts with `~$` as an Office temporary owner (lock) file, which Word, Excel and PowerPoint create beside an open document, and shall skip it even when its extension is a supported bitmap or document extension. The check shall apply to the file's own name only, at any depth, and shall be case-sensitive to the literal prefix `~$`. A directory whose name starts with `~$` shall not by itself exclude the files below it.
 
-A skipped owner file is ineligible, as an unsupported file is under FR-2026-08-03-03. It shall not be read, processed, or written to the output folder; it shall not be reported as a failed file or cause a non-zero exit; it shall not count toward the overall progress total of FR-2026-08-03-04; and its `progress.json` entry shall have status `skipped`. The skip applies regardless of the include patterns.
+A skipped owner file is ineligible, as an unsupported file is under FR-2026-08-03-03. It shall not be read, processed, copied, extracted from, or written to the output folder; it shall not be reported as a failed file, abort the run, or cause a non-zero exit; and it shall not count toward any progress total or evaluation image set. The skip applies regardless of the include patterns. In the folder-replacement command, its `progress.json` entry (FR-2026-08-03-04) shall have status `skipped`.
 
 ### Rationale
 
-An owner file has a document extension but holds only a short user and machine name, not an OOXML package, so processing it always fails and makes a run exit non-zero for a file the user cannot meaningfully convert. Such files appear whenever a source folder is copied while a document is open.
+An owner file has a document extension but holds only a short user and machine name, not an OOXML package, so processing it always fails. In folder replacement it makes a run exit non-zero, and in OCR evaluation input preparation it aborts the whole run. Such files appear whenever a source folder is copied while a document is open.
 
 ### Verification
 
-Automated tests shall use synthetic input folders only. They shall verify that a `~$`-prefixed `.docx`, `.xlsx` and `.pptx` file, at the input root and in a subfolder, produces no output file, no failure, a zero exit status, a `skipped` progress entry and no contribution to the overall total; that a similarly named file without the `~$` prefix, and a file below a `~$`-prefixed directory, are still processed; and that the skip applies when an include pattern matches the owner file.
+Automated tests shall use synthetic input folders only. For folder replacement, they shall verify that a `~$`-prefixed `.docx`, `.xlsx` and `.pptx` file, at the input root and in a subfolder, produces no output file, no failure, a zero exit status, a `skipped` progress entry and no contribution to the overall total; that a similarly named file without the `~$` prefix, and a file below a `~$`-prefixed directory, are still processed; and that the skip applies when an include pattern matches the owner file. For OCR evaluation input preparation, they shall verify that an invalid `~$`-prefixed `.docx`, `.pptx` and `.xlsx` file produces no prepared output and no error, with and without an include pattern that matches it, while a valid sibling document is still prepared.
 
----
 ---

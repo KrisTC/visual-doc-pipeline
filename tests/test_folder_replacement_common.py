@@ -547,7 +547,7 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertEqual(1, stderr.getvalue().count("Warning: Could not write progress file"))
             self.assertNotIn("Failed:", stderr.getvalue())
 
-    # Verifies FR-2026-10-26-01.
+    # Verifies FR-2026-10-26-02.
     def test_skips_office_temporary_owner_files(self) -> None:
         with TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
