@@ -7,11 +7,13 @@ import importlib.util
 from contextlib import redirect_stdout
 from io import StringIO
 import json
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from xml.etree import ElementTree
 
 from PIL import Image
 
@@ -262,8 +264,11 @@ class RunOcrEvaluationsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             provider_root = Path(temporary_directory) / "vision"
             provider_root.mkdir()
+            image_path = Path(temporary_directory) / "input" / "ja" / "image.png"
+            image_path.parent.mkdir(parents=True)
+            Image.new("RGB", (8, 6), "white").save(image_path)
             image = ocr_evaluation.EvaluationImage(
-                "ja", Path("input/ja/image.png"), Path("ja"), Path("ja/image.png")
+                "ja", image_path, Path("ja"), Path("ja/image.png")
             )
             entry = ocr_evaluation.ViewerEntry(
                 image, True, (0.9,), ("日本語\nSecond",), True
@@ -383,6 +388,41 @@ class RunOcrEvaluationsTests(unittest.TestCase):
         self.assertLessEqual(len(label), ocr_evaluation.MAXIMUM_PROGRESS_LABEL_LENGTH)
         self.assertTrue(label.endswith("…"))
 
+    # Verifies FR-2026-10-26-02.
+    def test_masked_svg_escapes_provider_text_and_region_ids_are_unique_per_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            provider_root = Path(temporary_directory) / "output" / "fake"
+            first = ocr_evaluation.EvaluationImage(
+                "en", Path(temporary_directory) / "input" / "en" / "a" / "same.png",
+                Path("en/a"), Path("en/a/same.png"),
+            )
+            second = ocr_evaluation.EvaluationImage(
+                "en", Path(temporary_directory) / "input" / "en" / "b" / "same.png",
+                Path("en/b"), Path("en/b/same.png"),
+            )
+            result = OcrResult(
+                (
+                    OcrText(
+                        text='<b>&"quoted"</b>\x0c',
+                        confidence=0.9,
+                        bounding_polygon=BoundingPolygon(
+                            (PixelPoint(1.5, 2), PixelPoint(9, 2), PixelPoint(9, 8))
+                        ),
+                    ),
+                )
+            )
+
+            svg_text = ocr_evaluation._masked_svg(provider_root, first, (10, 10), result)
+
+            root = ElementTree.fromstring(svg_text.split("\n", 1)[1])
+            title = root.find("{http://www.w3.org/2000/svg}a/{http://www.w3.org/2000/svg}polygon/{http://www.w3.org/2000/svg}title")
+            assert title is not None
+            self.assertEqual('<b>&"quoted"</b>', title.text)
+            self.assertNotEqual(
+                ocr_evaluation._region_element_id(first, 1),
+                ocr_evaluation._region_element_id(second, 1),
+            )
+
     # Verifies FR-2026-08-02-01.
     def test_groups_progress_by_language_directory_and_its_immediate_folders(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -475,13 +515,44 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 },
                 json.loads(success_base.with_name("success.png.json").read_text(encoding="utf-8")),
             )
-            masked_path = success_base.with_name("success.png.masked.png")
+            masked_path = success_base.with_name("success.png.masked.svg")
             self.assertTrue(masked_path.is_file())
+            self.assertFalse(success_base.with_name("success.png.masked.png").exists())
             self.assertTrue(success_base.with_name("success.png.text-0001.png").is_file())
             self.assertTrue(success_base.with_name("success.png.text-0002.png").is_file())
-            with Image.open(masked_path) as masked_image:
-                self.assertEqual((0, 0, 0, 255), masked_image.getpixel((35, 30)))
-                self.assertEqual((255, 0, 0, 255), masked_image.getpixel((0, 0)))
+            masked_svg = ElementTree.parse(masked_path).getroot()
+            svg_namespace = "{http://www.w3.org/2000/svg}"
+            self.assertEqual("0 0 80 60", masked_svg.get("viewBox"))
+            svg_image = masked_svg.find(f"{svg_namespace}image")
+            assert svg_image is not None
+            self.assertEqual(
+                "../../../../../input/collection/en/nested/success.png",
+                svg_image.get("href"),
+            )
+            svg_polygons = masked_svg.findall(f"{svg_namespace}a/{svg_namespace}polygon")
+            self.assertEqual(
+                ["30,25 50,25 50,35 30,35", "55,25 75,25 75,35 55,35"],
+                [polygon.get("points") for polygon in svg_polygons],
+            )
+            self.assertEqual(
+                ["detected", "low confidence"],
+                [polygon.findtext(f"{svg_namespace}title") for polygon in svg_polygons],
+            )
+            viewer_row_identifiers = re.findall(
+                r'<tr id="(region-[0-9a-f]+-\d+)"', (provider_root / "index.html").read_text(encoding="utf-8")
+            )
+            self.assertEqual(2, len(viewer_row_identifiers))
+            self.assertEqual(
+                [
+                    f"../../../index.html#{identifier}"
+                    for identifier in viewer_row_identifiers
+                ],
+                [link.get("href") for link in masked_svg.findall(f"{svg_namespace}a")],
+            )
+            self.assertEqual(
+                ["_top", "_top"],
+                [link.get("target") for link in masked_svg.findall(f"{svg_namespace}a")],
+            )
             with Image.open(success_base.with_name("success.png.text-0001.png")) as clip:
                 self.assertEqual((60, 50), clip.size)
             replacement_directory = success_base.with_name("success.png.text-replacements")
@@ -513,9 +584,16 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                     )
                 ),
             )
-            self.assertFalse((provider_root / "collection" / "fr" / "unsupported.png.masked.png").exists())
-            self.assertFalse((provider_root / "collection" / "en" / "failed.png.masked.png").exists())
+            self.assertFalse((provider_root / "collection" / "fr" / "unsupported.png.masked.svg").exists())
+            self.assertFalse((provider_root / "collection" / "en" / "failed.png.masked.svg").exists())
             viewer = (provider_root / "index.html").read_text(encoding="utf-8")
+            self.assertIn(
+                '<object type="image/svg+xml" style="aspect-ratio: 80 / 60; height: auto; '
+                'max-width: 100%; width: 80px" data="collection/en/nested/success.png.masked.svg">',
+                viewer,
+            )
+            self.assertIn("tr:target td", viewer)
+            self.assertNotIn('alt="Detected text masked in black"', viewer)
             self.assertIn("<table>", viewer)
             self.assertIn("detected", viewer)
             self.assertIn("75.00%", viewer)
@@ -538,6 +616,18 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertIn(
                 ">Detected regions masked</option>", replacement_viewer
             )
+            self.assertIn(
+                '<option value="collection/en/nested/success.png.masked.svg">'
+                "Detected regions masked</option>",
+                replacement_viewer,
+            )
+            self.assertIn(
+                '<object type="image/svg+xml" style="aspect-ratio: 80 / 60; height: auto; '
+                'max-width: 100%; width: 80px" id="replacement-preview-2-mask" hidden>',
+                replacement_viewer,
+            )
+            self.assertIn('data-replacement-mask="replacement-preview-2-mask"', replacement_viewer)
+            self.assertIn('select.value.endsWith(".svg")', replacement_viewer)
             self.assertIn('.top-previews { display: flex; flex-wrap: nowrap;', replacement_viewer)
             self.assertIn('flex: 0 0 calc(50% - .5rem);', replacement_viewer)
             self.assertIn('.top-preview img { display: block; max-width: 100%; }', replacement_viewer)

@@ -142,9 +142,9 @@ The project shall provide a command that evaluates every supported bitmap image 
 
 The command shall use the existing OCR-provider factory and OCR task request and response abstractions in `pipeline/ocr/`. It shall not implement, discover, or invoke provider-specific OCR logic independently.
 
-For each provider, the command shall create a corresponding provider root in `outputs/evaluations/ocr/output/`. Beneath that root, it shall mirror the input hierarchy. For every input image, it shall write a JSON serialization of the normalized OCR response together with a status, a copy of the source image with every detected text region masked in black, and one clipped bitmap image for each detected text region, using that region's bounding box. When a provider does not support an image's language, or when OCR fails for an image with a supported language, the command shall continue evaluating other images and providers, write a JSON file containing only a failed status for that image, and shall not create visual OCR artifacts for that image.
+For each provider, the command shall create a corresponding provider root in `outputs/evaluations/ocr/output/`. Beneath that root, it shall mirror the input hierarchy. For every input image, it shall write a JSON serialization of the normalized OCR response together with a status, a standalone SVG detection mask with every detected text region masked in black and linked to its viewer table row (FR-2026-10-26-02), and one clipped bitmap image for each detected text region, using that region's bounding box. When a provider does not support an image's language, or when OCR fails for an image with a supported language, the command shall continue evaluating other images and providers, write a JSON file containing only a failed status for that image, and shall not create visual OCR artifacts for that image.
 
-Each provider root shall contain a generated static HTML viewer that lets a user browse that provider's image evaluations, including the input image, masked image, detected-region clips, and OCR result data.
+Each provider root shall contain a generated static HTML viewer that lets a user browse that provider's image evaluations, including the input image, SVG detection mask, detected-region clips, and OCR result data.
 
 ### Rationale
 
@@ -213,7 +213,7 @@ The table gives a compact, legible visual comparison of every detected region an
 
 ### Notes
 
-The viewer shall retain the input and black-masked comparison images above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
+The viewer shall retain the input image and the black SVG detection mask (FR-2026-10-26-02) above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
 
 Automated tests shall use synthetic multilingual OCR text and verify that the generated HTML preserves the source text and includes translation-prevention markup.
 
@@ -452,7 +452,7 @@ The text-replacement stage and its report shall skip each OCR text region whose 
 
 The OCR artifact stage and text-replacement artifact stage shall have independent cache freshness markers. A missing or stale OCR viewer or OCR cache marker shall regenerate OCR and all dependent artifacts. A current OCR artifact set with a missing or stale text-replacement viewer or text-replacement cache marker shall retain the saved OCR JSON and OCR artifacts, then regenerate only the text-replacement artifacts and report without calling the OCR provider.
 
-The existing provider-root static OCR viewer shall remain unchanged. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every registered provider. The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region mask as its final option. The initial selected option and displayed image shall both be the first registered provider.
+The existing provider-root static OCR viewer shall remain unchanged, except as amended by FR-2026-10-26-02. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every registered provider. The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region SVG mask (FR-2026-10-26-02) as its final option. The initial selected option and displayed image shall both be the first registered provider.
 
 Every successful OCR-result JSON file shall include a top-level `source_language` BCP 47 string, equal to the language used in that image's OCR request. Failed JSON results shall remain status-only. The viewer shall display the resulting source-to-target language direction beside each successful OCR result, initially as `source_language→en`.
 
@@ -904,6 +904,56 @@ Automated tests shall use synthetic images and synthetic page colours only. They
 - default white for standalone bitmap, XLSX, and PDF inputs;
 - identical behaviour through the folder-replacement and OCR-evaluation paths; and
 - the same behaviour for a paletted PNG with per-palette alpha embedded in a synthetic DOCX.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-02
+
+| Property | Value |
+|----------|-------|
+| Title | Replace the masked bitmap with a linked SVG detection mask |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-02, FR-2026-08-02-13 |
+
+### Description
+
+For every successful OCR image evaluation, the OCR-evaluation command shall write a standalone SVG detection mask in place of the black-masked PNG. The command shall no longer write the masked PNG. The SVG shall be named `<image file name>.masked.svg`, beside the image's other artifacts, and shall not be written for an image whose evaluation failed or whose language is unsupported.
+
+The SVG shall have a `viewBox` and intrinsic size equal to the source bitmap's pixel dimensions. It shall contain, in order, one `<image>` element that references the original input bitmap by relative URL, and one filled black `<polygon>` for each detected text region, using the region's `bounding_polygon` vertices in source-pixel coordinates. The result shall mask the same area as the retired PNG. The SVG shall not embed the bitmap data and shall not contain script.
+
+Each polygon shall be wrapped in an `<a>` element when the OCR viewer has a table row for that region. Its `href` shall be a relative URL to that row in the provider root's OCR viewer (`index.html`), and its `target` shall be `_top`, so that activating the polygon from inside an embedded SVG scrolls or navigates the whole page to the row. A polygon whose region has no table row shall have no link and no `<a>` wrapper. Every polygon shall have a `<title>` containing the region's extracted text, shown by the browser as a tooltip. Region numbers shall match the table and the `text-NNNN` clip numbering. The SVG shall include every detected region, whatever its confidence.
+
+In the OCR viewer, every region table row shall have an `id` that is unique within the page, is derived from the image's relative path and the region number, and is stable across regenerations. The viewer shall show the SVG mask through an `<object type="image/svg+xml">` element in place of the previous `<img>`, so that its links remain active, with `max-width: 100%` and the same sizing as the input image beside it. The row that is the current URL fragment target shall be visually highlighted using the CSS `:target` selector. No script shall be required for the links or highlighting.
+
+The text-replacement results page shall use the same SVG for its "Detected regions masked" dropdown option. Because browsers do not allow an SVG shown through an `<img>` to load its referenced bitmap or follow links, the page's existing selection script shall display the SVG in an `<object>` element while that option is selected, and the complete-provider-image `<img>` otherwise, without a page reload. Activating a polygon from that page shall open the corresponding row in the OCR viewer, which is the only page that lists every detected region. The first-registered-provider initial selection in FR-2026-08-02-13 is unchanged.
+
+All values written to the SVG and viewer markup, including URLs, region identifiers, and extracted text, shall be XML- or HTML-escaped as appropriate, and extracted text shall remain unmodified and marked not translatable where it appears in viewer markup.
+
+The OCR artifact format version and the text-replacement artifact format version shall both change, so that a provider root generated with the retired masked PNG is regenerated. This requirement amends the masked-image wording in FR-2026-08-01-03, FR-2026-08-02-02, and FR-2026-08-02-13 to refer to the SVG detection mask.
+
+### Rationale
+
+A vector mask keeps the original bitmap pixels unmodified, avoids a second raster copy, and gives every detection a hyperlink target. A reviewer can click a masked region and land on its OCR table row instead of matching a position by eye.
+
+### Notes
+
+The SVG remains a standalone file that can be opened directly in a browser. Its links then target the OCR viewer by relative URL, and its bitmap reference resolves only while the input tree stays at its relative location. Browsers also treat a file-loaded SVG as a separate origin, so the design avoids script that reads the SVG's contents; that is why the viewers use `<object>`, which needs no script, rather than inlining the SVG by fetching it.
+
+### Verification
+
+Automated tests shall use synthetic images, synthetic OCR results, and temporary output roots only. They shall verify:
+
+- an SVG is written for a successful image and no masked PNG is written, including no artifact for failed and unsupported-language images;
+- the SVG dimensions, relative bitmap reference, polygon coordinates, link targets, tooltip text, and escaping of markup-significant characters in synthetic text;
+- every table row has the unique `id` that its polygon link references, including images with the same file name in different folders;
+- the OCR viewer embeds the SVG through `<object>` with the `:target` highlight style;
+- the replacement page's mask option uses the SVG and the script swaps between `<object>` and `<img>`; and
+- a provider root with the previous format version is regenerated.
 
 Tests shall not use confidential samples or derived artifacts.
 

@@ -9,6 +9,7 @@ import html
 import json
 import math
 import os
+import re
 import shutil
 import sys
 from collections import defaultdict
@@ -23,7 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from PIL import Image, ImageDraw
+from PIL import Image
 # skia-python does not publish PEP 561 stubs; the evaluator passes its native Typeface through.
 import skia  # type: ignore[import-not-found]
 
@@ -54,13 +55,13 @@ BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", "
 
 CHECKSUM_FILENAME = ".input.sha256"
 ARTIFACT_FORMAT_VERSION_FILENAME = ".artifact-format-version"
-ARTIFACT_FORMAT_VERSION = "4"
-VISION_ARTIFACT_FORMAT_VERSION = "4-vision-auto-language-v1"
+ARTIFACT_FORMAT_VERSION = "5"
+VISION_ARTIFACT_FORMAT_VERSION = "5-vision-auto-language-v1"
 TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "9"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "10"
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
@@ -450,17 +451,12 @@ def _write_visual_artifacts(
     source_image: Image.Image,
     result: OcrResult,
 ) -> None:
-    masked_image = source_image.convert("RGBA")
-    drawing = ImageDraw.Draw(masked_image)
-    for text_item in result.text_items:
-        drawing.polygon(
-            [(point.x, point.y) for point in text_item.bounding_polygon.vertices],
-            fill="black",
-        )
-    _masked_image_path(provider_root, evaluation_image).parent.mkdir(
-        parents=True, exist_ok=True
+    masked_path = _masked_image_path(provider_root, evaluation_image)
+    masked_path.parent.mkdir(parents=True, exist_ok=True)
+    masked_path.write_text(
+        _masked_svg(provider_root, evaluation_image, source_image.size, result),
+        encoding="utf-8",
     )
-    masked_image.save(_masked_image_path(provider_root, evaluation_image), format="PNG")
 
     for index, text_item in enumerate(result.text_items, start=1):
         bounds = _padded_clipped_bounds(
@@ -650,7 +646,72 @@ def _result_json_path(provider_root: Path, image: EvaluationImage) -> Path:
 
 
 def _masked_image_path(provider_root: Path, image: EvaluationImage) -> Path:
-    return provider_root / image.relative_path.parent / f"{image.relative_path.name}.masked.png"
+    return provider_root / image.relative_path.parent / f"{image.relative_path.name}.masked.svg"
+
+
+# Characters that XML 1.0 forbids, which provider text can contain.
+_INVALID_XML_CHARACTERS = re.compile("[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+
+
+def _region_element_id(image: EvaluationImage, region_index: int) -> str:
+    """Return the viewer table-row id that an SVG detection link targets."""
+    path_digest = hashlib.sha256(image.relative_path.as_posix().encode("utf-8")).hexdigest()
+    return f"region-{path_digest[:12]}-{region_index}"
+
+
+def _masked_svg(
+    provider_root: Path,
+    image: EvaluationImage,
+    image_size: tuple[int, int],
+    result: OcrResult,
+) -> str:
+    """Build a standalone SVG showing the input with every detection masked and linked."""
+    svg_directory = _masked_image_path(provider_root, image).parent
+    source_url = html.escape(_relative_url(image.path, svg_directory), quote=True)
+    viewer_url = _relative_url(provider_root / VIEWER_FILENAME, svg_directory)
+    width, height = image_size
+    regions: list[str] = []
+    for region_index, text_item in enumerate(result.text_items, start=1):
+        points = " ".join(
+            f"{format(point.x, '.15g')},{format(point.y, '.15g')}"
+            for point in text_item.bounding_polygon.vertices
+        )
+        title = html.escape(_INVALID_XML_CHARACTERS.sub("", text_item.text), quote=False)
+        polygon = f'<polygon points="{points}" fill="black"><title>{title}</title></polygon>'
+        # Every detected region has an OCR viewer table row, so every polygon is linked.
+        target = html.escape(f"{viewer_url}#{_region_element_id(image, region_index)}", quote=True)
+        regions.append(f'<a href="{target}" target="_top">{polygon}</a>')
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">\n'
+        f'<image href="{source_url}" x="0" y="0" width="{width}" height="{height}"/>\n'
+        + "\n".join(regions)
+        + "\n</svg>\n"
+    )
+
+
+def _image_size(path: Path) -> tuple[int, int]:
+    with Image.open(path) as image:
+        return image.size
+
+
+def _mask_object_html(
+    url: str | None, image_size: tuple[int, int], element_id: str = "", hidden: bool = False
+) -> str:
+    """Embed the SVG mask through <object>, which keeps its links active and loads its bitmap."""
+    width, height = image_size
+    attributes = [
+        'type="image/svg+xml"',
+        f'style="aspect-ratio: {width} / {height}; height: auto; max-width: 100%; width: {width}px"',
+    ]
+    if element_id:
+        attributes.append(f'id="{html.escape(element_id, quote=True)}"')
+    if url is not None:
+        attributes.append(f'data="{html.escape(url, quote=True)}"')
+    if hidden:
+        attributes.append("hidden")
+    return f'<object {" ".join(attributes)}>Detected regions masked</object>'
 
 
 def _text_clip_path(provider_root: Path, image: EvaluationImage, index: int) -> Path:
@@ -711,6 +772,8 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
     img {{ border: 1px solid #cbd5e1; height: auto; max-width: 100%; }} figcaption {{ font-size: .9rem; }}
     table {{ border-collapse: collapse; margin-top: 1rem; width: 100%; }} th, td {{ border: 1px solid #cbd5e1; padding: .5rem; text-align: left; vertical-align: top; }}
     th {{ background: #f1f5f9; }} td img {{ max-height: 120px; }}
+    object {{ background: white; border: 1px solid #cbd5e1; display: block; }}
+    tr:target td {{ background: #fef9c3; }}
     .extracted-text {{ white-space: pre-wrap; }}
     .confidence {{ text-align: right; white-space: nowrap; width: 7ch; }}
   </style>
@@ -754,6 +817,8 @@ def _write_text_replacement_viewer(
     .top-preview {{ box-sizing: border-box; flex: 0 0 calc(50% - .5rem); margin: 0; min-width: 0; }}
     img {{ border: 1px solid #cbd5e1; height: auto; max-width: 100%; }} figcaption {{ font-size: .9rem; }}
     .top-preview img {{ display: block; max-width: 100%; }}
+    object {{ background: white; border: 1px solid #cbd5e1; display: block; }}
+    [hidden] {{ display: none !important; }}
     table {{ border-collapse: collapse; margin-top: 1rem; width: auto; }} th, td {{ border: 1px solid #cbd5e1; padding: .5rem; text-align: left; vertical-align: top; }}
     th {{ background: #f1f5f9; }} td img {{ max-height: 120px; }}
   </style>
@@ -767,7 +832,16 @@ def _write_text_replacement_viewer(
   <script>
     document.querySelectorAll("select[data-replacement-preview]").forEach((select) => {{
       select.addEventListener("change", () => {{
-        document.getElementById(select.dataset.replacementPreview).src = select.value;
+        const preview = document.getElementById(select.dataset.replacementPreview);
+        const mask = document.getElementById(select.dataset.replacementMask);
+        const showMask = select.value.endsWith(".svg");
+        if (showMask) {{
+          if (mask.getAttribute("data") !== select.value) mask.setAttribute("data", select.value);
+        }} else {{
+          preview.src = select.value;
+        }}
+        preview.hidden = showMask;
+        mask.hidden = !showMask;
       }});
     }});
   </script>
@@ -828,8 +902,9 @@ def _replacement_viewer_entry_html(
     <figure class="top-preview"><img alt="Original input" src="{html.escape(image_path, quote=True)}"><figcaption>Input</figcaption></figure>
     <div class="complete-preview top-preview">
       <img id="{preview_identifier}" alt="Complete text-replacement preview" src="{html.escape(first_preview, quote=True)}">
+      {_mask_object_html(None, _image_size(entry.image.path), f"{preview_identifier}-mask", hidden=True)}
       <label for="replacement-select-{entry_index}">Complete replacement preview</label>
-      <select id="replacement-select-{entry_index}" data-replacement-preview="{preview_identifier}">{options}</select>
+      <select id="replacement-select-{entry_index}" data-replacement-preview="{preview_identifier}" data-replacement-mask="{preview_identifier}-mask">{options}</select>
     </div>
   </div>
   {table}
@@ -903,7 +978,7 @@ def _viewer_entry_html(provider_root: Path, entry: ViewerEntry) -> str:
   <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}. Status: succeeded. <a href="{html.escape(result_path, quote=True)}" target="_blank" rel="noopener">JSON result</a></p>
   <div class="images">
     <figure><img alt="Original input" src="{html.escape(image_path, quote=True)}"><figcaption>Input</figcaption></figure>
-    <figure><img alt="Detected text masked in black" src="{html.escape(masked_path, quote=True)}"><figcaption>Detected regions masked</figcaption></figure>
+    <figure>{_mask_object_html(masked_path, _image_size(entry.image.path))}<figcaption>Detected regions masked</figcaption></figure>
   </div>
   {text_table}
 </article>"""
@@ -914,7 +989,7 @@ def _text_region_row(
 ) -> str:
     clip_path = _relative_url(_text_clip_path(provider_root, image, index), provider_root)
     escaped_clip_path = html.escape(clip_path, quote=True)
-    return f"""<tr>
+    return f"""<tr id="{html.escape(_region_element_id(image, index), quote=True)}">
   <td><a href="{escaped_clip_path}" target="_blank" rel="noopener"><img alt="Detected text {index}" src="{escaped_clip_path}"></a></td>
   <td class="extracted-text notranslate" lang="{html.escape(image.language, quote=True)}" translate="no">{html.escape(text)}</td>
   <td class="confidence">{confidence:.2%}</td>
