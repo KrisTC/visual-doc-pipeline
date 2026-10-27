@@ -118,6 +118,8 @@ This sends the prepared evaluation images, including confidential samples, to Go
 
 By default each run processes at most the first 25 images (after `--include` filtering, in sorted order). Use `--max-images N` to change the cap or `--max-images 0` for no limit. Preparation, cleanup, OCR and each text-replacement provider are shown as stages in the live progress display.
 
+The text-replacement viewer always includes the `identity` and `character_mask` providers. Add one more with `--text-replacement PROVIDER`, for example `argos_translate` or `google_cloud_translate`; the added provider is shown first when the viewer opens. `google_cloud_translate` sends the recognised text, including from confidential samples, to Google Cloud Translation (EU endpoint).
+
 Generate colour-estimation pages:
 
 ```sh

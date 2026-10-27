@@ -23,6 +23,9 @@ from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr.provider import LocalContractTestSkip
 from pipeline.terminal_progress import CurrentProgress
+from pipeline.text_replacement import TextReplacementProviderFactory
+from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
+from pipeline.text_replacement_plugins.identity import IdentityProvider
 from scripts.prepare_ocr_evaluation_inputs import PreparationProgress, PreparationResult
 
 
@@ -419,6 +422,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             Path("outputs/evaluations/ocr/input"),
             Path("outputs/evaluations/ocr/output"),
             ocr_provider_name="google_cloud_vision",
+            text_replacement_provider_name=None,
             include_patterns=("en/*.png", "ja/*.pptx", "en/extra.docx"),
             max_images=25,
         )
@@ -515,10 +519,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             input_root, output_root = _make_images(Path(temporary_directory), 2)
             provider = FakeOcrProvider()
             factory = OcrProviderFactory({"fake": lambda: provider})
-            replacement_names = (
-                ocr_evaluation.TextReplacementProviderFactory.discover_default_plugins()
-                .local_evaluation_provider_names
-            )
+            replacement_names = ocr_evaluation.BASELINE_TEXT_REPLACEMENT_PROVIDERS
             displays: list[RecordingDisplay] = []
 
             with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
@@ -547,10 +548,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             factory = OcrProviderFactory({"fake": lambda: provider})
             ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
             (output_root / "fake" / "text-replacement.html").unlink()
-            replacement_count = len(
-                ocr_evaluation.TextReplacementProviderFactory.discover_default_plugins()
-                .local_evaluation_provider_names
-            )
+            replacement_count = len(ocr_evaluation.BASELINE_TEXT_REPLACEMENT_PROVIDERS)
             displays: list[RecordingDisplay] = []
 
             with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
@@ -813,6 +811,177 @@ class RunOcrEvaluationsTests(unittest.TestCase):
         self.assertIn("default: 25", help_text)
         self.assertIn("0 means no limit", help_text)
 
+    def _replacement_factory(self, created: list[str]) -> TextReplacementProviderFactory:
+        def creator(name: str) -> Callable[[], IdentityProvider]:
+            def create() -> IdentityProvider:
+                created.append(name)
+                return IdentityProvider()
+
+            return create
+
+        names = ("character_mask", "identity", "other", "remote_fake")
+        return TextReplacementProviderFactory(
+            {name: creator(name) for name in names},
+            local_evaluation_eligibility={"other": True, "remote_fake": False},
+        )
+
+    # Verifies FR-2026-10-26-05.
+    def test_default_runs_only_identity_and_character_mask(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            created: list[str] = []
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+
+            ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, factory,
+                text_replacement_factory=self._replacement_factory(created),
+            )
+
+            self.assertEqual(["identity", "character_mask"], created)
+            viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
+            self.assertEqual(
+                ["identity", "character_mask"],
+                re.findall(r"<option [^>]*>([a-z_]+)</option>", viewer),
+            )
+
+    # Verifies FR-2026-10-26-05.
+    def test_requested_provider_runs_last_even_when_not_locally_eligible(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            created: list[str] = []
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+            displays: list[RecordingDisplay] = []
+
+            with patch.object(ocr_evaluation, "LiveProgress", _recording_factory(displays)):
+                ocr_evaluation.evaluate_ocr_inputs(
+                    input_root, output_root, factory,
+                    text_replacement_provider_name="remote_fake",
+                    text_replacement_factory=self._replacement_factory(created),
+                )
+
+            self.assertEqual(["identity", "character_mask", "remote_fake"], created)
+            self.assertEqual(
+                ["Prepare inputs", "OCR"]
+                + [f"Text replacement: {name}" for name in created],
+                displays[0].stage_names(),
+            )
+            viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
+            self.assertEqual(
+                ["identity", "character_mask", "remote_fake"],
+                re.findall(r"<option [^>]*>([a-z_]+)</option>", viewer),
+            )
+            self.assertRegex(viewer, r'<option [^>]*provider-0003\.png" selected>remote_fake<')
+            self.assertIn('src="en/image-01.png.text-replacements/provider-0003.png"', viewer)
+
+    # Verifies FR-2026-10-26-05.
+    def test_naming_a_baseline_provider_runs_it_once_and_selects_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            created: list[str] = []
+            factory = OcrProviderFactory({"fake": FakeOcrProvider})
+
+            ocr_evaluation.evaluate_ocr_inputs(
+                input_root, output_root, factory,
+                text_replacement_provider_name="character_mask",
+                text_replacement_factory=self._replacement_factory(created),
+            )
+
+            self.assertEqual(["identity", "character_mask"], created)
+            viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
+            self.assertRegex(viewer, r'provider-0001\.png" selected>identity<')
+
+    # Verifies FR-2026-10-26-05.
+    def test_unknown_text_replacement_provider_is_rejected_before_any_work(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            ocr_provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: ocr_provider})
+            prepare_calls: list[object] = []
+
+            def prepare(*arguments: object) -> PreparationResult:
+                prepare_calls.append(arguments)
+                return PreparationResult()
+
+            with self.assertRaisesRegex(
+                TextReplacementProviderNotFoundError, "'nope'.*identity"
+            ):
+                ocr_evaluation.prepare_and_evaluate_ocr_inputs(
+                    input_root, output_root, factory, prepare,
+                    text_replacement_provider_name="nope",
+                    text_replacement_factory=self._replacement_factory([]),
+                )
+
+            self.assertEqual([], prepare_calls)
+            self.assertEqual(0, ocr_provider.calls)
+
+    # Verifies FR-2026-10-26-05.
+    def test_command_line_rejects_unknown_text_replacement_provider(self) -> None:
+        error_output = StringIO()
+        with (
+            patch.object(sys, "argv", ["ocr_evaluations.py", "--text-replacement", "nope"]),
+            patch.object(sys, "stderr", error_output),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            ocr_evaluation.parse_arguments()
+        self.assertEqual(2, raised.exception.code)
+        self.assertIn("--text-replacement", error_output.getvalue())
+        self.assertIn("identity", error_output.getvalue())
+
+    # Verifies FR-2026-10-26-05.
+    def test_command_line_accepts_google_cloud_translate_and_help_names_remote_text(self) -> None:
+        with patch.object(
+            sys, "argv", ["ocr_evaluations.py", "--text-replacement", "google_cloud_translate"]
+        ):
+            arguments = ocr_evaluation.parse_arguments()
+        self.assertEqual("google_cloud_translate", arguments.text_replacement)
+
+        output = StringIO()
+        with patch.object(sys, "argv", ["ocr_evaluations.py", "--help"]), redirect_stdout(output):
+            with self.assertRaises(SystemExit):
+                ocr_evaluation.parse_arguments()
+        help_text = " ".join(output.getvalue().split())
+        self.assertIn("--text-replacement PROVIDER", help_text)
+        self.assertIn("sends recognised text to Google", help_text)
+
+    # Verifies FR-2026-10-26-05.
+    def test_changed_provider_set_regenerates_only_replacement_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            ocr_provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: ocr_provider})
+            created: list[str] = []
+            replacement_factory = self._replacement_factory(created)
+
+            def run(requested: str | None) -> None:
+                ocr_evaluation.evaluate_ocr_inputs(
+                    input_root, output_root, factory,
+                    text_replacement_provider_name=requested,
+                    text_replacement_factory=replacement_factory,
+                )
+
+            run(None)
+            self.assertEqual(1, ocr_provider.calls)
+            created.clear()
+
+            run(None)
+            self.assertEqual([], created)
+
+            run("other")
+            self.assertEqual(1, ocr_provider.calls)
+            self.assertEqual(["identity", "character_mask", "other"], created)
+            viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
+            self.assertIn(">other</option>", viewer)
+            created.clear()
+
+            run("other")
+            self.assertEqual([], created)
+
+            run(None)
+            self.assertEqual(["identity", "character_mask"], created)
+            viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
+            self.assertNotIn(">other</option>", viewer)
+            self.assertEqual(1, ocr_provider.calls)
+
     # Verifies FR-2026-08-01-03 and FR-2026-08-02-13.
     def test_generates_visual_artifacts_failure_json_viewer_and_checksum_cache(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -927,12 +1096,13 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 self.assertEqual((60, 50), clip.size)
             replacement_directory = success_base.with_name("success.png.text-replacements")
             self.assertTrue((replacement_directory / "provider-0001.png").is_file())
-            self.assertTrue((replacement_directory / "provider-0004.png").is_file())
+            self.assertTrue((replacement_directory / "provider-0002.png").is_file())
+            self.assertFalse((replacement_directory / "provider-0003.png").exists())
             self.assertTrue(
                 (replacement_directory / "region-0001.provider-0001.png").is_file()
             )
             self.assertTrue(
-                (replacement_directory / "region-0001.provider-0004.png").is_file()
+                (replacement_directory / "region-0001.provider-0002.png").is_file()
             )
             self.assertFalse(
                 (replacement_directory / "region-0002.provider-0001.png").exists()
@@ -977,8 +1147,9 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             )
             self.assertIn("<th>Region</th><th>Original text image</th>", replacement_viewer)
             self.assertIn("character_mask", replacement_viewer)
-            self.assertIn("double_character_mask", replacement_viewer)
-            self.assertIn("half_character_mask", replacement_viewer)
+            self.assertNotIn("double_character_mask", replacement_viewer)
+            self.assertNotIn("half_character_mask", replacement_viewer)
+            self.assertNotIn("argos_translate", replacement_viewer)
             self.assertIn("identity", replacement_viewer)
             self.assertIn("Language: en→en.", replacement_viewer)
             self.assertIn('data-replacement-preview="replacement-preview-', replacement_viewer)
@@ -1009,7 +1180,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 "collection/en/nested/success.png.text-replacements/provider-0001.png"
             )
             self.assertIn(
-                f'<option value="{first_preview_path}">argos_translate</option>',
+                f'<option value="{first_preview_path}" selected>identity</option>',
                 replacement_viewer,
             )
             self.assertIn(

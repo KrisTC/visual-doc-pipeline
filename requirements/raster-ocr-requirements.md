@@ -446,7 +446,7 @@ Automated tests shall use synthetic images and fonts only; they shall not use sa
 
 ### Description
 
-For every successful OCR image evaluation, the OCR-evaluation command shall run a text-replacement artifact stage after writing the current OCR artifacts. The stage shall use the current evaluation's original image, `OcrText` items, and source language. It shall use target language `en`, estimate the colours of every text region, and apply the replacement from every registered text-replacement provider to one image copy per provider. Each provider image shall receive all of its replacements successively, allowing the in-place renderer to produce a complete updated image.
+For every successful OCR image evaluation, the OCR-evaluation command shall run a text-replacement artifact stage after writing the current OCR artifacts. The stage shall use the current evaluation's original image, `OcrText` items, and source language. It shall use target language `en`, estimate the colours of every text region, and apply the replacement from each selected text-replacement provider (FR-2026-10-26-05) to one image copy per provider. Each provider image shall receive all of its replacements successively, allowing the in-place renderer to produce a complete updated image.
 
 The stage shall create a new generated text-replacement artifact directory alongside the current image artifacts. It shall contain one complete updated PNG per text-replacement provider and a clipped replacement bitmap for every eligible region/provider combination. It shall retain the original padded OCR clip as the table's original-text image.
 
@@ -454,7 +454,7 @@ The text-replacement stage and its report shall skip each OCR text region whose 
 
 The OCR artifact stage and text-replacement artifact stage shall have independent cache freshness markers. A missing or stale OCR viewer or OCR cache marker shall regenerate OCR and all dependent artifacts. A current OCR artifact set with a missing or stale text-replacement viewer or text-replacement cache marker shall retain the saved OCR JSON and OCR artifacts, then regenerate only the text-replacement artifacts and report without calling the OCR provider.
 
-The existing provider-root static OCR viewer shall remain unchanged, except as amended by FR-2026-10-26-02. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every registered provider. The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region SVG mask (FR-2026-10-26-02) as its final option. The initial selected option and displayed image shall both be the first registered provider.
+The existing provider-root static OCR viewer shall remain unchanged, except as amended by FR-2026-10-26-02. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every provider that ran (FR-2026-10-26-05). The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region SVG mask (FR-2026-10-26-02) as its final option. The initial selected option and displayed image shall both be the first registered provider, as amended by FR-2026-10-26-05.
 
 Every successful OCR-result JSON file shall include a top-level `source_language` BCP 47 string, equal to the language used in that image's OCR request. Failed JSON results shall remain status-only. The viewer shall display the resulting source-to-target language direction beside each successful OCR result, initially as `source_language→en`.
 
@@ -802,7 +802,7 @@ Automated tests shall use synthetic images and a mocked Google client. They shal
 
 An explicit `--ocr google_cloud_vision` run shall process every eligible image selected for the run, including confidential samples when selected, through the Cloud Vision provider under SR-2026-10-24-01. The command help and developer documentation shall state that this selection sends image content to Google. The evaluator shall send no source paths, filenames, metadata, evaluation artifacts, or extracted text to Cloud Vision.
 
-The automatic run shall not instantiate `google_cloud_vision` or make a Vision API call. The explicit run shall not evaluate other OCR providers. It shall continue using only locally eligible text-replacement providers for the post-OCR artifact stage.
+The automatic run shall not instantiate `google_cloud_vision` or make a Vision API call. The explicit run shall not evaluate other OCR providers. The post-OCR text-replacement stage uses the providers selected under FR-2026-10-26-05.
 
 ### Rationale
 
@@ -1081,5 +1081,62 @@ Automated tests shall use synthetic source trees and fake OCR providers. They sh
 - that the limit applies to an explicitly selected `google_cloud_vision` fake provider.
 
 Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-05
+
+| Property | Value |
+|----------|-------|
+| Title | Select the text-replacement provider run by OCR evaluation |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-02-13, FR-2026-10-24-02, FR-2026-10-26-03, SR-2026-08-24-01 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall no longer run every locally eligible text-replacement provider. Its text-replacement artifact stage (FR-2026-08-02-13) shall always run the `identity` and `character_mask` providers, in that order, and shall run no other provider unless one is requested.
+
+The command shall accept an optional `--text-replacement PROVIDER` option that names one further registered text-replacement provider. The option shall accept any registered provider other than `identity` and `character_mask`, including `argos_translate`, `double_character_mask`, `half_character_mask`, and `google_cloud_translate`. The `google_cloud_translate` provider shall be selectable by this option even though it declares `LOCAL_EVALUATION_ELIGIBLE = False`, because the option is an explicit user selection. The option may be given at most once. Naming `identity` or `character_mask` shall not be an error and shall not run that provider twice. An unregistered name shall be rejected as a command-line error that names the option and lists the registered provider names, before any preparation, OCR, or provider call begins.
+
+When the option is absent, the command shall run exactly `identity` and `character_mask`. When it is present, the command shall run `identity`, `character_mask`, and the named provider, in that order. The `LOCAL_EVALUATION_ELIGIBLE` flag shall no longer decide which providers the evaluator runs.
+
+The text-replacement viewer, its dropdown, and its table (FR-2026-08-02-13) shall list exactly the providers that ran, in run order, with the detected-region mask option last. The initially selected option and displayed image shall be the provider named by `--text-replacement` when it is neither baseline provider, and `identity` otherwise. This amends the "first registered provider" initial selection in FR-2026-08-02-13.
+
+The text-replacement stages of the progress display (FR-2026-10-26-03) shall be one stage per provider that runs, so the number of such stages shall be two or three.
+
+An explicit `--text-replacement google_cloud_translate` run shall send the recognised text of the selected images, including confidential samples when selected, to Google Cloud Translation under SR-2026-08-24-01 and the provider's own data boundary. It shall send no source paths, filenames, metadata, or evaluation artifacts. The command help and developer documentation shall state that this selection sends recognised text to Google. A run that does not name `google_cloud_translate` shall not instantiate it or make a Translation API call.
+
+The text-replacement freshness marker (FR-2026-08-02-13) shall record the ordered provider names that produced the artifacts, in addition to the input checksum. A provider root whose OCR artifacts are current but whose recorded provider set differs from the requested provider set shall be treated as having stale text-replacement artifacts. The command shall regenerate only the text-replacement artifacts for that root, reusing the saved OCR JSON, and shall not call the OCR provider. Changing or removing `--text-replacement` shall therefore never leave a viewer that lists providers which did not run. The text-replacement artifact format version shall change accordingly.
+
+### Rationale
+
+The set of providers shown in the evaluation was growing, and the slowest, `argos_translate`, was run and shown first on every evaluation. `identity` and `character_mask` are cheap, local and deterministic, so they make a fast, useful baseline. A translation provider can then be chosen deliberately for the run, in the same way as an OCR provider is chosen with `--ocr`.
+
+### Notes
+
+`google_cloud_translate` is reachable only through an explicit selection, which matches the opt-in treatment of `google_cloud_vision` in FR-2026-10-24-02. Its EU endpoint restriction and credential rules are unchanged (see `google-cloud-translation-requirements.md` and SR-2026-08-24-01).
+
+`double_character_mask` and `half_character_mask` remain registered providers and remain available through this option, but they no longer run by default. The `LOCAL_EVALUATION_ELIGIBLE` flag stays on the plugins. It remains a plugin property read by other consumers, but this command no longer reads it.
+
+Only one provider can be added per run. Comparing more than one additional provider needs separate runs, which regenerate the text-replacement artifacts each time and reuse the saved OCR output.
+
+### Verification
+
+Automated tests shall use synthetic images, a fake OCR provider, and fake text-replacement providers or the local deterministic providers. They shall verify:
+
+- that no option runs exactly `identity` and `character_mask`, in that order, and no other registered provider is instantiated or called;
+- that `--text-replacement` with a registered provider runs that provider after the two baselines, and that this includes a fake provider that declares `LOCAL_EVALUATION_ELIGIBLE = False`;
+- that naming `identity` or `character_mask` runs it once;
+- that an unregistered name is rejected before preparation or any provider call, with the option and the registered names in the message;
+- that the viewer lists exactly the providers that ran, with the additional provider initially selected, and `identity` initially selected when none or a baseline provider was requested;
+- that the progress display has one text-replacement stage per provider that ran;
+- that changing the requested provider with unchanged input and a current OCR cache regenerates the text-replacement artifacts without calling the OCR provider, and that an unchanged provider set skips that regeneration;
+- that `google_cloud_translate` is not instantiated unless named; and
+- that the command help identifies the remote-text boundary.
+
+Tests shall not contact Google, require credentials, or use confidential samples or derived artifacts.
 
 ---

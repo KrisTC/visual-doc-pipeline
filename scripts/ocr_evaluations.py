@@ -49,6 +49,7 @@ from pipeline.text_replacement import (
     TextReplacementProviderFactory,
     replace_text,
 )
+from pipeline.text_replacement.errors import TextReplacementProviderNotFoundError
 from scripts.prepare_ocr_evaluation_inputs import (
     PreparationProgress,
     PreparationResult,
@@ -68,7 +69,8 @@ TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "10"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "11"
+BASELINE_TEXT_REPLACEMENT_PROVIDERS = ("identity", "character_mask")
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
 MAXIMUM_PROGRESS_LABEL_LENGTH = 44
@@ -179,12 +181,28 @@ def input_tree_checksum(
     return digest.hexdigest()
 
 
+def text_replacement_provider_names(
+    factory: TextReplacementProviderFactory, requested_name: str | None
+) -> tuple[str, ...]:
+    """Return the baseline providers plus the optional requested provider, in run order."""
+    if requested_name is not None and requested_name not in factory.provider_names:
+        raise TextReplacementProviderNotFoundError(
+            f"No text-replacement provider is registered under {requested_name!r}. "
+            f"Registered providers: {', '.join(factory.provider_names)}."
+        )
+    if requested_name is None or requested_name in BASELINE_TEXT_REPLACEMENT_PROVIDERS:
+        return BASELINE_TEXT_REPLACEMENT_PROVIDERS
+    return (*BASELINE_TEXT_REPLACEMENT_PROVIDERS, requested_name)
+
+
 def evaluate_ocr_inputs(
     input_root: Path,
     output_root: Path,
     factory: OcrProviderFactory | None = None,
     *,
     ocr_provider_name: str | None = None,
+    text_replacement_provider_name: str | None = None,
+    text_replacement_factory: TextReplacementProviderFactory | None = None,
     selected_image_paths: tuple[Path, ...] | None = None,
     max_images: int = DEFAULT_MAX_IMAGES,
     display: LiveProgress | None = None,
@@ -195,16 +213,24 @@ def evaluate_ocr_inputs(
     stage active and an indeterminate overall row) passes it; otherwise this
     function runs its own display.
     """
+    replacement_factory = (
+        text_replacement_factory or TextReplacementProviderFactory.discover_default_plugins()
+    )
+    replacement_names = text_replacement_provider_names(
+        replacement_factory, text_replacement_provider_name
+    )
     if display is not None:
         return _evaluate_stages(
             display, input_root, output_root, factory,
             ocr_provider_name, selected_image_paths, max_images,
+            replacement_factory, replacement_names,
         )
     with LiveProgress() as own_display:
         _start_prepare_stage(own_display)
         return _evaluate_stages(
             own_display, input_root, output_root, factory,
             ocr_provider_name, selected_image_paths, max_images,
+            replacement_factory, replacement_names,
         )
 
 
@@ -235,6 +261,8 @@ def _evaluate_stages(
     ocr_provider_name: str | None,
     selected_image_paths: tuple[Path, ...] | None,
     max_images: int,
+    text_replacement_factory: TextReplacementProviderFactory,
+    replacement_provider_names: tuple[str, ...],
 ) -> EvaluationRunResult:
     """Finish Prepare inputs, then run the cleanup, OCR, and text-replacement stages."""
     if selected_image_paths == ():
@@ -242,7 +270,6 @@ def _evaluate_stages(
     prepare_progress = _PrepareStageProgress(display)
     prepare_progress.start_step("Loading plugins", None)
     provider_factory = factory or OcrProviderFactory.discover_default_plugins()
-    text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
     result = EvaluationRunResult()
 
     prepare_progress.start_step("Discovering", None)
@@ -280,12 +307,13 @@ def _evaluate_stages(
         else:
             providers_to_run.append((provider_name, provider_root))
         # Regenerating OCR output removes the provider root, and so its replacement artifacts.
-        if not ocr_is_current or not _text_replacement_output_is_current(provider_root, checksum):
+        if not ocr_is_current or not _text_replacement_output_is_current(
+            provider_root, checksum, replacement_provider_names
+        ):
             replacement_roots.append(provider_root)
 
-    replacement_provider_names = (
-        text_replacement_factory.local_evaluation_provider_names if replacement_roots else ()
-    )
+    if not replacement_roots:
+        replacement_provider_names = ()
     roots_to_remove = [
         (provider_name, provider_root)
         for provider_name, provider_root in providers_to_run
@@ -400,10 +428,17 @@ def prepare_and_evaluate_ocr_inputs(
     ] = prepare_evaluation_inputs,
     *,
     ocr_provider_name: str | None = None,
+    text_replacement_provider_name: str | None = None,
+    text_replacement_factory: TextReplacementProviderFactory | None = None,
     include_patterns: tuple[str, ...] = (),
     max_images: int = DEFAULT_MAX_IMAGES,
 ) -> EvaluationRunResult:
     """Prepare the standard sample corpus, then evaluate the resulting input images."""
+    # Reject an unknown text-replacement provider before any preparation work starts.
+    replacement_factory = (
+        text_replacement_factory or TextReplacementProviderFactory.discover_default_plugins()
+    )
+    text_replacement_provider_names(replacement_factory, text_replacement_provider_name)
     with LiveProgress() as display:
         _start_prepare_stage(display)
         preparation = prepare_inputs(
@@ -415,6 +450,8 @@ def prepare_and_evaluate_ocr_inputs(
             output_root,
             factory,
             ocr_provider_name=ocr_provider_name,
+            text_replacement_provider_name=text_replacement_provider_name,
+            text_replacement_factory=replacement_factory,
             selected_image_paths=selected_image_paths,
             max_images=max_images,
             display=display,
@@ -458,7 +495,14 @@ def _artifact_format_version(provider_name: str) -> str:
     )
 
 
-def _text_replacement_output_is_current(provider_root: Path, checksum: str) -> bool:
+def _text_replacement_marker(checksum: str, provider_names: tuple[str, ...]) -> str:
+    """Identify the input and the ordered providers that produced replacement artifacts."""
+    return f"{checksum} {','.join(provider_names)}"
+
+
+def _text_replacement_output_is_current(
+    provider_root: Path, checksum: str, provider_names: tuple[str, ...]
+) -> bool:
     """Return whether the independent text-replacement artifact stage is current."""
     checksum_path = provider_root / TEXT_REPLACEMENT_CHECKSUM_FILENAME
     version_path = provider_root / TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME
@@ -466,7 +510,8 @@ def _text_replacement_output_is_current(provider_root: Path, checksum: str) -> b
         provider_root.is_dir()
         and (provider_root / TEXT_REPLACEMENT_VIEWER_FILENAME).is_file()
         and checksum_path.is_file()
-        and checksum_path.read_text(encoding="ascii").strip() == checksum
+        and checksum_path.read_text(encoding="ascii").strip()
+        == _text_replacement_marker(checksum, provider_names)
         and version_path.is_file()
         and version_path.read_text(encoding="ascii").strip()
         == TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION
@@ -757,7 +802,7 @@ def _write_text_replacement_report(
         )
     _write_text_replacement_viewer(provider_root, entries, replacement_provider_names)
     (provider_root / TEXT_REPLACEMENT_CHECKSUM_FILENAME).write_text(
-        f"{checksum}\n", encoding="ascii"
+        f"{_text_replacement_marker(checksum, replacement_provider_names)}\n", encoding="ascii"
     )
     (provider_root / TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
         f"{TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION}\n", encoding="ascii"
@@ -1064,9 +1109,15 @@ def _replacement_viewer_entry_html(
         )
         for provider_index in range(1, len(replacement_provider_names) + 1)
     )
+    initial_index = len(preview_sources) - 1 if len(preview_sources) > len(
+        BASELINE_TEXT_REPLACEMENT_PROVIDERS
+    ) else 0
     provider_options = "".join(
-        f'<option value="{html.escape(source, quote=True)}">{html.escape(provider_name)}</option>'
-        for provider_name, source in zip(replacement_provider_names, preview_sources, strict=True)
+        f'<option value="{html.escape(source, quote=True)}"'
+        f'{" selected" if index == initial_index else ""}>{html.escape(provider_name)}</option>'
+        for index, (provider_name, source) in enumerate(
+            zip(replacement_provider_names, preview_sources, strict=True)
+        )
     )
     options = (
         f"{provider_options}"
@@ -1087,7 +1138,7 @@ def _replacement_viewer_entry_html(
   <tbody>{rows}</tbody>
 </table>"""
     )
-    first_preview = preview_sources[0] if preview_sources else ""
+    first_preview = preview_sources[initial_index] if preview_sources else ""
     return f"""<article>
   <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}→en. Status: succeeded.</p>
   <div class="top-previews">
@@ -1217,6 +1268,15 @@ def parse_arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--text-replacement",
+        metavar="PROVIDER",
+        help=(
+            "Also run this text-replacement provider after the always-run identity and "
+            "character_mask providers. Selecting google_cloud_translate sends recognised "
+            "text to Google."
+        ),
+    )
+    parser.add_argument(
         "--include",
         action="append",
         default=[],
@@ -1244,6 +1304,12 @@ def parse_arguments() -> argparse.Namespace:
         arguments.include_patterns = parse_include_patterns(arguments.include)
     except ValueError as error:
         parser.error(str(error))
+    try:
+        text_replacement_provider_names(
+            TextReplacementProviderFactory.discover_default_plugins(), arguments.text_replacement
+        )
+    except TextReplacementProviderNotFoundError as error:
+        parser.error(f"argument --text-replacement: {error}")
     return arguments
 
 
@@ -1259,10 +1325,11 @@ def main() -> int:
             arguments.input_root,
             arguments.output_root,
             ocr_provider_name=arguments.ocr,
+            text_replacement_provider_name=arguments.text_replacement,
             include_patterns=arguments.include_patterns,
             max_images=arguments.max_images,
         )
-    except OcrProviderNotFoundError as error:
+    except (OcrProviderNotFoundError, TextReplacementProviderNotFoundError) as error:
         print(str(error), file=sys.stderr)
         return 2
     print(
