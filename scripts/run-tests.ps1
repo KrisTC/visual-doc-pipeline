@@ -4,5 +4,5 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $projectRoot
 
-& (Join-Path $projectRoot 'run.ps1') -m unittest discover -s (Join-Path $projectRoot 'tests') -p 'test_*.py'
+& (Join-Path $projectRoot 'run.ps1') (Join-Path $projectRoot 'scripts\run_tests.py') @args
 exit $LASTEXITCODE

@@ -34,6 +34,8 @@ gpu = [
 [dependency-groups]
 dev = [
     "mypy",
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "types-openpyxl",
 ]
 
@@ -72,3 +74,9 @@ python_version = "3.13"
 strict = true
 disallow_any_explicit = true
 warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -p no:cacheprovider"
+verbosity_subtests = 2

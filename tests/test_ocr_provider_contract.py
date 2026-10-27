@@ -13,6 +13,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pipeline.ocr.factory import OcrProviderFactory
 from pipeline.ocr.models import OcrRequest, OcrText
 from pipeline.ocr.provider import LocalContractTestCase, OcrProvider
+from slow_test_support import slow_test
 
 FONT_DIRECTORY = Path(__file__).parent / "assets" / "fonts"
 SYNTHETIC_TEXT_CASES = (
@@ -64,6 +65,7 @@ COLOR_COMBINATIONS = (
 
 class OcrProviderContractTests(unittest.TestCase):
     # Verifies FR-2026-08-01-02.
+    @slow_test
     def test_eligible_providers_recognize_their_synthetic_languages(self) -> None:
         factory = OcrProviderFactory.discover_default_plugins()
         executed_cases = 0

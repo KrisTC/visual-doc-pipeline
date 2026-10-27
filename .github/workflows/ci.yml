@@ -50,7 +50,7 @@ jobs:
       - name: Run automated tests
         env:
           VISUAL_DOC_PIPELINE_UV_EXTRA: cpu
-        run: scripts/run-tests.sh
+        run: scripts/run-tests.sh --serial
 
   oci-build:
     name: OCI build

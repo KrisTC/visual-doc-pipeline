@@ -56,11 +56,26 @@ Validate the dependency policy:
 ./run.sh scripts/check-dependency-policy.py
 ```
 
-Run the automated test suite:
+Run the automated test suite. By default it runs in parallel with `pytest` and
+`pytest-xdist`, using `max(1, cores - 2)` workers:
 
 ```sh
-scripts/run-tests.sh
+scripts/run-tests.sh            # Windows: .\scripts\run-tests.ps1
 ```
+
+Options handled by the runner:
+
+| Option | Effect |
+|---|---|
+| `--serial` | Run in one process with `unittest` discovery, the reference mode for reproducing a failure. CI uses this. |
+| `--fast` | Skip tests marked `@slow_test` (`tests/slow_test_support.py`); they are reported as skipped. Use it while iterating; run without it before finishing. |
+| `--workers N` | Set the parallel worker count. |
+
+Any other argument is passed to `pytest`, or to `unittest` with `--serial`, for
+example `scripts/run-tests.sh -k name_pattern --durations 20` or
+`scripts/run-tests.sh --serial -v`. Each tool has its own options; `pytest`
+accepts file paths and `-k` expressions, whereas `unittest discover` accepts
+`-k` patterns and `--durations`.
 
 Type-check Python:
 
