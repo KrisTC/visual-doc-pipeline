@@ -7,7 +7,7 @@ provider: the texts travel through a translation engine in between.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from io import BytesIO
 from pathlib import Path
 
@@ -44,6 +44,8 @@ class BitmapPlan:
     regions: list[tuple[OcrText, TextRegionColourEstimate]]
     unit_id: str = BITMAP_UNIT_ID
     page_colour: RgbColour = DEFAULT_OCR_BACKGROUND
+    # Debug-sidecar entries for regions the last apply left unchanged because the text did not fit.
+    skipped_regions: list[dict[str, object]] = field(default_factory=list)
 
     def units(self) -> Iterator[TextUnit]:
         """Yield this image's single unit with one text per region, in OCR order."""
@@ -93,10 +95,21 @@ def apply_bitmap(
         TextRegionReplacement(region, colours, translate(region.text).text)
         for region, colours in plan.regions
     ]
-    replace_text_regions(plan.image, prepared, typeface, target_language, plan.page_colour)
+    skipped = replace_text_regions(plan.image, prepared, typeface, target_language, plan.page_colour)
+    plan.skipped_regions = [
+        {
+            "kind": "skipped",
+            "reason_code": "bitmap_replacement_text_does_not_fit",
+            "region_index": region.index,
+            "region_width_pixels": round(region.width, 2),
+            "region_height_pixels": round(region.height, 2),
+            "replacement_characters": len(prepared[region.index].replacement_text),
+        }
+        for region in skipped
+    ]
     if nested_completed is not None:
         nested_completed("render replacement image")
-    return len(prepared)
+    return len(prepared) - len(skipped)
 
 
 def plan_bitmap_file(

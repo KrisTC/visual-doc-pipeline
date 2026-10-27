@@ -467,6 +467,10 @@ def apply_docx(
                 changed[name] = outcome.data
                 native_items += outcome.native_items
                 image_regions += outcome.image_regions
+                if diagnostics is not None:
+                    diagnostics.extend(
+                        {**entry, "location": {"package_part": name}} for entry in outcome.diagnostics
+                    )
                 if outcome.vector_result is not None:
                     vector_results.append((name, outcome.vector_result))
             ticker.tick(name, "image" if is_office_bitmap_part(name) else "vector graphic")

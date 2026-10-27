@@ -210,6 +210,43 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
                 ]
                 self.assertEqual(255, max(replacement_alpha))
 
+    # Verifies FR-2026-10-27-02.
+    def test_embedded_docx_bitmap_skip_is_recorded_with_its_package_part(self) -> None:
+        class _TinyRegionOcrProvider(_EmptyOcrProvider):
+            def recognize(self, request: OcrRequest) -> OcrResult:
+                polygon = BoundingPolygon(
+                    (PixelPoint(10, 10), PixelPoint(13, 10), PixelPoint(13, 13), PixelPoint(10, 13))
+                )
+                return OcrResult((OcrText("xqzv", 0.99, polygon),))
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            image_data = BytesIO()
+            Image.new("RGB", (120, 40), "white").save(image_data, "PNG")
+            with ZipFile(input_root / "embedded.docx", "w", ZIP_DEFLATED) as archive:
+                archive.writestr("word/media/image1.png", image_data.getvalue())
+
+            result = self._run(
+                input_root,
+                output_root,
+                _TinyRegionOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="Internationalisation" * 3),
+                diagnostics_enabled=True,
+            )
+
+            self.assertEqual(0, result.failed_files)
+            report = json.loads((output_root / "embedded.docx.diagnostics.json").read_text("utf-8"))
+            skipped = [
+                entry
+                for entry in report["entries"]
+                if entry.get("reason_code") == "bitmap_replacement_text_does_not_fit"
+            ]
+            self.assertEqual(1, len(skipped))
+            self.assertEqual({"package_part": "word/media/image1.png"}, skipped[0]["location"])
+
     # Verifies FR-2026-08-22-02.
     def test_include_patterns_select_relative_supported_paths(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -613,6 +650,132 @@ class FolderReplacementCommonTests(FolderReplacementTestCase):
             self.assertTrue((output_root / "same.png").is_file())
             self.assertTrue((output_root / "same (2).png").is_file())
             self.assertFalse((output_root / "ignore.txt.diagnostics.json").exists())
+
+    # Verifies FR-2026-10-27-01.
+    def test_sanitises_translated_output_filenames_for_windows(self) -> None:
+        cases = {
+            "Title: Subtitle.png": "Title- Subtitle.png",
+            "A<>:\"|?*B.png": "A-B.png",
+            "A  \t B.png": "A - B.png",
+            "Name . .png": "Name.png",
+            "  Lead.png": "Lead.png",
+            "con.png": "_con.png",
+            "COM1.png": "_COM1.png",
+            "Console.png": "Console.png",
+            "???.png": "-.png",
+            ". .png": "source.png",
+            "Valid name.png": "Valid name.png",
+            "Version 1.2: Plan": "Version 1.2- Plan.png",
+        }
+        for translated, expected in cases.items():
+            with self.subTest(translated=translated), TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                input_root = root / "input"
+                output_root = root / "output"
+                input_root.mkdir()
+                self._write_png(input_root / "source.png")
+
+                result = self._run(
+                    input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider(translated)
+                )
+
+                self.assertEqual(0, result.failed_files)
+                self.assertTrue((output_root / expected).is_file())
+                progress = json.loads((output_root / "progress.json").read_text(encoding="utf-8"))
+                self.assertIn("source.png", progress["files"])
+
+    # Verifies FR-2026-10-27-01.
+    def test_sanitised_output_filenames_that_collide_are_numbered(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            self._write_png(input_root / "first.png")
+            self._write_png(input_root / "second.png")
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider("A:B.png")
+            )
+
+            self.assertEqual(0, result.failed_files)
+            self.assertTrue((output_root / "A-B.png").is_file())
+            self.assertTrue((output_root / "A-B (2).png").is_file())
+
+    # Verifies FR-2026-10-27-01.
+    def test_path_separators_in_translated_filenames_are_still_rejected(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            output_root = root / "output"
+            input_root.mkdir()
+            self._write_png(input_root / "source.png")
+
+            result = self._run(
+                input_root, output_root, _EmptyOcrProvider(), _RecordingReplacementProvider("a/b.png")
+            )
+
+            self.assertEqual(1, result.failed_files)
+
+    # Verifies FR-2026-10-27-02.
+    def test_bitmap_region_whose_text_cannot_fit_is_skipped_without_failing_the_document(self) -> None:
+        class _TwoRegionOcrProvider(_EmptyOcrProvider):
+            def recognize(self, request: OcrRequest) -> OcrResult:
+                def region(text: str, left: int, top: int, right: int, bottom: int) -> OcrText:
+                    return OcrText(
+                        text,
+                        0.99,
+                        BoundingPolygon(
+                            (
+                                PixelPoint(left, top),
+                                PixelPoint(right, top),
+                                PixelPoint(right, bottom),
+                                PixelPoint(left, bottom),
+                            )
+                        ),
+                    )
+
+                return OcrResult((region("fits", 5, 5, 95, 35), region("xqzv", 110, 10, 113, 13)))
+
+        long_word = "Internationalisation" * 3
+        for diagnostics_enabled in (False, True):
+            with self.subTest(diagnostics_enabled=diagnostics_enabled), TemporaryDirectory() as directory:
+                root = Path(directory)
+                input_root = root / "input"
+                output_root = root / "output"
+                input_root.mkdir()
+                Image.new("RGB", (120, 40), "white").save(input_root / "sample.png", "PNG")
+
+                result = self._run(
+                    input_root,
+                    output_root,
+                    _TwoRegionOcrProvider(),
+                    _RecordingReplacementProvider(replacement_text=long_word),
+                    diagnostics_enabled=diagnostics_enabled,
+                )
+
+                self.assertEqual(1, result.processed_files)
+                self.assertEqual(0, result.failed_files)
+                self.assertEqual(1, result.replaced_image_regions)
+                self.assertTrue((output_root / "sample.png").is_file())
+                sidecar = output_root / "sample.png.diagnostics.json"
+                if not diagnostics_enabled:
+                    self.assertFalse(sidecar.exists())
+                    continue
+                text = sidecar.read_text("utf-8")
+                skipped = [
+                    entry
+                    for entry in json.loads(text)["entries"]
+                    if entry.get("reason_code") == "bitmap_replacement_text_does_not_fit"
+                ]
+                self.assertEqual(1, len(skipped))
+                self.assertEqual("skipped", skipped[0]["kind"])
+                self.assertEqual(1, skipped[0]["region_index"])
+                self.assertEqual(3.0, skipped[0]["region_width_pixels"])
+                self.assertEqual(3.0, skipped[0]["region_height_pixels"])
+                self.assertEqual(len(long_word), skipped[0]["replacement_characters"])
+                self.assertNotIn(long_word, text)
+                self.assertNotIn("xqzv", text)
 
     # Verifies FR-2026-08-03-03.
     def test_replaces_office_native_text_in_word_drawing_and_spreadsheet_parts(self) -> None:

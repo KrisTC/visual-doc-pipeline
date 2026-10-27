@@ -104,6 +104,19 @@ class TextRegionReplacement:
     replacement_text: str
 
 
+@dataclass(frozen=True, slots=True)
+class SkippedTextRegion:
+    """A region left unchanged because its replacement could not fit at any size."""
+
+    index: int
+    width: float
+    height: float
+
+
+class TextDoesNotFitError(ValueError):
+    """Replacement text cannot fit a region even at a one-pixel font size."""
+
+
 def replace_text_region(
     image: Image.Image,
     text_region: OcrText,
@@ -190,24 +203,31 @@ def replace_text_regions(
     typeface: skia.Typeface,
     target_language: str,
     page_colour: RgbColour = DEFAULT_OCR_BACKGROUND,
-) -> None:
+) -> tuple[SkippedTextRegion, ...]:
     """Replace every supplied region in two passes using one shared Skia surface.
 
     The first pass wipes every region's estimated background. The second draws
     every replacement, in the supplied order. The supplied Pillow image is
     modified directly and no caller-owned image copy is required. ``page_colour``
     is what shows through a transparent background.
+
+    A region whose replacement cannot fit at any font size down to one pixel is
+    skipped: its original pixels are left untouched, with no wipe and no text.
+    The skipped regions are returned in the supplied order.
     """
     _validate_image(image)
     _validate_target_language(target_language)
     if not replacements:
-        return
-    _draw_on_image(
-        image,
-        lambda canvas: _replace_text_regions_on_canvas(
-            canvas, replacements, typeface, page_colour
-        ),
-    )
+        return ()
+    skipped: list[SkippedTextRegion] = []
+
+    def draw(canvas: skia.Canvas) -> None:
+        skipped.extend(
+            _replace_text_regions_on_canvas(canvas, replacements, typeface, page_colour)
+        )
+
+    _draw_on_image(image, draw)
+    return tuple(skipped)
 
 
 def _replace_text_regions_on_canvas(
@@ -215,23 +235,34 @@ def _replace_text_regions_on_canvas(
     replacements: Sequence[TextRegionReplacement],
     typeface: skia.Typeface,
     page_colour: RgbColour,
-) -> None:
-    """Perform background then foreground replacement passes on one canvas."""
-    for replacement in replacements:
+) -> list[SkippedTextRegion]:
+    """Perform background then foreground passes, skipping regions that cannot fit."""
+    skipped: list[SkippedTextRegion] = []
+    kept: list[tuple[TextRegionReplacement, _RenderPlan | None]] = []
+    # Plans are chosen before any wipe so a skipped region keeps its original pixels.
+    for index, replacement in enumerate(replacements):
+        polygon = replacement.text_region.bounding_polygon
+        render_plan: _RenderPlan | None = None
+        if replacement.replacement_text:
+            try:
+                render_plan = _select_render_plan(replacement.replacement_text, typeface, polygon)
+            except TextDoesNotFitError:
+                frame = _region_frame(polygon)
+                skipped.append(SkippedTextRegion(index, frame.width, frame.height))
+                continue
+        kept.append((replacement, render_plan))
+    for replacement, _ in kept:
         _wipe_background(
             canvas,
             _polygon_path(replacement.text_region.bounding_polygon),
             replacement.colour_estimate.background_colour,
         )
-    for replacement in replacements:
-        _render_replacement_text_on_canvas(
-            canvas,
-            replacement.text_region,
-            replacement.colour_estimate,
-            replacement.replacement_text,
-            typeface,
-            page_colour,
-        )
+    for replacement, render_plan in kept:
+        if render_plan is not None:
+            _draw_render_plan(
+                canvas, replacement.text_region, replacement.colour_estimate, render_plan, page_colour
+            )
+    return skipped
 
 
 def _render_replacement_text_on_canvas(
@@ -245,13 +276,26 @@ def _render_replacement_text_on_canvas(
     """Render one replacement without modifying pixels outside its text polygon."""
     if not replacement_text:
         return
-    path = _polygon_path(text_region.bounding_polygon)
-    render_plan = _select_render_plan(
-        replacement_text, typeface, text_region.bounding_polygon
-    )
+    try:
+        render_plan = _select_render_plan(
+            replacement_text, typeface, text_region.bounding_polygon
+        )
+    except TextDoesNotFitError:
+        return
+    _draw_render_plan(canvas, text_region, colour_estimate, render_plan, page_colour)
+
+
+def _draw_render_plan(
+    canvas: skia.Canvas,
+    text_region: OcrText,
+    colour_estimate: TextRegionColourEstimate,
+    render_plan: _RenderPlan,
+    page_colour: RgbColour,
+) -> None:
+    """Draw one selected plan clipped to its text polygon."""
     _draw_layout(
         canvas,
-        path,
+        _polygon_path(text_region.bounding_polygon),
         render_plan,
         _render_text_colour(
             colour_estimate.text_colour, colour_estimate.background_colour, page_colour
@@ -475,7 +519,7 @@ def _fit_text(
             if accepts_layout is None or accepts_layout(layout):
                 return layout
     message = "Replacement text could not fit the OCR region at a one-pixel font size."
-    raise ValueError(message)
+    raise TextDoesNotFitError(message)
 
 
 def _select_render_plan(
@@ -488,7 +532,10 @@ def _select_render_plan(
     medium_typeface = _typeface_with_weight(typeface, SMALL_FONT_WEIGHT)
     if medium_typeface is None:
         return render_plan
-    return _select_render_plan_for_typeface(text, medium_typeface, polygon)
+    try:
+        return _select_render_plan_for_typeface(text, medium_typeface, polygon)
+    except TextDoesNotFitError:
+        return render_plan
 
 
 def _select_render_plan_for_typeface(

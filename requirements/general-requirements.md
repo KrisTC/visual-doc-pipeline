@@ -2054,3 +2054,45 @@ An owner file has a document extension but holds only a short user and machine n
 Automated tests shall use synthetic input folders only. For folder replacement, they shall verify that a `~$`-prefixed `.docx`, `.xlsx` and `.pptx` file, at the input root and in a subfolder, produces no output file, no failure, a zero exit status, a `skipped` progress entry and no contribution to the overall total; that a similarly named file without the `~$` prefix, and a file below a `~$`-prefixed directory, are still processed; and that the skip applies when an include pattern matches the owner file. For OCR evaluation input preparation, they shall verify that an invalid `~$`-prefixed `.docx`, `.pptx` and `.xlsx` file produces no prepared output and no error, with and without an include pattern that matches it, while a valid sibling document is still prepared.
 
 ---
+
+## FR-2026-10-27-01
+
+| Property | Value |
+|----------|-------|
+| Title | Make translated output filenames valid on the output filesystem |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported failure: a translated output filename containing a colon could not be created on Windows |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-24-04, FR-2026-08-28-03 |
+
+### Description
+
+After the folder-replacement command receives an output filename from the text-replacement provider (FR-2026-08-03-03) and has applied its existing unsafe-name rejection, it shall make the name valid on Windows before it determines the output path. This applies to every text-replacement provider, not only `google_cloud_translate`, and to every platform, so that one input yields the same output name everywhere. The command shall apply these steps to the name's stem and leave the suffix as the existing suffix rule determines:
+
+1. Replace each run of one or more characters from `< > : " | ? *` and the control characters U+0000 through U+001F with a single `-`, then collapse each run of whitespace to a single space.
+2. Remove every leading space and every trailing space or `.` from the stem.
+3. If the stem, compared case-insensitively, is a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), prefix it with `_`.
+4. If the stem is empty after these steps, use the source file's own stem.
+
+The existing rejection of an empty name, `.`, `..`, NUL, and a name containing a path separator is unchanged and shall run first. A provider's own stem checks (for `google_cloud_translate`, `google-cloud-translation-requirements.md`) are unchanged and shall not reject a stem solely because it contains one of the characters in step 1.
+
+The sanitised name shall be used for the output path, the existing collision numbering, the progress and diagnostic sidecar names, and every message that names the output file. A name that needs no change shall be unchanged. The command shall not report a sanitised name as a failure or warning.
+
+### Rationale
+
+The output name is the translation of the input file's name (FR-2026-08-03-03). The input name is always valid on the source filesystem, but the translated name is new text that nothing has validated against Windows rules. A translator may introduce a forbidden character that the source name did not contain: it may turn Japanese brackets or other punctuation into an English phrase with a colon, add a question mark or quotation marks, render a full-width punctuation mark as its ASCII form, or end a name with a full stop. Full-width forms such as `：` and `？` are legal in a Windows filename, but their ASCII equivalents are not. In a failed run the source name held no ASCII colon, and the translated name did.
+
+A single such name currently fails the whole document after all of its translation work has been done, because the error appears only at the final rename. The failure depends on the provider's wording, so it is not predictable from the input and can appear for any provider.
+
+### Notes
+
+The sanitiser changes only the translated text. A name that needs no change, including every identity or character-mask output, is unchanged, so an output name keeps matching its input name wherever the provider leaves it valid.
+
+Overlong paths are a separate limitation (see the development-scenario notes on translated filenames). Sanitising can make two different translations equal; the existing collision numbering handles it.
+
+### Verification
+
+Automated tests shall use synthetic names and a fake provider, and no network call. They shall verify each of steps 1 to 4 including `Title: Subtitle.pptx`, a name with several adjacent invalid characters, a trailing dot or space, a reserved name with and without differing case, an all-invalid stem, an unchanged valid name, and the unchanged rejection of path separators. They shall also verify that sanitised collisions are numbered, that the output file is created, and that the progress entry names the sanitised file.
+
+---

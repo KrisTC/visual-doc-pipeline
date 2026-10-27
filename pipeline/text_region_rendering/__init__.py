@@ -1,6 +1,7 @@
 """Skia-backed visible-text rendering into OCR text regions."""
 
 from pipeline.text_region_rendering.renderer import (
+    SkippedTextRegion,
     TextRegionReplacement,
     render_replacement_text,
     replace_text_region,
@@ -9,6 +10,7 @@ from pipeline.text_region_rendering.renderer import (
 )
 
 __all__ = [
+    "SkippedTextRegion",
     "TextRegionReplacement",
     "render_replacement_text",
     "replace_text_region",

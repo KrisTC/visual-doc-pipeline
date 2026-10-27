@@ -9,7 +9,7 @@ renders each image's plan into it. A nested vector graphic uses these same funct
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import skia  # type: ignore[import-not-found]
 from PIL import Image
@@ -123,6 +123,8 @@ def apply_vector(
 ) -> VectorReplacementResult:
     """Replace the graphic's text and render its planned images using ``translate``."""
 
+    skipped_entries: list[dict[str, object]] = []
+
     def apply_image(index: int, image: Image.Image) -> int:
         if index >= len(plan.images):
             message = "The vector graphic has more embedded images than its plan."
@@ -135,7 +137,11 @@ def apply_vector(
             raise RuntimeError(message)
         # Render onto the image the document will re-encode.
         planned.image = image
-        return apply_bitmap(planned, translate, typeface, plan.target_language)
+        regions = apply_bitmap(planned, translate, typeface, plan.target_language)
+        skipped_entries.extend(
+            {**entry, "location": {"image_index": index + 1}} for entry in planned.skipped_regions
+        )
+        return regions
 
     def apply_nested(index: int) -> VectorReplacementResult | None:
         if index >= len(plan.nested):
@@ -144,9 +150,12 @@ def apply_vector(
         planned = plan.nested[index]
         return None if planned is None else apply_vector(planned, translate, typeface)
 
-    return plan.document.apply(
+    result = plan.document.apply(
         lambda text: translate(text).text, LookupProvider(translate), apply_image, apply_nested
     )
+    if not skipped_entries:
+        return result
+    return replace(result, diagnostics=(*result.diagnostics, *skipped_entries))
 
 
 def append_vector_diagnostics(

@@ -39,6 +39,7 @@ from pipeline.ocr import (
 from pipeline.ocr.errors import OcrProviderNotFoundError
 from pipeline.ocr.languages import discover_language_directories
 from pipeline.folder_replacement.filters import parse_include_patterns
+from pipeline.ocr_plugins.google_cloud_vision import cache_identity as vision_cache_identity
 from pipeline.provider_cache import source_cache_scope
 from pipeline.terminal_progress import LiveProgress
 from pipeline.runtime_assets import RuntimeAssetsRequiredError, require_runtime_assets
@@ -488,11 +489,9 @@ def _provider_output_is_current(provider_root: Path, checksum: str) -> bool:
 
 
 def _artifact_format_version(provider_name: str) -> str:
-    return (
-        VISION_ARTIFACT_FORMAT_VERSION
-        if provider_name == "google_cloud_vision"
-        else ARTIFACT_FORMAT_VERSION
-    )
+    if provider_name == "google_cloud_vision":
+        return f"{VISION_ARTIFACT_FORMAT_VERSION}:{vision_cache_identity()}"
+    return ARTIFACT_FORMAT_VERSION
 
 
 def _text_replacement_marker(checksum: str, provider_names: tuple[str, ...]) -> str:

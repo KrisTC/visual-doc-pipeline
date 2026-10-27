@@ -342,7 +342,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertEqual(1, result.successful_images)
             self.assertEqual(1, provider.calls)
             self.assertEqual(
-                ocr_evaluation.VISION_ARTIFACT_FORMAT_VERSION,
+                ocr_evaluation._artifact_format_version("google_cloud_vision"),
                 (provider_root / ocr_evaluation.ARTIFACT_FORMAT_VERSION_FILENAME)
                 .read_text(encoding="ascii")
                 .strip(),

@@ -839,7 +839,7 @@ Provider-specific viewers and generated results from a filtered run shall descri
 
 The `google_cloud_vision` provider shall supply one text region per visual line to every caller, including folder replacement and OCR evaluation. It shall combine words and punctuation belonging to one visual line while keeping distinct lines, bullets, and indented entries separate. Text on the same baseline with a gap larger than ordinary word spacing shall form separate regions, including neighboring table cells. Adjacent substantive text at a clearly different visual character size shall also form a separate region; a small bullet or punctuation mark shall not by itself trigger this split. A region's text, confidence, and source-image polygon shall correspond to the same grouped content. Detected spaces shall be retained within a line; detected line breaks shall terminate a region. Grouping shall also use OCR word geometry when break markers alone do not separate visually distinct lines. This grouping shall be derived locally from the existing `DOCUMENT_TEXT_DETECTION` response without another external service. It shall not split a visual line into sentences or join text across visual lines.
 
-The evaluation JSON and viewer shall make detected line breaks visible so the reviewer can distinguish missing OCR breaks from display-only whitespace collapse. When the Vision grouping changes, the evaluator shall regenerate its existing Vision artifacts even when image inputs are unchanged.
+The evaluation JSON and viewer shall make detected line breaks visible so the reviewer can distinguish missing OCR breaks from display-only whitespace collapse. When the Vision grouping changes, the evaluator shall regenerate its existing Vision artifacts even when image inputs are unchanged. The `google_cloud_vision` provider shall supply a cache identity, so its normalized grouped results can use the opt-in provider-result cache of FR-2026-08-27-10, that includes a grouping version and every numeric grouping threshold (including the character-size split ratio). Changing any of them shall invalidate cached Vision results and the evaluator's Vision artifacts without a separate manual version bump. Only normalized results are cached, never the submitted image or the raw API response (SR-2026-10-24-01).
 
 ### Rationale
 
@@ -1138,5 +1138,125 @@ Automated tests shall use synthetic images, a fake OCR provider, and fake text-r
 - that the command help identifies the remote-text boundary.
 
 Tests shall not contact Google, require credentials, or use confidential samples or derived artifacts.
+
+---
+
+
+## FR-2026-10-27-02
+
+| Property | Value |
+|----------|-------|
+| Title | Skip a raster replacement whose text cannot fit its OCR region instead of failing the document |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported failure: documents failed with "Replacement text could not fit the OCR region at a one-pixel font size" |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-02-10, FR-2026-08-03-03, FR-2026-08-28-03, FR-2026-08-02-09 |
+
+### Description
+
+The renderer of FR-2026-08-02-10 shall keep its rule that text is rendered only at a font size that fits the OCR region, down to a minimum of one pixel. A one-pixel font is too small to read in a bitmap, so the renderer shall not draw text below that fit, clipped or otherwise.
+
+When no font size from the largest fitting size down to one pixel lets the replacement text fit a region (for example a long translation in a very small detected region), the renderer shall skip that region's replacement instead of raising an error. A skipped region shall keep its original pixels: neither its background wipe nor any replacement text is drawn for it. The other regions of the same image shall be rendered as usual, and the image shall remain part of the output.
+
+Skipping is best effort and is not a failure. The folder-replacement command shall not count the document as failed, shall not print a failure or warning message, and shall not change the exit status because of a skipped region. A skipped region shall not count towards the replaced OCR image-region total.
+
+When debug output is enabled (`--debug`), the document's diagnostic sidecar (FR-2026-08-28-03) shall record one entry for each skipped region, with `kind` `skipped` and `reason_code` `bitmap_replacement_text_does_not_fit`. The entry shall carry the document-local location of the image when known, the region's index in the image's OCR order, the region's frame width and height in source-image pixels, and the replacement text's character count. It shall not record the replacement text, the OCR text, image pixels, or any other content, under the same restrictions as FR-2026-08-28-03. When debug output is disabled, nothing is recorded.
+
+The same rule applies when `scripts/ocr_evaluations.py` and the other OCR evaluation scripts render regions: they shall skip the region and continue, with no diagnostic sidecar. Rendering that succeeds is unchanged, including the upright-layout preference for small skew.
+
+### Rationale
+
+One tiny or degenerate OCR region, such as an icon or a speck read as text, can fail an entire document and discard all of its other translated content, even though every other region was handled. The same happens to a legitimate region whose translation is much longer than its source: a single Japanese character or a short label commonly becomes a whole English word or phrase, which cannot fit the region that held the single character, however small the font. The project's approach to rendering is best effort: a region that cannot be rendered legibly is left as it was and reported for diagnosis, rather than drawn illegibly or allowed to stop the document.
+
+### Notes
+
+A skipped region leaves the source text in the image untranslated. This is accepted, because the text did not fit even at one pixel, so it was not legible when replaced. The diagnostic entry lets the owner see how often it happens and where.
+
+Skipping includes the background wipe so that the original text is not erased with nothing to replace it. The two-pass rendering order (wipe every region, then draw every replacement) therefore needs the skip decision made before the wipe pass.
+
+### Verification
+
+Automated tests shall use synthetic images, polygons and text only. They shall verify that a long replacement in a tiny polygon no longer raises; that every pixel of an image whose only region is skipped is unchanged, including the wipe area; that a skipped region leaves another region in the same image rendered exactly as it would be alone; that a region which fits is rendered exactly as before; and that a synthetic folder-replacement document containing both a fitting and an unfittable region completes with an output file, no failure, zero failed files and a zero exit status. With `--debug`, they shall verify the sidecar entry, its fields, and that it contains no replacement or OCR text; without `--debug`, they shall verify that no sidecar is written.
+
+---
+
+## FR-2026-10-27-03
+
+| Property | Value |
+|----------|-------|
+| Title | Record the original Vision words and grouping decisions in OCR extra data |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-27-10, FR-2026-10-24-03, SR-2026-10-24-01 |
+
+### Description
+
+The `google_cloud_vision` provider shall populate the optional `extra` dictionary of every `OcrText` it returns with the information needed to understand how that region was grouped from the original Vision words. The data shall be stored under the single provider-namespaced key `google_cloud_vision`, and shall be JSON-compatible so that it survives the provider-result cache (FR-2026-08-27-10) and is written unchanged into the `extra` field of the `scripts/ocr_evaluations.py` JSON artifacts.
+
+For each region the data shall include:
+
+- the grouping version and the numeric thresholds in effect (the same values that make up the provider's cache identity);
+- `region_started_by`: the reason this region began and the measurements behind that decision. The reason shall be one of `paragraph_start`, `word_starts_line`, `previous_word_ends_line`, `direction_mismatch`, `baseline_offset`, `character_size`, `word_gap` or `background_colour` (FR-2026-10-27-04);
+- `words`: the original Vision words that were combined, in reading order, each with its text exactly as normalized before joining (including detected spaces), confidence, four-point source-image polygon, and whether it started or ended a line;
+- for each word, `symbols`: the word's Vision symbols in order, each with its text and, when Vision supplies a four-point box, that source-image polygon. This lets the owner compare glyph sizes that a word box, which Vision may normalise to the line height, hides;
+- for every word after the first, `joined_measurements`: the measurements that caused it to be joined to the previous word, so a wrongly merged region can be compared with the thresholds.
+
+Measurements shall be finite numbers: `direction_alignment` (cosine of the angle between reading directions), `baseline_offset_ratio` and `gap_ratio` (each relative to the larger of the two word-box heights), and `character_size_ratio` (the larger over the smaller of the line's typical word height and the next word's height). A measurement that was not evaluated for a decision (for example `character_size_ratio` when either side has no alphanumeric text, or any geometry when a break marker decided the split) shall be omitted rather than guessed.
+
+Recording this data shall not change the grouping, the region text, confidence or polygon, and shall not add another external call. The data shall hold only normalized values derived from the existing response; it shall not include the submitted image, credentials, the raw API response, or any other data excluded by SR-2026-10-24-01. Other OCR providers need not supply it.
+
+### Rationale
+
+The grouped region deliberately hides the Vision words it came from, which makes a wrong merge or split hard to diagnose. `OcrText.extra` was provided for provider-specific information with no cross-provider meaning, and the evaluator already writes it. Capturing the contributing words and the measured ratios allows the owner to tune the grouping thresholds from real evaluation output instead of by trial and error.
+
+### Notes
+
+The extra data holds the same OCR text as the region and the words' text, so it carries the same sensitivity. It remains in the local evaluation output and, when the opt-in cache is enabled, the local source-adjacent cache. It increases JSON and cache size in proportion to the number of words.
+
+### Verification
+
+Automated tests shall use synthetic Vision responses and shall not contact Google or use confidential samples. They shall verify that a merged region records each original word, polygon and join measurements; that a split region records the reason and measurements for each region's start, including a character-size split; that the extra data is JSON-serializable and round-trips through the provider-result cache; and that region text, confidence and polygons are unchanged by recording it.
+
+---
+
+## FR-2026-10-27-04
+
+| Property | Value |
+|----------|-------|
+| Title | Do not join Vision words that sit on clearly different backgrounds |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request, from OCR evaluation of a label whose two adjacent words are on different surfaces |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-10-24-03, FR-2026-10-27-03, FR-2026-08-27-10, SR-2026-10-24-01 |
+
+### Description
+
+The `google_cloud_vision` grouping of FR-2026-10-24-03 shall gain one further join rule based on the source image. A word shall not be joined to the line being built when the surface behind it is clearly different from the surface behind the line's last word, even when every existing rule would join them. This is a join rule: it shall be evaluated in the same pass as the existing join rules and shall never be applied by splitting a region that was already joined.
+
+The rule shall compare the surfaces just outside the facing ends of the two words, not the words' glyphs. For each of the previous word and the next word, it shall sample thin strips of the prepared image (named thickness) immediately above and below the word's box, restricted to a named fraction of the word's extent along the reading direction nearest the other word (a minimum span applies to very narrow boxes), measured in the line's reading-direction frame so that rotated text is handled. It shall take the median CIE Lab colour of each word's strips and compare the two as a CIE76 distance. The words shall not be joined when that distance reaches a named threshold. The rule shall be skipped, and the words judged by the existing rules alone, when no image is available, when no strip pixel lies inside the image, or when the two boxes touch or overlap along the reading direction (there is then no gap with distinct surfaces on either side). The text-region-colour estimator was evaluated for this purpose and rejected: its background confidence did not separate the reported label from legitimate joins in local evaluation output.
+
+The rule shall run last, only for a word that the existing rules would otherwise join, so it adds no image sampling for words that are already separated. It shall not change the existing rules, the order in which they are evaluated, or the text, confidence and polygon of a region. It shall use only the image already prepared for the Vision request and no further external service, and it shall not persist or transmit the image or colour data beyond the normalized `extra` data of FR-2026-10-27-03.
+
+When the rule is evaluated, the join measurements of FR-2026-10-27-03 shall include `background_colour_difference`. A region that begins because of this rule shall record the reason `background_colour`. The rule's threshold, strip thickness and extent fraction shall be part of the thresholds recorded in `extra`, and of the provider cache identity and evaluator artifact version, so changing any of them invalidates cached results and artifacts, and `_LINE_GROUPING_VERSION` shall be raised.
+
+### Rationale
+
+The word boxes and symbol boxes that Vision returns are normalised to the line height, so the character-size rule cannot see that two neighbouring words are drawn at different sizes. Such words are usually also visually separate objects, for example a label inside a shape beside text on the artwork behind it. The image shows that difference even though the OCR geometry does not.
+
+### Notes
+
+Initial values, calibrated against local evaluation output (four files, several hundred joins): colour-difference threshold 40.0, strip thickness 4 pixels, extent fraction 0.3 with a 4 pixel minimum span. With these values the reported label scored about 49 and every other join with a positive gap scored below about 27. The calibration margin is modest: shifting the word boxes by under one pixel moved the reported label between about 38 and 52, and a gradient background elsewhere reached about 34. If a legitimate join is split, or the label rejoins, use `background_colour_difference` in `extra` to retune the threshold.
+
+- The rule compares only the surface behind each word, not the text colour. Two words on the same surface in different colours are still joined.
+- Words whose boxes touch or overlap are not compared, so such pairs are never split by this rule.
+- A word on a photograph or gradient may give an unstable surface comparison. Sampling only the facing ends limits the effect of a gradient along a long line, but it is not eliminated.
+
+### Verification
+
+Automated tests shall use synthetic images and synthetic Vision responses only, and shall not contact Google or use confidential samples. They shall verify that adjacent words on clearly different flat backgrounds are not joined and that the second region records the `background_colour` reason, the measurement and the threshold; that adjacent words on the same background are joined as before and record the measurement; that glyph pixels inside the boxes do not affect the comparison; that no image leaves the existing behaviour unchanged; that the rule is not evaluated for a word the earlier rules separate; that the provider passes its prepared image to the rule; and that changing the rule's threshold changes the cache identity.
 
 ---

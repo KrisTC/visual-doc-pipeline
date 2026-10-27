@@ -14,10 +14,13 @@ from unittest.mock import Mock, patch
 from google.cloud import vision_v1
 from PIL import Image
 
+from pipeline import provider_cache
 from pipeline.folder_replacement.bitmap import plan_bitmap
+from pipeline.ocr import OcrProviderFactory
 from pipeline.ocr.errors import OcrProviderError
 from pipeline.ocr.models import OcrRequest
 from pipeline.ocr_plugins import google_cloud_vision
+from pipeline.provider_cache import CachingOcrProvider
 from scripts import ocr_evaluations
 
 
@@ -41,6 +44,26 @@ def _word(
 
 def _box(left: int, top: int, right: int, bottom: int) -> tuple[tuple[int, int], ...]:
     return ((left, top), (right, top), (right, bottom), (left, bottom))
+
+
+def _line_response(*words: dict[str, object]) -> vision_v1.BatchAnnotateImagesResponse:
+    return vision_v1.BatchAnnotateImagesResponse(
+        {
+            "responses": [
+                {
+                    "full_text_annotation": {
+                        "pages": [{"blocks": [{"paragraphs": [{"words": list(words)}]}]}]
+                    }
+                }
+            ]
+        }
+    )
+
+
+def _two_surface_image(left: tuple[int, int, int], right: tuple[int, int, int]) -> Image.Image:
+    image = Image.new("RGB", (100, 40), left)
+    image.paste(right, (42, 0, 100, 40))
+    return image
 
 
 def _response_with_paragraph() -> vision_v1.BatchAnnotateImagesResponse:
@@ -260,7 +283,7 @@ class GoogleCloudVisionOcrProviderTests(unittest.TestCase):
             _word("Alpha", _box(8, 2, 32, 14)),
             _word(",", _box(33, 8, 35, 13), break_type="SPACE"),
             _word("beta", _box(39, 1, 59, 14), break_type="SPACE"),
-            _word("tail", _box(63, 0, 82, 14), break_type="SPACE"),
+            _word("tail", _box(63, 1, 82, 14), break_type="SPACE"),
             _word("Title", _box(86, -1, 130, 17), break_type="SPACE"),
             _word("note", _box(134, 2, 155, 14)),
         ]
@@ -286,6 +309,300 @@ class GoogleCloudVisionOcrProviderTests(unittest.TestCase):
             [(86.0, -1.0), (130.0, -1.0), (130.0, 17.0), (86.0, 17.0)],
             [(point.x, point.y) for point in result.text_items[1].bounding_polygon.vertices],
         )
+
+    # Verifies FR-2026-10-24-03.
+    def test_moderately_larger_adjacent_text_splits_but_minor_variation_does_not(self) -> None:
+        words = [
+            _word("small", _box(0, 0, 40, 20), break_type="SPACE"),
+            _word("same", _box(44, 0, 84, 21), break_type="SPACE"),
+            _word("big", _box(88, -3, 128, 24)),
+        ]
+        response = vision_v1.BatchAnnotateImagesResponse(
+            {
+                "responses": [
+                    {
+                        "full_text_annotation": {
+                            "pages": [{"blocks": [{"paragraphs": [{"words": words}]}]}]
+                        }
+                    }
+                ]
+            }
+        )
+
+        result = google_cloud_vision._parse_response(response)
+
+        self.assertEqual(["small same", "big"], [item.text for item in result.text_items])
+
+    # Verifies FR-2026-10-27-03.
+    def test_extra_records_original_words_and_grouping_decisions(self) -> None:
+        words = [
+            _word("One", _box(0, 0, 30, 10), break_type="SPACE"),
+            _word("two", _box(34, 0, 64, 10)),
+            _word("BIG", _box(68, -4, 120, 16)),
+        ]
+        response = vision_v1.BatchAnnotateImagesResponse(
+            {
+                "responses": [
+                    {
+                        "full_text_annotation": {
+                            "pages": [{"blocks": [{"paragraphs": [{"words": words}]}]}]
+                        }
+                    }
+                ]
+            }
+        )
+
+        result = google_cloud_vision._parse_response(response)
+
+        self.assertEqual(["One two", "BIG"], [item.text for item in result.text_items])
+        first = cast(dict[str, dict[str, object]], result.text_items[0].extra)["google_cloud_vision"]
+        second = cast(dict[str, dict[str, object]], result.text_items[1].extra)["google_cloud_vision"]
+        first_words = cast(list[dict[str, object]], first["words"])
+        self.assertEqual(["One ", "two"], [word["text"] for word in first_words])
+        self.assertEqual(
+            [[0.0, 0.0], [30.0, 0.0], [30.0, 10.0], [0.0, 10.0]], first_words[0]["polygon"]
+        )
+        self.assertNotIn("joined_measurements", first_words[0])
+        joined = cast(dict[str, float], first_words[1]["joined_measurements"])
+        self.assertEqual({"direction_alignment", "baseline_offset_ratio", "gap_ratio", "character_size_ratio"}, set(joined))
+        self.assertEqual(
+            {"reason": "paragraph_start", "measurements": {}}, first["region_started_by"]
+        )
+        started_by = cast(dict[str, object], second["region_started_by"])
+        self.assertEqual("character_size", started_by["reason"])
+        self.assertGreaterEqual(
+            cast(dict[str, float], started_by["measurements"])["character_size_ratio"],
+            google_cloud_vision._CHARACTER_SIZE_SPLIT_RATIO,
+        )
+        self.assertEqual(
+            google_cloud_vision._CHARACTER_SIZE_SPLIT_RATIO,
+            cast(dict[str, float], first["thresholds"])["character_size_split_ratio"],
+        )
+
+    # Verifies FR-2026-10-27-03.
+    def test_extra_records_symbol_boxes_when_supplied(self) -> None:
+        word = _word("ab", _box(0, 0, 20, 10))
+        symbols = cast(list[dict[str, object]], word["symbols"])
+        symbols[0]["bounding_box"] = {"vertices": [{"x": 0, "y": 1}, {"x": 8, "y": 1}, {"x": 8, "y": 9}, {"x": 0, "y": 9}]}
+        response = vision_v1.BatchAnnotateImagesResponse(
+            {
+                "responses": [
+                    {
+                        "full_text_annotation": {
+                            "pages": [{"blocks": [{"paragraphs": [{"words": [word]}]}]}]
+                        }
+                    }
+                ]
+            }
+        )
+
+        result = google_cloud_vision._parse_response(response)
+
+        extra = cast(dict[str, dict[str, object]], result.text_items[0].extra)["google_cloud_vision"]
+        recorded = cast(list[dict[str, object]], extra["words"])[0]["symbols"]
+        self.assertEqual(
+            [
+                {"text": "a", "polygon": [[0.0, 1.0], [8.0, 1.0], [8.0, 9.0], [0.0, 9.0]]},
+                {"text": "b"},
+            ],
+            recorded,
+        )
+
+    # Verifies FR-2026-10-27-03.
+    def test_extra_survives_json_and_provider_cache_round_trip(self) -> None:
+        words = [_word("One", _box(0, 0, 30, 10), break_type="SPACE"), _word("two", _box(34, 0, 64, 10))]
+        response = vision_v1.BatchAnnotateImagesResponse(
+            {
+                "responses": [
+                    {
+                        "full_text_annotation": {
+                            "pages": [{"blocks": [{"paragraphs": [{"words": words}]}]}]
+                        }
+                    }
+                ]
+            }
+        )
+        result = google_cloud_vision._parse_response(response)
+
+        restored = provider_cache._ocr_result_from_payload(
+            json.loads(json.dumps(provider_cache._ocr_result_payload(result)))
+        )
+
+        self.assertEqual(result, restored)
+
+    # Verifies FR-2026-10-27-03.
+    def test_line_break_split_reason_has_no_geometry_measurements(self) -> None:
+        words = [
+            _word("One", _box(0, 0, 30, 10), break_type="LINE_BREAK"),
+            _word("Two", _box(0, 14, 30, 24)),
+        ]
+        response = vision_v1.BatchAnnotateImagesResponse(
+            {
+                "responses": [
+                    {
+                        "full_text_annotation": {
+                            "pages": [{"blocks": [{"paragraphs": [{"words": words}]}]}]
+                        }
+                    }
+                ]
+            }
+        )
+
+        result = google_cloud_vision._parse_response(response)
+
+        second = cast(dict[str, dict[str, object]], result.text_items[1].extra)["google_cloud_vision"]
+        self.assertEqual(
+            {"reason": "previous_word_ends_line", "measurements": {}}, second["region_started_by"]
+        )
+
+    # Verifies FR-2026-10-27-04.
+    def test_words_on_different_backgrounds_are_not_joined(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(44, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response, _two_surface_image((255, 255, 255), (20, 40, 160)))
+
+        self.assertEqual(["left", "right"], [item.text for item in result.text_items])
+        extra = cast(dict[str, dict[str, object]], result.text_items[1].extra)["google_cloud_vision"]
+        started_by = cast(dict[str, object], extra["region_started_by"])
+        self.assertEqual("background_colour", started_by["reason"])
+        measurements = cast(dict[str, float], started_by["measurements"])
+        self.assertGreaterEqual(
+            measurements["background_colour_difference"], google_cloud_vision._SURFACE_DIFFERENCE_SPLIT
+        )
+        self.assertEqual(
+            google_cloud_vision._SURFACE_DIFFERENCE_SPLIT,
+            cast(dict[str, float], extra["thresholds"])["surface_difference_split"],
+        )
+
+    # Verifies FR-2026-10-27-04.
+    def test_words_on_the_same_background_join_and_record_the_difference(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(44, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response, _two_surface_image((255, 255, 255), (250, 250, 250)))
+
+        self.assertEqual(["left right"], [item.text for item in result.text_items])
+        extra = cast(dict[str, dict[str, object]], result.text_items[0].extra)["google_cloud_vision"]
+        joined = cast(dict[str, float], cast(list[dict[str, object]], extra["words"])[1]["joined_measurements"])
+        self.assertLess(joined["background_colour_difference"], google_cloud_vision._SURFACE_DIFFERENCE_SPLIT)
+
+    # Verifies FR-2026-10-27-04.
+    def test_text_glyphs_inside_the_boxes_do_not_affect_the_background_comparison(self) -> None:
+        image = _two_surface_image((255, 255, 255), (255, 255, 255))
+        image.paste((0, 0, 0), (2, 12, 38, 20))
+        image.paste((0, 0, 0), (46, 12, 82, 20))
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(44, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response, image)
+
+        self.assertEqual(["left right"], [item.text for item in result.text_items])
+
+    # Verifies FR-2026-10-27-04.
+    def test_without_an_image_the_background_rule_is_skipped(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(44, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response)
+
+        self.assertEqual(["left right"], [item.text for item in result.text_items])
+        extra = cast(dict[str, dict[str, object]], result.text_items[0].extra)["google_cloud_vision"]
+        joined = cast(dict[str, float], cast(list[dict[str, object]], extra["words"])[1]["joined_measurements"])
+        self.assertNotIn("background_colour_difference", joined)
+
+    # Verifies FR-2026-10-27-04.
+    def test_background_rule_is_not_evaluated_when_an_earlier_rule_splits(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(70, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response, _two_surface_image((255, 255, 255), (20, 40, 160)))
+
+        extra = cast(dict[str, dict[str, object]], result.text_items[1].extra)["google_cloud_vision"]
+        started_by = cast(dict[str, object], extra["region_started_by"])
+        self.assertEqual("word_gap", started_by["reason"])
+        self.assertNotIn("background_colour_difference", cast(dict[str, float], started_by["measurements"]))
+
+    # Verifies FR-2026-10-27-04.
+    def test_background_rule_is_skipped_when_word_boxes_overlap(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 44, 22), break_type="SPACE"),
+            _word("right", _box(40, 10, 84, 22)),
+        )
+
+        result = google_cloud_vision._parse_response(response, _two_surface_image((255, 255, 255), (20, 40, 160)))
+
+        self.assertEqual(["left right"], [item.text for item in result.text_items])
+        extra = cast(dict[str, dict[str, object]], result.text_items[0].extra)["google_cloud_vision"]
+        joined = cast(dict[str, float], cast(list[dict[str, object]], extra["words"])[1]["joined_measurements"])
+        self.assertNotIn("background_colour_difference", joined)
+
+    # Verifies FR-2026-10-27-04.
+    def test_recognize_passes_the_prepared_image_to_the_background_rule(self) -> None:
+        response = _line_response(
+            _word("left", _box(0, 10, 40, 22), break_type="SPACE"),
+            _word("right", _box(44, 10, 84, 22)),
+        )
+        client = Mock()
+        client.batch_annotate_images.return_value = response
+        factory = Mock(return_value=client)
+        module = Mock(ImageAnnotatorClient=factory)
+
+        with (
+            patch.dict(os.environ, self._environment(), clear=True),
+            patch.object(google_cloud_vision, "import_module", return_value=module),
+        ):
+            result = google_cloud_vision.GoogleCloudVisionProvider().recognize(
+                OcrRequest(_two_surface_image((255, 255, 255), (20, 40, 160)), "ja")
+            )
+
+        self.assertEqual(["left", "right"], [item.text for item in result.text_items])
+
+    # Verifies FR-2026-08-27-10.
+    def test_cache_identity_tracks_grouping_parameters(self) -> None:
+        original = google_cloud_vision.cache_identity()
+
+        with patch.object(google_cloud_vision, "_CHARACTER_SIZE_SPLIT_RATIO", 1.2):
+            changed = google_cloud_vision.cache_identity()
+
+        with patch.object(google_cloud_vision, "_SURFACE_DIFFERENCE_SPLIT", 50.0):
+            surface_changed = google_cloud_vision.cache_identity()
+
+        self.assertNotEqual(original, changed)
+        self.assertNotEqual(original, surface_changed)
+        self.assertEqual(original, google_cloud_vision.cache_identity())
+        self.assertNotIn("\n", original)
+
+    # Verifies FR-2026-08-27-10.
+    def test_factory_caches_provider_only_when_cache_is_enabled(self) -> None:
+        factory = OcrProviderFactory.discover_default_plugins()
+
+        with patch.dict(os.environ, {"PIPELINE_PLUGIN_CACHE": "1"}):
+            enabled = factory.create("google_cloud_vision")
+        with patch.dict(os.environ, {}, clear=True):
+            disabled = factory.create("google_cloud_vision")
+
+        self.assertIsInstance(enabled, CachingOcrProvider)
+        self.assertNotIsInstance(disabled, CachingOcrProvider)
+
+    # Verifies FR-2026-10-24-03.
+    def test_evaluation_artifact_version_changes_with_grouping_parameters(self) -> None:
+        original = ocr_evaluations._artifact_format_version("google_cloud_vision")
+
+        with patch.object(google_cloud_vision, "_CHARACTER_SIZE_SPLIT_RATIO", 1.2):
+            changed = ocr_evaluations._artifact_format_version("google_cloud_vision")
+
+        self.assertNotEqual(original, changed)
 
     # Verifies FR-2026-10-24-01 and SR-2026-10-24-01.
     def test_sends_inline_image_to_eu_without_language_hint_and_maps_line(self) -> None:
