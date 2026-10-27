@@ -177,6 +177,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         _write_manifest(manifest_path, manifest)
         has_failure = has_failure or completed_process.returncode != 0
+    if sys.platform == "win32":
+        review_path = revision_root.relative_to(PROJECT_ROOT).as_posix()
+        print(f"Review translated output: .\\scripts\\office_review.ps1 -RevisionPath \"{review_path}\"")
     return 1 if has_failure else 0
 
 
