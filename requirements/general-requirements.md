@@ -2096,3 +2096,69 @@ Overlong paths are a separate limitation (see the development-scenario notes on 
 Automated tests shall use synthetic names and a fake provider, and no network call. They shall verify each of steps 1 to 4 including `Title: Subtitle.pptx`, a name with several adjacent invalid characters, a trailing dot or space, a reserved name with and without differing case, an all-invalid stem, an unchanged valid name, and the unchanged rejection of path separators. They shall also verify that sanitised collisions are numbered, that the output file is created, and that the progress entry names the sanitised file.
 
 ---
+
+## FR-2026-10-27-05
+
+| Property | Value |
+|----------|-------|
+| Title | Review translated PowerPoint output against its source |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-22-01, FR-2026-09-02-04, FR-2026-08-03-03 |
+
+### Description
+
+The project shall provide a development-only Windows PowerShell command named `scripts/office_review.ps1`. It shall open a translated PPTX produced by the development folder-replacement command side by side with its source presentation in Microsoft PowerPoint, using the source path recorded in the translated file's `.diagnostics.json` sidecar (FR-2026-08-03-03). It shall keep the two presentations on the same slide.
+
+The command shall accept a revision directory below `outputs/evaluations/dirdev/` and list each translated PPTX in it that has a diagnostics sidecar. The user shall select one by number, or enter `q` to quit. If only one deck is found, it shall be opened directly without the list. If only one deck is found, it shall be opened directly without the list. After a comparison closes, the list shall be shown again. Closing either presentation shall first ask the user to confirm before the comparison ends. The command shall open presentations read-only and shall close only the presentations it opened.
+
+When `scripts/development_folder_replacement.py` completes, it shall print the exact `scripts/office_review.ps1` command that reviews the revision it wrote.
+
+### Rationale
+
+Reviewing a development run requires opening each translated deck next to its source. Listing the revision's decks and printing the review command removes manual path entry between runs.
+
+### Notes
+
+The command depends on Microsoft PowerPoint and is not part of the pipeline. Its outputs are local, and it shall not transmit or copy presentation content. The revision directory is a required argument. The runner prints the review command once per run, after all scenarios finish, and only on Windows.
+
+### Verification
+
+Verification is limited to a compile check: the PowerShell script shall parse without errors, and the modified Python runner shall compile. The owner performs interactive testing of the PowerPoint comparison. No automated COM or PowerPoint tests are required, because this is a development tool and not a production feature.
+
+---
+
+## FR-2026-10-27-06
+
+| Property | Value |
+|----------|-------|
+| Title | Review translated Word and Excel output against its source |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-10-27-05, FR-2026-08-03-03 |
+
+### Description
+
+The review command shall also open translated Word (.docx) and Excel (.xlsx) files beside their sources, using the same `.diagnostics.json` lookup and the same listing, selection, and `q` quit behaviour as FR-2026-10-27-05. The file type shall select the PowerPoint, Word, or Excel COM application. Both documents shall open read-only.
+
+Word and Excel windows shall be arranged side by side in the same left/right layout as PowerPoint, by moving each document window to half of the screen work area. No synchronous scrolling is applied. After arranging the windows, the command shall return to the selection menu without monitoring for document close; the documents stay open for the reviewer.
+
+Excel does not allow two open workbooks with the same file name, even in different folders. When the source and translated file names match, the command shall open a temporary copy of the source instead of the original. The copy shall be written to a `tmp_diff` subfolder of the revision directory as `<number>.xlsx`, where `<number>` is the selected menu number (1 for a single file), and it shall be overwritten on reuse. The translated file and its `.diagnostics.json` sidecar shall never be renamed or moved. If an existing copy is locked by an open workbook, the command shall stop with a message asking the reviewer to close that workbook.
+
+### Rationale
+
+Translated Word and Excel output is reviewed the same way as PowerPoint output. Using the same workflow keeps the review step consistent across the document types the pipeline produces.
+
+### Notes
+
+Owner decisions: no synchronous scrolling and no page or sheet navigation sync; the built-in side-by-side feature is not used because it did not work reliably. Sheets are not renamed, so sheet matching is not required. The workflow stays in one script for now; a general compare tool is a later change.
+
+### Verification
+
+Verification is limited to a compile check (PowerShell parse of the script). The owner performs interactive testing.
+
+---
