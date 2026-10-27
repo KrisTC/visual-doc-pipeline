@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -51,10 +52,7 @@ class CliEntryPointTests(unittest.TestCase):
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_lists_plugin_choices_and_defaults(self) -> None:
-        completed_process = self._run_help("folder_replacement.py")
-
-        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
-        help_output = completed_process.stdout
+        help_output = _folder_replacement_help_text()
         normalized_help_output = " ".join(help_output.split())
         text_replacement_factory = TextReplacementProviderFactory.discover_default_plugins()
         ocr_factory = OcrProviderFactory.discover_default_plugins()
@@ -83,10 +81,7 @@ class CliEntryPointTests(unittest.TestCase):
 
     # Verifies FR-2026-08-03-03.
     def test_folder_replacement_help_lists_document_text_layout_choices_separately(self) -> None:
-        completed_process = self._run_help("folder_replacement.py")
-
-        self.assertEqual(0, completed_process.returncode, completed_process.stderr)
-        help_output = completed_process.stdout
+        help_output = _folder_replacement_help_text()
         self.assertIn("document-text-layout modes:", help_output)
         for choice in (
             "preserve-source-formatting",
@@ -290,7 +285,7 @@ class CliEntryPointTests(unittest.TestCase):
                     input_folder,
                     root / "output",
                     ("--ocr", "missing"),
-                    "Unknown OCR provider 'missing'. Available OCR providers: no_ocr, paddleocr.",
+                    "Unknown OCR provider 'missing'. Available OCR providers: google_cloud_vision, no_ocr, paddleocr.",
                 ),
                 (
                     input_folder,
@@ -301,14 +296,14 @@ class CliEntryPointTests(unittest.TestCase):
             )
             for source, destination, options, message in cases:
                 with self.subTest(message=message):
-                    completed_process = self._run_folder_replacement(
+                    returncode, stderr = _run_folder_replacement_in_process(
                         source, destination, *options
                     )
 
-                    self.assertEqual(2, completed_process.returncode)
-                    self.assertIn("usage:", completed_process.stderr)
-                    self.assertIn(f"error: {message}", completed_process.stderr)
-                    self.assertNotIn("Traceback", completed_process.stderr)
+                    self.assertEqual(2, returncode)
+                    self.assertIn("usage:", stderr)
+                    self.assertIn(f"error: {message}", stderr)
+                    self.assertNotIn("Traceback", stderr)
 
     def _run_folder_replacement(
         self, input_folder: Path, output_folder: Path, *options: str
@@ -342,6 +337,27 @@ class CliEntryPointTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
+
+
+def _folder_replacement_help_text() -> str:
+    """Render the folder-replacement help at the width a captured subprocess used."""
+    with patch.dict(os.environ, {"COLUMNS": "80"}):
+        return folder_replacement._argument_parser().format_help()
+
+
+def _run_folder_replacement_in_process(
+    input_folder: Path, output_folder: Path, *options: str
+) -> tuple[int, str]:
+    """Run the command in this process and return its exit status and standard error."""
+    error_output = io.StringIO()
+    with redirect_stderr(error_output), redirect_stdout(io.StringIO()):
+        try:
+            returncode = folder_replacement.main(
+                [str(input_folder), str(output_folder), "--source-language", "en", *options]
+            )
+        except SystemExit as error:
+            returncode = error.code if isinstance(error.code, int) else 1
+    return returncode, error_output.getvalue()
 
 
 if __name__ == "__main__":

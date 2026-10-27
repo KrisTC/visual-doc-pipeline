@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 from pypdf import PdfReader
+from pipeline.folder_replacement.filters import is_office_owner_file, matches_include_patterns
 from pipeline.ocr.languages import discover_language_directories
 
 
@@ -43,6 +44,17 @@ class PreparationResult:
     processed_documents: int = 0
     removed_directories: int = 0
     skipped_documents: int = 0
+    selected_image_paths: tuple[Path, ...] = ()
+
+
+class PreparationProgress(Protocol):
+    """Receives the named steps of input preparation and their completed work items."""
+
+    def start_step(self, label: str, total: int | None) -> None:
+        """Begin a named step whose total is unknown when it is None."""
+
+    def advance(self) -> None:
+        """Record one completed work item in the active step."""
 
 
 class PngSavable(Protocol):
@@ -187,8 +199,9 @@ def expected_output_directories(
         expected_directories.add(language_directory.relative_to(source_root))
         for source_path in language_directory.rglob("*"):
             relative_source_path = source_path.relative_to(source_root)
-            if source_path.is_dir() or source_path.suffix.lower() in (
-                OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
+            if source_path.is_dir() or (
+                source_path.suffix.lower() in (OFFICE_DOCUMENT_EXTENSIONS | {".pdf"})
+                and not is_office_owner_file(source_path)
             ):
                 expected_directories.add(relative_source_path)
     return expected_directories
@@ -198,11 +211,14 @@ def remove_stale_output_directories(
     source_root: Path,
     output_root: Path,
     language_directories: Iterable[Path],
+    progress: PreparationProgress | None = None,
 ) -> int:
     """Remove stale generated directories while retaining unmatched files in live ones."""
     if not output_root.is_dir():
         return 0
 
+    if progress is not None:
+        progress.start_step("Scanning stale output", None)
     expected_directories = expected_output_directories(source_root, language_directories)
     removed_directories = 0
 
@@ -218,10 +234,14 @@ def remove_stale_output_directories(
         key=lambda path: len(path.parts),
         reverse=True,
     )
+    if progress is not None:
+        progress.start_step("Removing stale output", len(stale_directories))
     for stale_directory in stale_directories:
         if stale_directory.is_dir():
             shutil.rmtree(stale_directory)
             removed_directories += 1
+        if progress is not None:
+            progress.advance()
 
     return removed_directories
 
@@ -233,17 +253,33 @@ def _is_expected_or_ancestor(path: Path, expected_directories: set[Path]) -> boo
     )
 
 
-def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> PreparationResult:
+def prepare_evaluation_inputs(
+    source_root: Path,
+    output_root: Path,
+    include_patterns: tuple[str, ...] = (),
+    progress: PreparationProgress | None = None,
+) -> PreparationResult:
     """Copy raster samples and extract embedded raster images from supported documents."""
     if not source_root.is_dir():
         raise ValueError(f"Source root does not exist or is not a directory: {source_root}")
 
     result = PreparationResult()
+    selected_image_paths: list[Path] = []
     language_directories = discover_language_directories(source_root)
-    for language_directory in language_directories:
-        for source in sorted(
-            path for path in language_directory.rglob("*") if path.is_file()
-        ):
+    if progress is not None:
+        progress.start_step("Scanning sources", None)
+    eligible_sources = [
+        source
+        for language_directory in language_directories
+        for source in sorted(path for path in language_directory.rglob("*") if path.is_file())
+        if source.suffix.lower() in BITMAP_EXTENSIONS | OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}
+        and not is_office_owner_file(source)
+        and matches_include_patterns(source.relative_to(source_root), include_patterns)
+    ]
+    if progress is not None:
+        progress.start_step("Preparing", len(eligible_sources))
+    for source in eligible_sources:
+        try:
             relative_source_path = source.relative_to(source_root)
             extension = source.suffix.lower()
 
@@ -252,15 +288,20 @@ def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> Preparati
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
                 result.copied_bitmaps += 1
-                continue
-
-            if extension not in OFFICE_DOCUMENT_EXTENSIONS | {".pdf"}:
+                if include_patterns:
+                    selected_image_paths.append(relative_source_path)
                 continue
 
             output_directory = document_output_directory(output_root, relative_source_path)
             source_checksum = sha256_file(source)
             if is_unchanged(output_directory, source_checksum):
                 result.skipped_documents += 1
+                if include_patterns:
+                    selected_image_paths.extend(
+                        path.relative_to(output_root)
+                        for path in sorted(output_directory.iterdir())
+                        if path.is_file() and path.suffix.lower() in BITMAP_EXTENSIONS
+                    )
                 continue
 
             if output_directory.exists():
@@ -275,15 +316,22 @@ def prepare_evaluation_inputs(source_root: Path, output_root: Path) -> Preparati
             for index, image in enumerate(extracted_images, start=1):
                 destination = output_directory / f"image-{index:04d}{image.extension}"
                 destination.write_bytes(image.data)
+                if include_patterns:
+                    selected_image_paths.append(destination.relative_to(output_root))
             (output_directory / ".source.sha256").write_text(
                 f"{source_checksum}\n", encoding="ascii"
             )
             result.extracted_images += len(extracted_images)
             result.processed_documents += 1
+        finally:
+            if progress is not None:
+                progress.advance()
 
-    result.removed_directories = remove_stale_output_directories(
-        source_root, output_root, language_directories
-    )
+    if not include_patterns:
+        result.removed_directories = remove_stale_output_directories(
+            source_root, output_root, language_directories, progress
+        )
+    result.selected_image_paths = tuple(selected_image_paths)
 
     return result
 

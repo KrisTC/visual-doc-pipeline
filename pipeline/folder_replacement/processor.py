@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import os
 import random
+import re
 import sys
 import time
 from time import perf_counter
@@ -48,7 +49,7 @@ from pipeline.folder_replacement.vector import (
     apply_vector,
     plan_vector,
 )
-from pipeline.folder_replacement.filters import matches_include_patterns
+from pipeline.folder_replacement.filters import is_office_owner_file, matches_include_patterns
 from pipeline.folder_replacement.common import NestedProgressReporter
 BITMAP_EXTENSIONS = frozenset({".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"})
 OFFICE_DOCUMENT_EXTENSIONS = frozenset({".docx", ".pptx", ".xlsx"})
@@ -154,6 +155,7 @@ def replace_input_folder(
     source_paths = tuple(sorted(path for path in input_root.rglob("*") if path.is_file()))
     eligible_source_count = sum(
         not is_cache_sidecar(path)
+        and not is_office_owner_file(path)
         and path.suffix.lower() in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
         and matches_include_patterns(path.relative_to(input_root), include_patterns)
         for path in source_paths
@@ -164,6 +166,7 @@ def replace_input_folder(
             "status": (
                 "queued"
                 if not is_cache_sidecar(path)
+                and not is_office_owner_file(path)
                 and path.suffix.lower()
                 in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS
                 and matches_include_patterns(path.relative_to(input_root), include_patterns)
@@ -221,7 +224,7 @@ def replace_input_folder(
         extension = source_path.suffix.lower()
         relative_source_path = source_path.relative_to(input_root)
         progress_entry = progress_entries[relative_source_path.as_posix()]
-        if is_cache_sidecar(source_path):
+        if is_cache_sidecar(source_path) or is_office_owner_file(source_path):
             continue
         if extension not in BITMAP_EXTENSIONS | DOCUMENT_EXTENSIONS | VECTOR_EXTENSIONS:
             result.ignored_files += 1
@@ -375,6 +378,8 @@ def replace_input_folder(
                     phase_progress,
                 )
                 save_bitmap_file(plan, temporary_destination)
+                if diagnostics_enabled:
+                    document_diagnostics.extend(plan.skipped_regions)
                 result.replaced_image_regions += image_regions
                 work_completed("Applying image 1 of 1")
             elif extension in VECTOR_EXTENSIONS:
@@ -787,6 +792,7 @@ def _destination_path(
     _validate_filename(replacement_name)
     if Path(replacement_name).suffix.lower() != source_path.suffix.lower():
         replacement_name = f"{replacement_name}{source_path.suffix}"
+    replacement_name = _windows_safe_filename(replacement_name, source_path)
     relative_parent = source_path.relative_to(input_root).parent
     candidate = output_root / relative_parent / replacement_name
     _assert_path_inside_output(output_root, candidate)
@@ -800,8 +806,30 @@ def _destination_path(
 
 
 def _validate_filename(name: str) -> None:
-    if not name or name in {".", ".."} or "\x00" in name or Path(name).name != name:
+    if not name or name in {".", ".."} or "\x00" in name or "/" in name or "\\" in name:
         raise ValueError(f"Text-replacement provider returned an unsafe filename: {name!r}")
+
+
+def _windows_safe_filename(name: str, source_path: Path) -> str:
+    """Make a translated name valid on Windows, changing only the stem (FR-2026-10-27-01)."""
+    suffix = Path(name).suffix
+    stem = name[: len(name) - len(suffix)] if suffix else name
+    stem = _INVALID_FILENAME_CHARACTERS.sub("-", stem)
+    stem = _WHITESPACE_RUN.sub(" ", stem).lstrip(" ").rstrip(" .")
+    if not stem:
+        stem = source_path.stem
+    elif stem.upper() in _RESERVED_DEVICE_NAMES:
+        stem = f"_{stem}"
+    return f"{stem}{suffix}"
+
+
+_INVALID_FILENAME_CHARACTERS = re.compile(r'[<>:"|?*\x00-\x1f]+')
+_WHITESPACE_RUN = re.compile(r"\s+")
+_RESERVED_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{number}" for number in range(1, 10)}
+    | {f"LPT{number}" for number in range(1, 10)}
+)
 
 
 def _assert_path_inside_output(output_root: Path, path: Path) -> None:

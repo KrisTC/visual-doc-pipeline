@@ -533,6 +533,15 @@ wheels = [
 ]
 
 [[package]]
+name = "execnet"
+version = "2.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/89/780e11f9588d9e7128a3f87788354c7946a9cbb1401ad38a48c4db9a4f07/execnet-2.1.2.tar.gz", hash = "sha256:63d83bfdd9a23e35b9c6a3261412324f964c2ec8dcd8d3c6916ee9373e0befcd", size = 166622, upload-time = "2025-11-12T09:56:37.75Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/84/02fc1827e8cdded4aa65baef11296a9bbe595c474f0d6d758af082d849fd/execnet-2.1.2-py3-none-any.whl", hash = "sha256:67fba928dd5a544b783f6056f449e5e3931a5c378b128bc18501f7ea79e296ec", size = 40708, upload-time = "2025-11-12T09:56:36.333Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "3.32.0"
 source = { registry = "https://pypi.org/simple" }
@@ -672,6 +681,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f8/84/d0c865447e6c950abece00a3489aa888eaebb160b3b6544efea6899732cb/google_cloud_translate-3.27.0.tar.gz", hash = "sha256:2ae78ef1aa8dbb5ec9767a08eabce34fda7bb45a07ba67ae6e0ead8cfd5f95f7", size = 274806, upload-time = "2026-06-22T23:22:40.612Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/80/b7996af4d6519cd02d46d96b55d1f912c2e3dd6dd190d79305a74f17ec5a/google_cloud_translate-3.27.0-py3-none-any.whl", hash = "sha256:173b1ece3db69b1057e331a1616817912c2d41fee832cc6e1eab7df349fe374c", size = 210464, upload-time = "2026-06-22T23:20:41.618Z" },
+]
+
+[[package]]
+name = "google-cloud-vision"
+version = "3.16.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core", extra = ["grpc"] },
+    { name = "google-auth" },
+    { name = "grpcio" },
+    { name = "proto-plus" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/2c/5d/dca91808ab37834cda879039335fc53e4455e904caa979f5d1b4c69fffb5/google_cloud_vision-3.16.0.tar.gz", hash = "sha256:dcbf584b7911f7379cab88fbf9c32bc8d19f16718f9594d7fd65af23246b01b0", size = 580781, upload-time = "2026-10-01T18:18:43.158Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/a6/555a0e46d4ccb6fb3bc2b9118211f9f9c3b5ba009c239e32c5dde3b9672a/google_cloud_vision-3.16.0-py3-none-any.whl", hash = "sha256:90c1cbca060fc9b27383d8f0005b573257cd572212399dd836f0b537898b3a34", size = 540111, upload-time = "2026-10-01T18:12:59.636Z" },
 ]
 
 [[package]]
@@ -829,6 +854,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/6c/e6/7bf14eeb8f8b7251141944835abd42eb20a658d89084b7e1f3e5fe394090/imagesize-2.0.0.tar.gz", hash = "sha256:8e8358c4a05c304f1fccf7ff96f036e7243a189e9e42e90851993c558cfe9ee3", size = 1773045, upload-time = "2026-03-03T14:18:29.941Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/5f/53/fb7122b71361a0d121b669dcf3d31244ef75badbbb724af388948de543e2/imagesize-2.0.0-py2.py3-none-any.whl", hash = "sha256:5667c5bbb57ab3f1fa4bc366f4fbc971db3d5ed011fd2715fd8001f782718d96", size = 9441, upload-time = "2026-03-03T14:18:27.892Z" },
+]
+
+[[package]]
+name = "iniconfig"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/e1/2069291243c926a2ff1cd706c7f3eeb9b62144bf60f77c9fb9ff2fb26bd3/iniconfig-2.3.1.tar.gz", hash = "sha256:67f4b9c50da0dedf52af349e7749a80a9057a5031199791b906c3bb3ae878960", size = 21209, upload-time = "2026-10-06T22:48:38.076Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/43/4ca9e49d27a1fcf6bece6f6aec0ea46bb9112489b93d4b688fb415457bdb/iniconfig-2.3.1-py3-none-any.whl", hash = "sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7", size = 7552, upload-time = "2026-10-06T22:48:36.959Z" },
 ]
 
 [[package]]
@@ -1721,6 +1755,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pluggy"
+version = "1.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/db/7fc19e6f2dc92a966727031389fc2e08b558f0f25eb7403c1119ad4713cd/pluggy-1.7.0.tar.gz", hash = "sha256:d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8", size = 123304, upload-time = "2026-10-15T09:50:58.343Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl", hash = "sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec", size = 27082, upload-time = "2026-10-15T09:50:56.808Z" },
+]
+
+[[package]]
 name = "preshed"
 version = "3.0.13"
 source = { registry = "https://pypi.org/simple" }
@@ -2022,6 +2065,35 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/54/40/cf14c4f534f817788966857afdedb90002198dca5ce4fe2c6ecb031955ae/pypdfium2-5.13.0-py3-none-win32.whl", hash = "sha256:d33ee7077db67478b75efe4b5ea9610fb96c5416a0bc4949227f0f59c34dfcd9", size = 3753164, upload-time = "2026-08-13T10:58:10.97Z" },
     { url = "https://files.pythonhosted.org/packages/5d/99/a37b6b902457569468ed5908c94e56cb6c4032541f02cf89f723d42a9148/pypdfium2-5.13.0-py3-none-win_amd64.whl", hash = "sha256:47dcca2a8d507b5fd24f94c3c9d48fb379430f097bc20f01beff6c963ffbcedb", size = 3885553, upload-time = "2026-08-13T10:58:12.709Z" },
     { url = "https://files.pythonhosted.org/packages/50/7f/d39f6e64375c2ffd50ea100e3c73af79085c880c2791eb7203bc61d8913f/pypdfium2-5.13.0-py3-none-win_arm64.whl", hash = "sha256:554a0b23376460af1410e3c915906895e2dac67a086b9e6ccde0643a795d3b0d", size = 3700026, upload-time = "2026-08-13T10:58:14.206Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32' or (extra == 'extra-19-visual-doc-pipeline-cpu' and extra == 'extra-19-visual-doc-pipeline-gpu')" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
+]
+
+[[package]]
+name = "pytest-xdist"
+version = "3.8.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "execnet" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/78/b4/439b179d1ff526791eb921115fca8e44e596a13efeda518b9d845a619450/pytest_xdist-3.8.0.tar.gz", hash = "sha256:7e578125ec9bc6050861aa93f2d59f1d8d085595d6551c2c90b6f4fad8d3a9f1", size = 88069, upload-time = "2025-07-01T13:30:59.346Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ca/31/d4e37e9e550c2b92a9cbc2e4d0b7420a27224968580b5a447f420847c975/pytest_xdist-3.8.0-py3-none-any.whl", hash = "sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88", size = 46396, upload-time = "2025-07-01T13:30:56.632Z" },
 ]
 
 [[package]]
@@ -2626,6 +2698,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "argostranslate" },
     { name = "google-cloud-translate" },
+    { name = "google-cloud-vision" },
     { name = "numpy" },
     { name = "openpyxl" },
     { name = "paddleocr" },
@@ -2652,6 +2725,8 @@ gpu = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-xdist" },
     { name = "types-openpyxl" },
 ]
 
@@ -2659,6 +2734,7 @@ dev = [
 requires-dist = [
     { name = "argostranslate", specifier = ">=1.11.0" },
     { name = "google-cloud-translate", specifier = ">=3.27.0" },
+    { name = "google-cloud-vision", specifier = ">=3.16.0" },
     { name = "numpy" },
     { name = "openpyxl" },
     { name = "paddleocr", specifier = "==3.7.0" },
@@ -2680,6 +2756,8 @@ provides-extras = ["cpu", "gpu"]
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "types-openpyxl" },
 ]
 

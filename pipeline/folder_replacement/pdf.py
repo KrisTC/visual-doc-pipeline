@@ -414,6 +414,11 @@ def apply_pdf(
             raise RuntimeError("A PDF image differs from its plan.")
         planned.image = replacement_image
         image_regions += apply_bitmap(planned, translate, typeface, target_language)
+        if diagnostics is not None:
+            diagnostics.extend(
+                {**entry, "location": {"pdf_image_object": reference_number}}
+                for entry in planned.skipped_regions
+            )
         image_file.replace(replacement_image)
         advance("image")
     for page_index, page in enumerate(writer.pages, start=1):

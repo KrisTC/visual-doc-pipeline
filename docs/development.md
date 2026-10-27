@@ -20,7 +20,7 @@ Run the main command locally with explicit input and output folders:
 ```
 
 The default text-replacement provider is Google Cloud Translation. Configure
-credentials first with the [Google Cloud Translation setup guide](google-cloud-translation-setup.md).
+credentials first with the [Google Cloud setup guide](google-cloud-setup.md).
 For local translation, select Argos explicitly:
 
 ```sh
@@ -56,11 +56,26 @@ Validate the dependency policy:
 ./run.sh scripts/check-dependency-policy.py
 ```
 
-Run the automated test suite:
+Run the automated test suite. By default it runs in parallel with `pytest` and
+`pytest-xdist`, using `max(1, cores - 2)` workers:
 
 ```sh
-scripts/run-tests.sh
+scripts/run-tests.sh            # Windows: .\scripts\run-tests.ps1
 ```
+
+Options handled by the runner:
+
+| Option | Effect |
+|---|---|
+| `--serial` | Run in one process with `unittest` discovery, the reference mode for reproducing a failure. CI uses this. |
+| `--fast` | Skip tests marked `@slow_test` (`tests/slow_test_support.py`); they are reported as skipped. Use it while iterating; run without it before finishing. |
+| `--workers N` | Set the parallel worker count. |
+
+Any other argument is passed to `pytest`, or to `unittest` with `--serial`, for
+example `scripts/run-tests.sh -k name_pattern --durations 20` or
+`scripts/run-tests.sh --serial -v`. Each tool has its own options; `pytest`
+accepts file paths and `-k` expressions, whereas `unittest discover` accepts
+`-k` patterns and `--durations`.
 
 Type-check Python:
 
@@ -107,6 +122,18 @@ Generate OCR and text-replacement viewers:
 ```sh
 ./run.sh scripts/ocr_evaluations.py
 ```
+
+For a manual Cloud Vision OCR evaluation, follow the [Google Cloud setup guide](google-cloud-setup.md), then select it explicitly:
+
+```sh
+./run.sh scripts/ocr_evaluations.py --ocr google_cloud_vision
+```
+
+This sends the prepared evaluation images, including confidential samples, to Google. Add `--include 'ja/example.pptx'` to process only a matching source document and its embedded images; the path is relative to `sample-data/`.
+
+By default each run processes at most the first 25 images (after `--include` filtering, in sorted order). Use `--max-images N` to change the cap or `--max-images 0` for no limit. Preparation, cleanup, OCR and each text-replacement provider are shown as stages in the live progress display.
+
+The text-replacement viewer always includes the `identity` and `character_mask` providers. Add one more with `--text-replacement PROVIDER`, for example `argos_translate` or `google_cloud_translate`; the added provider is shown first when the viewer opens. `google_cloud_translate` sends the recognised text, including from confidential samples, to Google Cloud Translation (EU endpoint).
 
 Generate colour-estimation pages:
 

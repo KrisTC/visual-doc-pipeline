@@ -15,7 +15,7 @@ Shared folder-processing, layout, diagnostics, caching, and development-workflow
 
 ### Description
 
-The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported.
+The project shall provide a main pipeline command that accepts an input folder and an output folder. It shall recursively discover the supported bitmap and document file types, process every eligible file, and write results beneath the output folder while preserving the input hierarchy. It shall ignore files whose type is not supported, and Office temporary owner files as defined by FR-2026-10-26-02.
 
 The command shall accept a text-replacement-provider name, defaulting to `google_cloud_translate`; an OCR-provider name, defaulting to `paddleocr`; a required source-language BCP 47 tag; and a target-language BCP 47 tag, defaulting to `en`. It shall replace every eligible visible text item using the selected text-replacement provider. Output filenames shall be passed to the selected text-replacement provider with `is_filename=True` before the output path is determined. Its `--help` output shall display one command-options section containing each option's concise description and default, together with separate, non-duplicative text-replacement-provider, OCR-provider, and document-text-layout reference sections. The provider sections shall list every name discovered from the default plugin directories, with its discovered plugin description when one is declared. The document-text-layout reference section shall list every accepted value; the usage and command-option entry shall use the metavar `LAYOUT` rather than repeat those values. When stdout is an interactive terminal whose `TERM` is not `dumb` and `NO_COLOR` is unset, it shall use ANSI colour without colouring descriptions: section headings shall be bold, option names bold cyan, choice names bold green, and default-value annotations yellow. It shall emit plain text when stdout is not interactive, `TERM` is `dumb`, or `NO_COLOR` is set.
 
@@ -91,8 +91,9 @@ top-level `progress` integer percentage, a top-level `eta_seconds` value, and
 a `files` object. The top-level `progress` value shall use the same completed share and integer
 percentage as the Rich Overall bar. The `files` object shall map each
 input-relative POSIX path to its entry. A file that will not be processed,
-including an unsupported file, a provider-cache sidecar, or one excluded by the
-include patterns, shall have status `skipped`.
+including an unsupported file, a provider-cache sidecar, an Office temporary
+owner file (FR-2026-10-26-02), or one excluded by the include patterns, shall
+have status `skipped`.
 Each remaining file shall initially have status `queued`. When processing of a
 file starts, its status shall change to `processing` and it shall have a
 `progress` property containing an integer percentage from `0` through `100`.
@@ -1503,8 +1504,10 @@ The command-specific row mappings are:
   post-native-pass layout rewrite, chart-cache synchronization, and final
   package write. These source-level steps shall remain on the Current row;
   only embedded XLSX native-text processing belongs on the Nested row.
-- OCR evaluation: the overall row counts all non-cached provider/image
-  evaluations; the current row counts those for the active progress folder.
+- OCR evaluation: as defined by FR-2026-10-26-03. The overall row counts the
+  command's stages (input preparation, cleanup, OCR, and each
+  text-replacement provider); the current row counts the files of the active
+  stage.
 - Native text-replacement evaluation: the overall row counts all eligible
   presentations; the current row counts those in the active source-language
   directory.
@@ -2022,5 +2025,74 @@ A consumer of `progress.json` could previously see only a rough status for a fil
 ### Verification
 
 Automated tests shall use synthetic documents, a mocked provider and a mocked clock. They shall verify that `details` follows the label of each plan, translate, apply and rate-limit step, is absent before the first label and after completion, holds the stderr failure message without the source path for a failed file, and is absent for queued and skipped files; that `eta_status` is `Calculating` exactly when `eta_seconds` is `null` and the progress display is enabled, including when an estimate reverts to `null`, and is absent when `eta_seconds` is a number, in completed, failed, queued and skipped entries, and when terminal progress is disabled; and that every observed progress-file write is valid JSON.
+
+---
+
+## FR-2026-10-26-02
+
+| Property | Value |
+|----------|-------|
+| Title | Skip Office temporary owner files in folder replacement and OCR evaluation input preparation |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-03-04, FR-2026-08-01-01, FR-2026-10-24-03 |
+
+### Description
+
+The folder-replacement command and the OCR evaluation input preparation used by `scripts/ocr_evaluations.py` shall treat a file whose name starts with `~$` as an Office temporary owner (lock) file, which Word, Excel and PowerPoint create beside an open document, and shall skip it even when its extension is a supported bitmap or document extension. The check shall apply to the file's own name only, at any depth, and shall be case-sensitive to the literal prefix `~$`. A directory whose name starts with `~$` shall not by itself exclude the files below it.
+
+A skipped owner file is ineligible, as an unsupported file is under FR-2026-08-03-03. It shall not be read, processed, copied, extracted from, or written to the output folder; it shall not be reported as a failed file, abort the run, or cause a non-zero exit; and it shall not count toward any progress total or evaluation image set. The skip applies regardless of the include patterns. In the folder-replacement command, its `progress.json` entry (FR-2026-08-03-04) shall have status `skipped`.
+
+### Rationale
+
+An owner file has a document extension but holds only a short user and machine name, not an OOXML package, so processing it always fails. In folder replacement it makes a run exit non-zero, and in OCR evaluation input preparation it aborts the whole run. Such files appear whenever a source folder is copied while a document is open.
+
+### Verification
+
+Automated tests shall use synthetic input folders only. For folder replacement, they shall verify that a `~$`-prefixed `.docx`, `.xlsx` and `.pptx` file, at the input root and in a subfolder, produces no output file, no failure, a zero exit status, a `skipped` progress entry and no contribution to the overall total; that a similarly named file without the `~$` prefix, and a file below a `~$`-prefixed directory, are still processed; and that the skip applies when an include pattern matches the owner file. For OCR evaluation input preparation, they shall verify that an invalid `~$`-prefixed `.docx`, `.pptx` and `.xlsx` file produces no prepared output and no error, with and without an include pattern that matches it, while a valid sibling document is still prepared.
+
+---
+
+## FR-2026-10-27-01
+
+| Property | Value |
+|----------|-------|
+| Title | Make translated output filenames valid on the output filesystem |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported failure: a translated output filename containing a colon could not be created on Windows |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-03-03, FR-2026-08-24-04, FR-2026-08-28-03 |
+
+### Description
+
+After the folder-replacement command receives an output filename from the text-replacement provider (FR-2026-08-03-03) and has applied its existing unsafe-name rejection, it shall make the name valid on Windows before it determines the output path. This applies to every text-replacement provider, not only `google_cloud_translate`, and to every platform, so that one input yields the same output name everywhere. The command shall apply these steps to the name's stem and leave the suffix as the existing suffix rule determines:
+
+1. Replace each run of one or more characters from `< > : " | ? *` and the control characters U+0000 through U+001F with a single `-`, then collapse each run of whitespace to a single space.
+2. Remove every leading space and every trailing space or `.` from the stem.
+3. If the stem, compared case-insensitively, is a Windows reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`), prefix it with `_`.
+4. If the stem is empty after these steps, use the source file's own stem.
+
+The existing rejection of an empty name, `.`, `..`, NUL, and a name containing a path separator is unchanged and shall run first. A provider's own stem checks (for `google_cloud_translate`, `google-cloud-translation-requirements.md`) are unchanged and shall not reject a stem solely because it contains one of the characters in step 1.
+
+The sanitised name shall be used for the output path, the existing collision numbering, the progress and diagnostic sidecar names, and every message that names the output file. A name that needs no change shall be unchanged. The command shall not report a sanitised name as a failure or warning.
+
+### Rationale
+
+The output name is the translation of the input file's name (FR-2026-08-03-03). The input name is always valid on the source filesystem, but the translated name is new text that nothing has validated against Windows rules. A translator may introduce a forbidden character that the source name did not contain: it may turn Japanese brackets or other punctuation into an English phrase with a colon, add a question mark or quotation marks, render a full-width punctuation mark as its ASCII form, or end a name with a full stop. Full-width forms such as `：` and `？` are legal in a Windows filename, but their ASCII equivalents are not. In a failed run the source name held no ASCII colon, and the translated name did.
+
+A single such name currently fails the whole document after all of its translation work has been done, because the error appears only at the final rename. The failure depends on the provider's wording, so it is not predictable from the input and can appear for any provider.
+
+### Notes
+
+The sanitiser changes only the translated text. A name that needs no change, including every identity or character-mask output, is unchanged, so an output name keeps matching its input name wherever the provider leaves it valid.
+
+Overlong paths are a separate limitation (see the development-scenario notes on translated filenames). Sanitising can make two different translations equal; the existing collision numbering handles it.
+
+### Verification
+
+Automated tests shall use synthetic names and a fake provider, and no network call. They shall verify each of steps 1 to 4 including `Title: Subtitle.pptx`, a name with several adjacent invalid characters, a trailing dot or space, a reserved name with and without differing case, an all-invalid stem, an unchanged valid name, and the unchanged rejection of path separators. They shall also verify that sanitised collisions are numbered, that the output file is created, and that the progress entry names the sanitised file.
 
 ---

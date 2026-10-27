@@ -724,3 +724,106 @@ corresponding release notes, while bounded extraction keeps adjacent release
 entries out of the published release page.
 
 ---
+
+## TR-2026-10-27-01
+
+| Property | Value |
+|----------|-------|
+| Title | Command-line argument tests run in process |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request to reduce unit-test iteration time |
+| Date Added | 2026-10-27 |
+| Related Requirements | TR-2026-08-01-03, FR-2026-08-01-01, FR-2026-08-03-03, FR-2026-08-04-03, FR-2026-08-22-01 |
+
+### Description
+
+An automated test that verifies command-line parsing, validation, `--help` content, or the exit code and message of an anticipated argument error shall call the script's entry point or argument parser in the test process, with a synthetic `argv` and captured standard streams. It shall not start a Python subprocess for each case.
+
+The test suite shall keep exactly one subprocess test per user-invokable script that proves the script runs as a direct script (`python scripts/<name>.py --help` exits 0 and prints usage). That test verifies the launch path, including import resolution when run as a script, and shall not repeat assertions about option content, which the in-process tests verify.
+
+Moving a case in process shall not weaken its assertions: it shall still verify the exit status, that the error message is reported on standard error as an argparse usage error without a traceback, and the exact message text it verified before.
+
+### Rationale
+
+Each subprocess re-imports the full folder-replacement pipeline (about 1.8 s per start, measured on the development machine), so one test with several argument-error cases cost over 13 s. Argument handling is Python logic that does not need a new interpreter; only the direct-script launch path does.
+
+### Verification
+
+The tests covering FR-2026-08-04-03 and the help-content assertions of FR-2026-08-03-03 shall use no subprocess. The tests for FR-2026-08-01-01, FR-2026-08-03-03 and FR-2026-08-22-01 keep their single direct-script subprocess check.
+
+---
+
+## TR-2026-10-27-02
+
+| Property | Value |
+|----------|-------|
+| Title | Parallel test execution by default |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request to reduce unit-test iteration time |
+| Date Added | 2026-10-27 |
+| Related Requirements | TR-2026-08-01-01, TR-2026-08-01-03, TR-2026-09-10-01, TR-2026-10-27-03, SR-2026-08-01-01, SR-2026-08-21-02, FR-2026-08-01-02 |
+
+### Description
+
+The test runners `scripts/run-tests.sh` and `scripts/run-tests.ps1` shall run the complete test suite in parallel by default. They shall use `pytest` with `pytest-xdist` to run the existing `unittest.TestCase` tests in `tests/`, discovering the files matching `test_*.py`. `pytest` and `pytest-xdist` shall be declared as development dependencies in the `dev` dependency group of `pyproject.toml` and locked in `uv.lock`. Both dependencies are subject to SR-2026-08-01-01 and SR-2026-08-21-02 and shall be installable by the CI dependency-installation workflow of TR-2026-09-10-01.
+
+This requirement supersedes the `unittest`-discovery mechanism of TR-2026-08-01-03 for the default run. Everything else in TR-2026-08-01-03 remains: the tests live in `tests/`, both platform runners exist and run the same command, they delegate to the `run.ps1` or `run.sh` wrapper (FR-2026-08-24-03), and they return the underlying exit code.
+
+The runners shall also provide a `--serial` option that runs the suite in one process with standard-library `unittest` discovery of `tests/` with the pattern `test_*.py`, exactly as TR-2026-08-01-03 specified. Serial mode is the reference execution mode, for reproducing a failure that may depend on parallel execution.
+
+Parallel mode shall:
+
+- discover the same set of tests as serial mode
+- distribute tests across worker processes, defaulting to `max(1, N - 2)` workers where `N` is the number of available CPU cores, so two cores remain free for the developer's other work, and accept an override for the worker count; when the result is one worker, run the tests in the main process without starting a worker
+- report a failure or error in any test or subtest, including a failure inside a `subTest`, as a non-zero exit code
+- keep skipped tests and subtests visible with their skip reason, including provider-declared skips required by FR-2026-08-01-02
+The CI workflow of TR-2026-09-10-01 shall run the complete suite with `--serial`. CI is the authoritative check and its hosted runners have few cores, so parallel execution would add little speed; running the reference mode there keeps its result independent of worker scheduling. Local parallel runs still reveal any test-order or shared-state dependence.
+
+Tests shall be independent of execution order and of each other: each test shall use its own temporary directories and shall not write to a shared repository path, `outputs/`, or the user's `.env.local`. A test that cannot meet this shall be identified and run serially or fixed.
+
+### Rationale
+
+The test suite is dominated by independent, CPU-bound document and image processing. Parallel execution by default reduces wall time on multi-core machines without changing the tests, which is the purpose of a fast edit-test loop. A serial mode remains available so that a failure can be reproduced without concurrency as a factor.
+
+### Verification
+
+A verification run shall show that the passed, failed, and skipped counts reported by parallel mode equal those of serial mode for the complete suite. A deliberately failing subtest in a temporary test module shall demonstrate that parallel mode exits non-zero.
+
+### Notes
+
+Assumptions for owner review: the Paddle OCR contract test loads a model in whichever worker runs it, and several workers may load PaddleOCR models concurrently, so memory and GPU use may rise; the implementation shall measure this and, if necessary, propose limiting that test to one worker. If subtest failures or provider-declared subtest skips are not reported correctly by the pinned `pytest` version, the implementation shall select a `pytest` version or plugin that reports them, or stop and ask for direction rather than weakening the checks above.
+
+---
+
+## TR-2026-10-27-03
+
+| Property | Value |
+|----------|-------|
+| Title | Test runners forward arguments and support a fast subset |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request to reduce unit-test iteration time |
+| Date Added | 2026-10-27 |
+| Related Requirements | TR-2026-08-01-03, TR-2026-09-10-01, TR-2026-10-27-02, FR-2026-08-01-02 |
+
+### Description
+
+`scripts/run-tests.sh` and `scripts/run-tests.ps1` shall forward every command-line argument they do not themselves define to the underlying test command, so a developer can select tests (such as by name pattern or module) and request standard test-runner options (such as verbose output or `--durations`) without bypassing the runners. With no arguments the runners shall run the complete suite as TR-2026-10-27-02 specifies, and they shall exit with the underlying test-process exit code. Forwarded arguments go to the active underlying runner: `pytest` by default and `unittest` with `--serial`. The two runners shall accept the same options with equivalent behaviour on their platforms, and their usage shall be documented in `docs/development.md`.
+
+The runners shall define a `--fast` option that omits tests marked as slow. A plain run, with no `--fast`, includes them. The project shall provide a single decorator in the shared test-support code that marks a test as slow. When `--fast` is set, the runner shall signal it to the test process through an environment variable, and the decorator shall skip the marked test with a reason that identifies it as slow and names `--fast`. The skip shall use the standard skip mechanism, so the run output reports the number of skipped tests. When `--fast` is not set, a marked test shall run unchanged.
+
+The decorator shall be applied to the OCR provider contract test of FR-2026-08-01-02. It may also be applied to any other test that takes longer than 5 seconds in a serial reference run, provided a faster test covers the same requirement behaviour with synthetic data. It shall not be applied to a test that is the only test of a requirement.
+
+A fast run is for iteration only. The development guidance in `docs/development.md` and any task that requires a passing test suite shall treat a complete run as the completion check, and CI (TR-2026-09-10-01) shall run the complete suite without `--fast`. A skip declared by an OCR provider for a specific case (FR-2026-08-01-02) is unaffected by this option.
+
+### Rationale
+
+The runners currently cannot pass `--durations`, `-k`, or similar options, so a developer must call the wrapper by hand to profile or filter. A deliberately skip-visible fast subset shortens the edit-test loop without silently reducing what the suite verifies for a merge.
+
+### Notes
+
+Today no test-specific environment variable exists; the runners only pass the optional `.env.local` file through `run.ps1` or `run.sh`. This requirement adds one, set by the runner for the test process when `--fast` is given and read only by the slow-test decorator. Its name will be chosen at implementation. Because `unittest` and `pytest` accept different options, `docs/development.md` lists the options for each runner. `--fast` combines with both parallel and `--serial` modes.
+
+---

@@ -6,10 +6,12 @@ from pipeline.text_region_colours.models import (
     RgbaColour,
     TextRegionColourEstimate,
 )
+from pipeline.text_region_colours.replacement import estimate_replacement_colours
 
 __all__ = [
     "BackgroundKind",
     "RgbaColour",
     "TextRegionColourEstimate",
+    "estimate_replacement_colours",
     "estimate_text_region_colours",
 ]

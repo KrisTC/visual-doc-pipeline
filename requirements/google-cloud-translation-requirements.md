@@ -35,7 +35,7 @@ Google Cloud credential configuration shall comply with SR-2026-08-24-01. A succ
 
 The provider shall require the service-account Application Default Credentials configuration defined by SR-2026-08-24-01. Missing `GOOGLE_APPLICATION_CREDENTIALS`, an unreadable credential file, a credential without a usable project ID when no environment-project override exists, or an API-key-only configuration shall raise `TextReplacementProviderError` before making a network request.
 
-`google_cloud_translate` shall declare `LOCAL_EVALUATION_ELIGIBLE = False`. Automated local text-replacement evaluation and its default test suite shall not instantiate it or send evaluation text to Google. This evaluation exclusion does not prevent user-requested processing of confidential samples through the provider when it complies with SR-2026-08-24-01.
+`google_cloud_translate` shall declare `LOCAL_EVALUATION_ELIGIBLE = False`. Automated local text-replacement evaluation and its default test suite shall not instantiate it or send evaluation text to Google. This evaluation exclusion does not prevent user-requested processing of confidential samples through the provider when it complies with SR-2026-08-24-01, including an explicit `--text-replacement google_cloud_translate` OCR-evaluation run under FR-2026-10-26-05.
 
 The provider shall send to Google only the replacement request's text and source and target language tags, plus the configured project and API operation parameters. It shall not send source paths, output paths, document metadata, OCR confidence, image bytes, evaluation artifacts, or credentials. It shall not persist translation text or API responses beyond the normal in-memory replacement result.
 

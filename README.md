@@ -118,7 +118,7 @@ Advanced v3** for text replacement. Select `argos_translate` with
 workflow. Provider contracts make it possible to add suitable OCR or
 text-replacement implementations without changing the folder-processing core.
 
-- [Google Cloud Translation setup](docs/google-cloud-translation-setup.md)
+- [Google Cloud setup for Translation and Vision OCR](docs/google-cloud-setup.md)
 - [OCR provider API](docs/ocr-provider-api.md)
 - [Text-replacement provider API](docs/text-replacement-provider-api.md)
 

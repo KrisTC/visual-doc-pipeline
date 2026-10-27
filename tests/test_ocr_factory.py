@@ -18,20 +18,22 @@ from pipeline import mounted_plugins
 
 
 class OcrProviderFactoryTests(unittest.TestCase):
-    # Verifies FR-2026-08-01-02, FR-2026-08-03-01, FR-2026-08-04-02, and FR-2026-09-02-04.
+    # Verifies FR-2026-08-01-02, FR-2026-08-03-01, FR-2026-08-04-02,
+    # FR-2026-09-02-04, and FR-2026-10-24-01.
     def test_discovers_provider_packages_by_their_directory_names(self) -> None:
         factory = OcrProviderFactory.discover_default_plugins()
 
-        self.assertEqual(("no_ocr", "paddleocr"), factory.provider_names)
+        self.assertEqual(("google_cloud_vision", "no_ocr", "paddleocr"), factory.provider_names)
         self.assertEqual(
             {
+                "google_cloud_vision": "Google Cloud Vision document-text OCR provider.",
                 "no_ocr": "Immediate empty-result OCR provider for local pipeline testing.",
                 "paddleocr": "PaddleOCR implementation of the product OCR-provider protocol.",
             },
             dict(factory.provider_descriptions),
         )
         self.assertEqual(
-            {"no_ocr": "no_ocr", "paddleocr": "ocr"},
+            {"google_cloud_vision": "gcv", "no_ocr": "no_ocr", "paddleocr": "ocr"},
             dict(factory.provider_short_names),
         )
         self.assertFalse(hasattr(factory.create("paddleocr"), "name"))

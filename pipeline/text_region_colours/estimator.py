@@ -233,6 +233,9 @@ def _rgb_to_lab(rgb: _UInt8Array) -> _FloatArray:
     )
 
 
+rgb_to_lab = _rgb_to_lab
+
+
 def _dominant_colour(lab_values: _FloatArray, rgba_values: _UInt8Array) -> tuple[_FloatArray, RgbaColour, float]:
     if len(lab_values) == 0:
         message = "Colour estimation requires at least one pixel."

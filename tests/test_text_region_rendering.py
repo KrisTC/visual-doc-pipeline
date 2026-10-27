@@ -263,6 +263,67 @@ class TextRegionRenderingTests(unittest.TestCase):
         self.assertLess(plan.layout.font.getSize(), 14.0)
         self.assertEqual(300.0, weight_coordinate.value)
 
+    # Verifies FR-2026-10-27-02.
+    def test_text_that_cannot_fit_is_skipped_and_leaves_the_region_unchanged(self) -> None:
+        image = self._blank_image()
+        ImageDraw.Draw(image).rectangle((8, 8, 12, 12), fill=(0, 0, 0))
+        original = image.copy()
+        tiny_region = _region((9, 9), (12, 12))
+
+        skipped = replace_text_regions(
+            image,
+            (TextRegionReplacement(tiny_region, ESTIMATE, "Internationalisation" * 3),),
+            self._typeface(),
+            target_language="en",
+        )
+
+        self.assertEqual(1, len(skipped))
+        self.assertEqual(0, skipped[0].index)
+        self.assertAlmostEqual(3.0, skipped[0].width)
+        self.assertAlmostEqual(3.0, skipped[0].height)
+        self.assertEqual(original.tobytes(), image.tobytes())
+
+    # Verifies FR-2026-10-27-02.
+    def test_a_skipped_region_does_not_change_how_another_region_is_rendered(self) -> None:
+        fitting_region = _region((10, 20), (90, 60))
+        tiny_region = _region((110, 20), (113, 23))
+        alone = self._blank_image()
+        together = self._blank_image()
+
+        replace_text_regions(
+            alone,
+            (TextRegionReplacement(fitting_region, ESTIMATE, "first"),),
+            self._typeface(),
+            target_language="en",
+        )
+        skipped = replace_text_regions(
+            together,
+            (
+                TextRegionReplacement(tiny_region, ESTIMATE, "Internationalisation" * 3),
+                TextRegionReplacement(fitting_region, ESTIMATE, "first"),
+            ),
+            self._typeface(),
+            target_language="en",
+        )
+
+        self.assertEqual([0], [region.index for region in skipped])
+        self.assertEqual(alone.tobytes(), together.tobytes())
+
+    # Verifies FR-2026-10-27-02.
+    def test_single_region_helpers_do_not_raise_when_text_cannot_fit(self) -> None:
+        image = self._blank_image()
+        original = image.copy()
+        tiny_region = _region((9, 9), (12, 12))
+
+        replace_text_region(
+            image, tiny_region, ESTIMATE, "Internationalisation" * 3, self._typeface(), "en"
+        )
+        render_replacement_text(
+            image, tiny_region, ESTIMATE, "Internationalisation" * 3, self._typeface(), "en"
+        )
+
+        self.assertEqual(original.tobytes(), image.tobytes())
+
     # Verifies FR-2026-08-02-10.
     def test_rotated_region_clips_replacement_text_to_its_polygon(self) -> None:
         image = Image.new("RGB", (180, 180), _rgba_tuple(BACKGROUND))

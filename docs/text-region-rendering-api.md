@@ -21,4 +21,6 @@ The utility fills the OCR polygon with `background_colour`, then lays out and dr
 
 For `gradient` and `complex` backgrounds, the representative `background_colour` is still used. This removes visible source text but does not reconstruct the original surface.
 
+`replace_text_region`, `render_replacement_text`, and `replace_text_regions` accept an optional `page_colour` (opaque RGB, default white) that shows through a transparent background. The light-text lightness adjustment on dark surfaces judges a transparent background against it. Use `estimate_replacement_colours` from `pipeline.text_region_colours` to build estimates with the same page colour.
+
 The local evaluator loads the committed variable Noto Sans JP font at native weight `500` (bold). When a supplied variable typeface has a `wght` axis and its preliminary fitted size is below 14 px, the renderer re-fits with that typeface's `300` weight variation to retain more useful glyph width. Static typefaces retain their supplied weight.

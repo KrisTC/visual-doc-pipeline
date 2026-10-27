@@ -88,7 +88,7 @@ class RunPowerShellWrapperTests(unittest.TestCase):
             self.assertNotIn("\\", arguments)
             self.assertTrue(arguments.endswith("/candidate.env python -c pass"))
 
-    # Verifies FR-2026-08-24-03.
+    # Verifies FR-2026-08-24-03 and TR-2026-10-27-03.
     @unittest.skipUnless(os.name == "nt", "PowerShell wrapper requires Windows.")
     def test_test_runner_delegates_to_the_wrapper(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -105,11 +105,17 @@ class RunPowerShellWrapperTests(unittest.TestCase):
                 encoding="ascii",
             )
 
-            _run_power_shell(test_runner, _wrapper_environment(fake_bin, arguments_file))
+            _run_power_shell(
+                test_runner,
+                _wrapper_environment(fake_bin, arguments_file),
+                "--serial",
+                "-k",
+                "name pattern",
+            )
 
             arguments = _read_arguments(arguments_file)
-            self.assertTrue(arguments.startswith("run --exact --extra gpu python -m unittest discover -s "))
-            self.assertTrue(arguments.endswith("\\tests -p test_*.py"))
+            self.assertTrue(arguments.startswith("run --exact --extra gpu python "))
+            self.assertTrue(arguments.endswith('\\scripts\\run_tests.py --serial -k "name pattern"'))
 
     # Verifies FR-2026-08-24-03.
     @unittest.skipUnless(os.name == "nt", "PowerShell wrapper requires Windows.")
@@ -217,6 +223,38 @@ class RunBashWrapperTests(unittest.TestCase):
                 ("run", "--exact", "--extra", "cpu", "python", "-c", "pass"),
                 _read_argument_lines(arguments_file),
             )
+
+    # Verifies FR-2026-08-24-03 and TR-2026-10-27-03.
+    @unittest.skipUnless(os.name != "nt" and shutil.which("bash"), "Bash wrapper requires a Unix host.")
+    def test_test_runner_delegates_to_the_wrapper_and_forwards_arguments(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            test_runner = _copy_script(root, "run-tests.sh")
+            test_runner.chmod(test_runner.stat().st_mode | stat.S_IXUSR)
+            _copy_root_script(root, "run.sh")
+            arguments_file = root / "uv-arguments.txt"
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            fake_uv = fake_bin / "uv"
+            fake_uv.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"${RUN_WRAPPER_ARGUMENTS_FILE}\"\n",
+                encoding="utf-8",
+            )
+            fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+
+            _run_bash(
+                test_runner,
+                _wrapper_environment(fake_bin, arguments_file),
+                "--serial",
+                "-k",
+                "name pattern",
+            )
+
+            arguments = _read_argument_lines(arguments_file)
+            self.assertEqual(("run", "--exact", "--extra", "gpu", "python"), arguments[:5])
+            self.assertEqual(str(root / "scripts" / "run_tests.py"), arguments[5])
+            self.assertEqual(("--serial", "-k", "name pattern"), arguments[6:])
 
 
 def _copy_script(root: Path, script_name: str) -> Path:

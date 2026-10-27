@@ -59,6 +59,7 @@ class OfficeMediaResult:
     native_items: int = 0
     image_regions: int = 0
     vector_result: VectorReplacementResult | None = None
+    diagnostics: tuple[dict[str, object], ...] = ()
 
 
 def is_office_media_part(name: str, *, include_vectors: bool = True) -> bool:
@@ -147,7 +148,11 @@ def apply_office_media(
     """Render the planned translations into the media part and re-encode it."""
     if plan.bitmap is not None:
         regions = apply_bitmap(plan.bitmap, translate, typeface, target_language)
-        return OfficeMediaResult(bitmap_plan_bytes(plan.bitmap), image_regions=regions)
+        return OfficeMediaResult(
+            bitmap_plan_bytes(plan.bitmap),
+            image_regions=regions,
+            diagnostics=tuple(plan.bitmap.skipped_regions),
+        )
     if plan.vector is None:
         message = "An Office media plan holds neither a bitmap nor a vector graphic."
         raise RuntimeError(message)

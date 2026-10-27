@@ -138,13 +138,13 @@ Automated tests shall mock Paddle runtime availability and engine behavior to ve
 
 ### Description
 
-The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
+The project shall provide a command that evaluates every supported bitmap image in `outputs/evaluations/ocr/input/` with every discovered OCR-provider plugin eligible for automatic local evaluation when no path filter is supplied. The number of images evaluated per run is limited by FR-2026-10-26-04. Explicit provider selection and exclusions are governed by FR-2026-08-04-02 and FR-2026-10-24-02; path filtering is governed by FR-2026-10-24-03. The input image's enclosing language-code directory shall supply the BCP 47 language passed to the provider.
 
 The command shall use the existing OCR-provider factory and OCR task request and response abstractions in `pipeline/ocr/`. It shall not implement, discover, or invoke provider-specific OCR logic independently.
 
-For each provider, the command shall create a corresponding provider root in `outputs/evaluations/ocr/output/`. Beneath that root, it shall mirror the input hierarchy. For every input image, it shall write a JSON serialization of the normalized OCR response together with a status, a copy of the source image with every detected text region masked in black, and one clipped bitmap image for each detected text region, using that region's bounding box. When a provider does not support an image's language, or when OCR fails for an image with a supported language, the command shall continue evaluating other images and providers, write a JSON file containing only a failed status for that image, and shall not create visual OCR artifacts for that image.
+For each provider, the command shall create a corresponding provider root in `outputs/evaluations/ocr/output/`. Beneath that root, it shall mirror the input hierarchy. For every input image, it shall write a JSON serialization of the normalized OCR response together with a status, a standalone SVG detection mask with every detected text region masked in black and linked to its viewer table row (FR-2026-10-26-02), and one clipped bitmap image for each detected text region, using that region's bounding box. When a provider does not support an image's language, or when OCR fails for an image with a supported language, the command shall continue evaluating other images and providers, write a JSON file containing only a failed status for that image, and shall not create visual OCR artifacts for that image.
 
-Each provider root shall contain a generated static HTML viewer that lets a user browse that provider's image evaluations, including the input image, masked image, detected-region clips, and OCR result data.
+Each provider root shall contain a generated static HTML viewer that lets a user browse that provider's image evaluations, including the input image, SVG detection mask, detected-region clips, and OCR result data.
 
 ### Rationale
 
@@ -152,7 +152,7 @@ Persisting visual artifacts alongside normalized provider output makes it practi
 
 ### Notes
 
-Evaluation outputs are local generated artifacts and remain ignored by Git. The command may process confidential inputs locally, but it shall not send their contents, paths, metadata, or extracted text to external services or commit them to repository artifacts.
+Evaluation outputs are local generated artifacts and remain ignored by Git. The command may process confidential inputs locally, but it shall not send their contents, paths, metadata, or extracted text to external services or commit them to repository artifacts, except for explicitly selected Google Cloud Vision image processing under SR-2026-10-24-01 and FR-2026-10-24-02.
 
 The static viewer may load jQuery from a CDN. The precise success-status JSON shape and generated-file naming shall be defined by the implementation.
 
@@ -169,9 +169,11 @@ Each provider root shall contain a checksum representing its complete evaluation
 | Status | Proposed |
 | Source | User request |
 | Date Added | 2026-08-02 |
-| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01, FR-2026-09-03-01 |
+| Related Requirements | FR-2026-08-01-03, TR-2026-08-01-01, FR-2026-09-03-01, FR-2026-10-26-03 |
 
 ### Description
+
+FR-2026-10-26-03 supersedes the row mapping in this requirement with stage-based rows covering OCR and text replacement.
 
 The OCR-evaluation command shall render terminal progress as defined by
 FR-2026-09-03-01. Its overall bar shall contain every non-cached
@@ -205,7 +207,7 @@ checksum-skipped provider.
 
 ### Description
 
-The static OCR-evaluation viewer shall not render JSON result content inline. For each successful image evaluation, it shall show the detected text-region clips in a table with an image column and an extracted-text column. Each detected region shall occupy one row.
+The static OCR-evaluation viewer shall not render JSON result content inline. For each successful image evaluation, it shall show the detected text-region clips in a table with an image column and an extracted-text column. Each detected region shall occupy one row. It shall present the provider's original recognized text without browser or page translation. The viewer shall mark the page and extracted-text cells as not translatable and shall identify each cell's source language.
 
 ### Rationale
 
@@ -213,7 +215,9 @@ The table gives a compact, legible visual comparison of every detected region an
 
 ### Notes
 
-The viewer shall retain the input and black-masked comparison images above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
+The viewer shall retain the input image and the black SVG detection mask (FR-2026-10-26-02) above the table. It shall retain a JSON-result link that opens in a new browser tab, but shall not render JSON content inline.
+
+Automated tests shall use synthetic multilingual OCR text and verify that the generated HTML preserves the source text and includes translation-prevention markup.
 
 ---
 
@@ -372,6 +376,8 @@ The background classification shall be based on non-text local pixels: low varia
 
 The API documentation may be provided by public model/function docstrings and a repository documentation page. It shall be kept accurate when the public model changes.
 
+The estimator reports the observed colours of whatever image it receives. Raster text replacement applies a page colour to a transparent image before calling it, as FR-2026-10-26-01 specifies.
+
 The local command shall use the existing OCR JSON shape, `bounding_polygon` source-image coordinates, and clip-local `padded_image_path` values. It shall not run OCR, call external services, modify input files, or process files from `sample-data/confidential/`. A missing paired source image, text-region bitmap, invalid JSON, or failed JSON status shall be reported and skipped while other eligible inputs continue. The HTML generator shall escape recognized text and all generated attribute values. It shall reject an absolute or escaping `padded_image_path` rather than link outside the input tree.
 
 The automated test suite shall use repository-owned synthetic images with known colours and shall verify estimates with declared perceptual colour-distance tolerances. It shall cover flat backgrounds, light and dark text, antialiasing, rotated OCR polygons, gradients, patterned backgrounds, transparency, dark text on a high-variation local background, thin dark text beside a lower-contrast fill-like component, text on a strong label panel, and text with an outline or shadow. Tests for the HTML generator shall create synthetic images and OCR-result JSON in a temporary directory; they shall not use `sample-data/` or other real sample files. The user-supplied colour-detection examples may be used for local manual evaluation, but synthetic cases shall provide the automated oracle.
@@ -421,7 +427,7 @@ For a region whose direction differs from a horizontal or vertical axis by no mo
 
 When determining a region's text direction from an OCR polygon edge, the renderer shall normalize equivalent baseline directions modulo 180 degrees before fitting or upright-angle snapping. Reversing the polygon's baseline edge shall not render text upside down.
 
-The colour estimator shall continue to report observed source colours unchanged. To improve the perceived sharpness of light replacement text on dark surfaces, the renderer shall apply a bounded rendering-only lightness adjustment when the text colour's relative luminance exceeds that of an opaque background whose relative luminance is at most `0.35` by at least `0.15`. The adjustment shall preserve the estimated text colour's hue and alpha and move its HSL lightness 65% of the remaining distance toward white. It shall not make any assumed compositing-background choice for an alpha-zero background, and shall not apply to other foreground/background relationships.
+The colour estimator shall continue to report observed source colours unchanged. To improve the perceived sharpness of light replacement text on dark surfaces, the renderer shall apply a bounded rendering-only lightness adjustment when the text colour's relative luminance exceeds that of an opaque background whose relative luminance is at most `0.35` by at least `0.15`. The adjustment shall preserve the estimated text colour's hue and alpha and move its HSL lightness 65% of the remaining distance toward white. For a fully transparent background, the relationship shall be judged against the assumed page colour of FR-2026-10-26-01 instead of being skipped. The adjustment otherwise applies by the existing rules and shall not apply to other foreground/background relationships.
 
 Automated tests shall use synthetic images and fonts only; they shall not use sample data. Tests shall cover in-place modification, background removal, rendered text colour, fitting of both shorter and longer replacement strings, wrapping, rotation, and output bounds. The local command and HTML output shall be verified with temporary synthetic inputs; the supplied examples are for manual visual evaluation only.
 
@@ -440,7 +446,7 @@ Automated tests shall use synthetic images and fonts only; they shall not use sa
 
 ### Description
 
-For every successful OCR image evaluation, the OCR-evaluation command shall run a text-replacement artifact stage after writing the current OCR artifacts. The stage shall use the current evaluation's original image, `OcrText` items, and source language. It shall use target language `en`, estimate the colours of every text region, and apply the replacement from every registered text-replacement provider to one image copy per provider. Each provider image shall receive all of its replacements successively, allowing the in-place renderer to produce a complete updated image.
+For every successful OCR image evaluation, the OCR-evaluation command shall run a text-replacement artifact stage after writing the current OCR artifacts. The stage shall use the current evaluation's original image, `OcrText` items, and source language. It shall use target language `en`, estimate the colours of every text region, and apply the replacement from each selected text-replacement provider (FR-2026-10-26-05) to one image copy per provider. Each provider image shall receive all of its replacements successively, allowing the in-place renderer to produce a complete updated image.
 
 The stage shall create a new generated text-replacement artifact directory alongside the current image artifacts. It shall contain one complete updated PNG per text-replacement provider and a clipped replacement bitmap for every eligible region/provider combination. It shall retain the original padded OCR clip as the table's original-text image.
 
@@ -448,7 +454,7 @@ The text-replacement stage and its report shall skip each OCR text region whose 
 
 The OCR artifact stage and text-replacement artifact stage shall have independent cache freshness markers. A missing or stale OCR viewer or OCR cache marker shall regenerate OCR and all dependent artifacts. A current OCR artifact set with a missing or stale text-replacement viewer or text-replacement cache marker shall retain the saved OCR JSON and OCR artifacts, then regenerate only the text-replacement artifacts and report without calling the OCR provider.
 
-The existing provider-root static OCR viewer shall remain unchanged. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every registered provider. The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region mask as its final option. The initial selected option and displayed image shall both be the first registered provider.
+The existing provider-root static OCR viewer shall remain unchanged, except as amended by FR-2026-10-26-02. Each provider root shall additionally contain a separate static text-replacement results page. For each successful image, that page shall show the original input and one selectable complete-image preview together in one non-wrapping row, each taking half of the available page width. Both images shall use the same `max-width: 100%` sizing rule without forced upscaling. The page shall then show a text-replacement table with the region number, original padded text image, and one replacement text-image column for every provider that ran (FR-2026-10-26-05). The preview image shall appear above its local dropdown. The dropdown shall select the complete provider image without a page reload; it shall also offer the detected-region SVG mask (FR-2026-10-26-02) as its final option. The initial selected option and displayed image shall both be the first registered provider, as amended by FR-2026-10-26-05.
 
 Every successful OCR-result JSON file shall include a top-level `source_language` BCP 47 string, equal to the language used in that image's OCR request. Failed JSON results shall remain status-only. The viewer shall display the resulting source-to-target language direction beside each successful OCR result, initially as `source_language→en`.
 
@@ -567,7 +573,9 @@ Palette images can express alpha as per-palette transparency bytes. Direct conve
 
 ### Notes
 
-The scope is limited to preparing raster pixels for OCR. It does not require general document rendering or composition of arbitrary visual layers. It does not change source-image alpha handling during colour estimation or replacement rendering. Automated tests shall use synthetic transparent raster images and synthetic page or slide backgrounds only, and shall verify that the original image is retained for replacement output.
+The scope is limited to preparing raster pixels for OCR. It does not require general document rendering or composition of arbitrary visual layers. Automated tests shall use synthetic transparent raster images and synthetic page or slide backgrounds only, and shall verify that the original image is retained for replacement output.
+
+FR-2026-10-26-01 extends this page colour to every format handler and also applies it to colour estimation; the original image remains the source for replacement output.
 
 ---
 
@@ -740,5 +748,515 @@ when a device is requested. The GPU image therefore does not claim CPU fallback;
 the CPU image supplies it using the normal CPU Paddle wheel.
 
 Automated tests shall mock Paddle's CUDA capability boundary and verify image configuration metadata and the validation command's success and failure reporting. A manually run validation on a compatible NVIDIA Linux host shall verify the actual GPU path before a release is published.
+
+---
+
+## FR-2026-10-24-01
+
+| Property | Value |
+|----------|-------|
+| Title | Add Google Cloud Vision OCR provider |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-10-24-03, SR-2026-10-24-01, TR-2026-08-01-01 |
+
+### Description
+
+The default OCR-provider factory shall discover a `google_cloud_vision` provider. The provider shall implement the existing OCR request and response contract and shall be selectable by name without changing the default `paddleocr` provider.
+
+For each supported bitmap-image request, the provider shall use Cloud Vision's synchronous `images:annotate` operation with the `DOCUMENT_TEXT_DETECTION` feature. It shall omit `languageHints` so Vision automatically detects languages, including images that mix Japanese and Latin text. The request's BCP 47 language tag shall still be used for supported-language validation and downstream result context. It shall not use asynchronous annotation or Cloud Storage input or output.
+
+The provider shall encode the input image in a format supported by Cloud Vision, preserve its dimensions and visible pixels under the existing OCR transparency-compositing policy, and check the applicable synchronous API image, pixel-dimension, and request-size limits before transmission. It shall raise `OcrProviderError` when the image cannot be sent within those limits. It shall not resize the image or move it to Cloud Storage to bypass a limit.
+
+The provider shall normalize the API's structured OCR response into the existing text-item contract. FR-2026-10-24-03 defines the intended grouping for translation and replacement. Bounding polygons shall use source-image pixel coordinates and preserve the API's vertex order when reporting an API-supplied polygon. Confidence shall remain normalized to the 0.0-to-1.0 range required by FR-2026-08-01-02. Provider-specific response details may be included in the optional extra-data field when useful to preserve document structure.
+
+The provider shall declare the BCP 47 languages it supports and shall declare itself ineligible for the default local OCR-provider contract test. The provider shall raise `OcrProviderError` for invalid configuration, authentication or authorization failures, API failures, and malformed response structures. A valid response with no detected text shall return an empty OCR result.
+
+### Rationale
+
+Cloud Vision provides dense document OCR through a selectable managed provider while retaining the pipeline's normalized OCR result model and PaddleOCR default.
+Google Vision OCR provider may be more useful when a GPU is not available as the CPU version of PaddleOCR can be very slow.
+
+### Verification
+
+Automated tests shall use synthetic images and a mocked Google client. They shall verify request construction, language-hint omission, normalized response text and order, confidence, source-image polygon conversion, local rejection of an over-limit image, provider failures, and that no network request or credential is required by the default test suite.
+
+---
+
+## FR-2026-10-24-02
+
+| Property | Value |
+|----------|-------|
+| Title | Manually evaluate Google Cloud Vision OCR |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-10-24-01, SR-2026-10-24-01 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall exclude `google_cloud_vision` from its automatic all-provider run. It shall accept `--ocr PROVIDER` to evaluate only the named registered OCR provider, including `google_cloud_vision` when explicitly selected. The command shall continue to prepare the normal evaluation input corpus and write results through its existing provider-specific artifacts and viewer.
+
+An explicit `--ocr google_cloud_vision` run shall process every eligible image selected for the run, including confidential samples when selected, through the Cloud Vision provider under SR-2026-10-24-01. The command help and developer documentation shall state that this selection sends image content to Google. The evaluator shall send no source paths, filenames, metadata, evaluation artifacts, or extracted text to Cloud Vision.
+
+The automatic run shall not instantiate `google_cloud_vision` or make a Vision API call. The explicit run shall not evaluate other OCR providers. The post-OCR text-replacement stage uses the providers selected under FR-2026-10-26-05.
+
+### Rationale
+
+An opt-in evaluator run lets the developer compare Cloud Vision OCR against the local visual corpus while preventing a default evaluation from transmitting images.
+
+### Notes
+
+The OCR-result JSON and primary OCR viewer use the provider's recognized text. The separate text-replacement viewer continues to translate to English under FR-2026-08-02-13.
+
+### Verification
+
+Automated tests shall use synthetic images and a fake OCR provider. They shall verify default exclusion, explicit selection, no unrelated provider calls, provider-root artifacts, and that the command help identifies the remote-image boundary. Tests shall not contact Google or read confidential samples.
+
+---
+
+## FR-2026-10-24-03
+
+| Property | Value |
+|----------|-------|
+| Title | Targeted OCR evaluation and Vision text grouping |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-24 |
+| Related Requirements | FR-2026-08-01-01, FR-2026-08-01-02, FR-2026-08-01-03, FR-2026-08-02-05, FR-2026-10-24-01, FR-2026-10-24-02 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall accept an optional repeatable `--include PATTERN` option using the same comma-separated glob syntax as the folder-replacement command. Patterns shall match supported source-file paths relative to `sample-data/`. A selected document shall select all bitmap images extracted from that document; a selected standalone bitmap shall select that image. With no include pattern, existing all-source behavior shall remain.
+
+For a filtered run, input preparation shall copy or extract only selected source files, and OCR evaluation shall process only images originating from those files, even when prepared images from earlier runs remain under the input root. The filter shall be applied before OCR requests, checksums, and progress totals are calculated. Filtered preparation shall not delete previously prepared files solely because they are outside the current selection. A filter matching no supported source files shall complete successfully without invoking an OCR provider or replacing an existing provider output root.
+
+Provider-specific viewers and generated results from a filtered run shall describe only the selected images. Existing provider-root checksum behavior shall account for the selected image set so that a different selection cannot be mistaken for a current evaluation.
+
+The `google_cloud_vision` provider shall supply one text region per visual line to every caller, including folder replacement and OCR evaluation. It shall combine words and punctuation belonging to one visual line while keeping distinct lines, bullets, and indented entries separate. Text on the same baseline with a gap larger than ordinary word spacing shall form separate regions, including neighboring table cells. Adjacent substantive text at a clearly different visual character size shall also form a separate region; a small bullet or punctuation mark shall not by itself trigger this split. A region's text, confidence, and source-image polygon shall correspond to the same grouped content. Detected spaces shall be retained within a line; detected line breaks shall terminate a region. Grouping shall also use OCR word geometry when break markers alone do not separate visually distinct lines. This grouping shall be derived locally from the existing `DOCUMENT_TEXT_DETECTION` response without another external service. It shall not split a visual line into sentences or join text across visual lines.
+
+The evaluation JSON and viewer shall make detected line breaks visible so the reviewer can distinguish missing OCR breaks from display-only whitespace collapse. When the Vision grouping changes, the evaluator shall regenerate its existing Vision artifacts even when image inputs are unchanged. The `google_cloud_vision` provider shall supply a cache identity, so its normalized grouped results can use the opt-in provider-result cache of FR-2026-08-27-10, that includes a grouping version and every numeric grouping threshold (including the character-size split ratio). Changing any of them shall invalidate cached Vision results and the evaluator's Vision artifacts without a separate manual version bump. Only normalized results are cached, never the submitted image or the raw API response (SR-2026-10-24-01).
+
+### Rationale
+
+The evaluation corpus is large, and an explicit source-path selection lets the developer assess a document or small group without running OCR on unrelated images. Matching source paths lets preparation skip unrelated document extraction as well as provider calls. Word regions are too small for useful translation, while Vision paragraph regions can combine text from visually separate lines and lose bullet or indentation structure. Text with a distinct visual size on the same line may be a separate label and needs its own replacement bounds.
+
+### Notes
+
+The filter selects source files. It cannot target one extracted image within a selected document. A separate `--output-root` can retain results from different selections.
+
+A sentence wrapped across two visual lines is returned as two regions so that each region keeps the geometry of its source line. Sentence-aware grouping may be considered separately after manual review.
+
+### Verification
+
+Automated tests shall use synthetic source trees and fake providers. They shall cover single, repeated, and comma-separated patterns; standalone images and documents; previously prepared excluded images; zero matches; unchanged no-filter behavior; selected-set progress and cache checks; and no provider call for an excluded image.
+
+Synthetic Vision responses shall be used to evaluate line breaks, wrapped text, punctuation, Japanese text, bullets, indentation, multi-column layouts, adjacent table cells with a wider gap than words within a cell, distinct and mildly varying character sizes, confidence, polygon geometry, and reading order. Tests shall verify that line grouping is the same through folder processing and OCR evaluation, that the viewer exposes detected breaks, and that older Vision artifacts are invalidated. Tests shall not contact Google or use confidential samples.
+
+---
+
+## FR-2026-10-26-01
+
+| Property | Value |
+|----------|-------|
+| Title | Estimate and render raster replacement text against an assumed page colour |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported DOCX embedded-image defect |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-02-09, FR-2026-08-02-10, FR-2026-08-02-13, FR-2026-08-27-01, FR-2026-09-04-02 |
+
+### Description
+
+Every raster text-replacement operation shall receive an assumed page colour: an opaque sRGB value that stands for whatever shows through the image's transparent pixels. The DOCX and PPTX handlers shall supply the colour that FR-2026-08-27-01 selects. Standalone bitmap, XLSX, and PDF handlers shall supply opaque white, including for PDF vector-content OCR rasters, until a separate requirement defines direct page-colour determination for that format. A handler that cannot determine a colour shall supply opaque white. The same page colour shall be used for OCR flattening under FR-2026-08-27-01 and for the colour estimation in this requirement.
+
+When the source image has any pixel with alpha below 255, colour estimation shall analyse a temporary copy alpha-composited onto the page colour. Hidden RGB values of fully transparent pixels and partially transparent antialiasing pixels shall therefore contribute only the colour they would visibly produce. The source image shall be retained, unmodified, for background wipes, glyph rendering, and output encoding, and FR-2026-09-04-02 shall continue to apply to it. The text-region colour estimator's public contract is unchanged: it reports the observed colours of the image it is given, and the caller is responsible for supplying the composited copy.
+
+The replacement text colour shall always have alpha 255. A region whose immediate background in the source image is fully transparent shall retain a fully transparent wipe colour, so a transparent cell stays transparent in the output and shows the document background. A background that is not fully transparent shall continue to be wiped with its observed stored colour.
+
+When the estimated text-colour confidence is below 0.60 and the region's background shows the page colour (a fully transparent source background, or an opaque background equal to the page colour), the replacement text colour shall be the higher-contrast of opaque black and opaque white against the page colour, using WCAG relative luminance. This fallback shall be selected before the rendering-only lightness adjustment in FR-2026-08-02-10, which shall then apply by its existing rules. Estimated text colours with low confidence on any other background shall be unchanged by this requirement.
+
+The text-replacement artifact stage in FR-2026-08-02-13 shall use the same page-colour behaviour, with opaque white as its page colour.
+
+### Rationale
+
+A transparent PNG in a document can look correct on the page while its stored pixels mislead colour estimation. Antialiasing pixels with low alpha and unrelated hidden RGB can form the apparent text colour, and replacement text drawn with that colour is nearly invisible on any page. The page colour supplies the missing context in one place, keeps the source's transparency in the output, and guarantees legible opaque text.
+
+### Notes
+
+This requirement amends the alpha-handling exclusion in FR-2026-08-27-01 and extends the page-colour source to every format. It does not change estimator output for an image the caller supplies or the alpha-zero background rules in FR-2026-08-02-09. It amends FR-2026-08-02-10 only so that its rendering-only lightness adjustment judges a fully transparent background against the page colour.
+
+The 0.60 threshold is a starting value to be reviewed against the text-colour confidence of correct and incorrect estimates in representative evaluations. Evaluation of a dark-mode page background is out of scope: a transparent cell shows the actual document background, which may be dark.
+
+PDF and XLSX page-colour determination from direct source properties, text-colour fallback on backgrounds other than the page colour, and theme or inherited colour resolution are deferred.
+
+### Verification
+
+Automated tests shall use synthetic images and synthetic page colours only. They shall cover:
+
+- dark glyphs with antialiasing on a fully transparent background, verifying that the chosen text colour is the glyph colour rather than the antialiasing colour and that its alpha is 255;
+- a row of transparent cells beside an opaque-filled row, verifying that the transparent wipe stays alpha 0 and the opaque wipe keeps its colour;
+- a non-white page colour, verifying composited estimation and the original image retained for output;
+- text-colour confidence on both sides of the threshold on a page-colour background, and low-confidence text on a non-page-colour background remaining unchanged;
+- white and black fallback selection against a light and a dark page colour, and the lightness adjustment applying to light text on a transparent background over a dark page colour but not over a light one;
+- default white for standalone bitmap, XLSX, and PDF inputs;
+- identical behaviour through the folder-replacement and OCR-evaluation paths; and
+- the same behaviour for a paletted PNG with per-palette alpha embedded in a synthetic DOCX.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-02
+
+| Property | Value |
+|----------|-------|
+| Title | Replace the masked bitmap with a linked SVG detection mask |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-02, FR-2026-08-02-13 |
+
+### Description
+
+For every successful OCR image evaluation, the OCR-evaluation command shall write a standalone SVG detection mask in place of the black-masked PNG. The command shall no longer write the masked PNG. The SVG shall be named `<image file name>.masked.svg`, beside the image's other artifacts, and shall not be written for an image whose evaluation failed or whose language is unsupported.
+
+The SVG shall have a `viewBox` and intrinsic size equal to the source bitmap's pixel dimensions. It shall contain, in order, one `<image>` element that references the original input bitmap by relative URL, and one filled black `<polygon>` for each detected text region, using the region's `bounding_polygon` vertices in source-pixel coordinates. The result shall mask the same area as the retired PNG. The SVG shall not embed the bitmap data and shall not contain script.
+
+Each polygon shall be wrapped in an `<a>` element when the OCR viewer has a table row for that region. Its `href` shall be a relative URL to that row in the provider root's OCR viewer (`index.html`), and its `target` shall be `_top`, so that activating the polygon from inside an embedded SVG scrolls or navigates the whole page to the row. A polygon whose region has no table row shall have no link and no `<a>` wrapper. Every polygon shall have a `<title>` containing the region's extracted text, shown by the browser as a tooltip. Region numbers shall match the table and the `text-NNNN` clip numbering. The SVG shall include every detected region, whatever its confidence.
+
+In the OCR viewer, every region table row shall have an `id` that is unique within the page, is derived from the image's relative path and the region number, and is stable across regenerations. The viewer shall show the SVG mask through an `<object type="image/svg+xml">` element in place of the previous `<img>`, so that its links remain active, with `max-width: 100%` and the same sizing as the input image beside it. The row that is the current URL fragment target shall be visually highlighted using the CSS `:target` selector. No script shall be required for the links or highlighting.
+
+The text-replacement results page shall use the same SVG for its "Detected regions masked" dropdown option. Because browsers do not allow an SVG shown through an `<img>` to load its referenced bitmap or follow links, the page's existing selection script shall display the SVG in an `<object>` element while that option is selected, and the complete-provider-image `<img>` otherwise, without a page reload. Activating a polygon from that page shall open the corresponding row in the OCR viewer, which is the only page that lists every detected region. The first-registered-provider initial selection in FR-2026-08-02-13 is unchanged.
+
+All values written to the SVG and viewer markup, including URLs, region identifiers, and extracted text, shall be XML- or HTML-escaped as appropriate, and extracted text shall remain unmodified and marked not translatable where it appears in viewer markup.
+
+The OCR artifact format version and the text-replacement artifact format version shall both change, so that a provider root generated with the retired masked PNG is regenerated. This requirement amends the masked-image wording in FR-2026-08-01-03, FR-2026-08-02-02, and FR-2026-08-02-13 to refer to the SVG detection mask.
+
+### Rationale
+
+A vector mask keeps the original bitmap pixels unmodified, avoids a second raster copy, and gives every detection a hyperlink target. A reviewer can click a masked region and land on its OCR table row instead of matching a position by eye.
+
+### Notes
+
+The SVG remains a standalone file that can be opened directly in a browser. Its links then target the OCR viewer by relative URL, and its bitmap reference resolves only while the input tree stays at its relative location. Browsers also treat a file-loaded SVG as a separate origin, so the design avoids script that reads the SVG's contents; that is why the viewers use `<object>`, which needs no script, rather than inlining the SVG by fetching it.
+
+### Verification
+
+Automated tests shall use synthetic images, synthetic OCR results, and temporary output roots only. They shall verify:
+
+- an SVG is written for a successful image and no masked PNG is written, including no artifact for failed and unsupported-language images;
+- the SVG dimensions, relative bitmap reference, polygon coordinates, link targets, tooltip text, and escaping of markup-significant characters in synthetic text;
+- every table row has the unique `id` that its polygon link references, including images with the same file name in different folders;
+- the OCR viewer embeds the SVG through `<object>` with the `:target` highlight style;
+- the replacement page's mask option uses the SVG and the script swaps between `<object>` and `<img>`; and
+- a provider root with the previous format version is regenerated.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-03
+
+| Property | Value |
+|----------|-------|
+| Title | Report every stage of OCR evaluation in its progress display |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-01, FR-2026-08-02-13, FR-2026-09-03-01 |
+
+### Description
+
+The OCR-evaluation command prepares its inputs, removes superseded provider output, runs an OCR stage, and then runs the text-replacement artifact stage of FR-2026-08-02-13. Its terminal progress shall cover every one of these through the Rich display of FR-2026-09-03-01, so that no phase that can take noticeable time runs without a visible, named progress row. It shall replace the progress-row mapping of FR-2026-08-02-01 as follows. The nested row is not used.
+
+The live display shall start before input preparation begins, rather than after cleanup, and shall close before the command's final summary or error.
+
+**Overall row.** Its units are the stages that have work in this run, in execution order:
+
+1. One **Prepare inputs** stage, always present. It covers OCR-evaluation input preparation (FR-2026-08-02-05), input discovery, and the input-tree checksum.
+2. One **Clean up** stage, present only when at least one existing provider root is to be removed before regeneration.
+3. One **OCR** stage, present only when at least one OCR provider's OCR artifacts are not current.
+4. One **text-replacement** stage for each text-replacement provider that FR-2026-08-02-13 invokes, present only when at least one OCR provider root needs its text-replacement artifacts regenerated. This includes a root whose OCR artifacts are current but whose text-replacement artifacts are missing or stale.
+
+A stage shall advance the overall row once, after it completes. A stage absent for the reasons above shall not contribute a unit. Which later stages exist is known only after the Prepare inputs stage finishes, so the overall row shall be indeterminate until then and shall then show its final total. It shall not show a percentage or ETA before that point.
+
+**Current row.** While a stage is active, the current row shall count that stage's files and shall describe the stage, not a folder:
+
+- For the Prepare inputs stage, a unit is one source file that preparation copies or extracts, or one image that discovery or checksumming reads. Where the total is not known in advance, the row shall be indeterminate and show the count completed so far and a detail label naming the active step (`Preparing`, `Discovering`, or `Checksumming`), never leaving the row without a label.
+- For the Clean up stage, a unit is one file removed from an existing provider root. The command shall first count the files to be removed, showing an indeterminate row labelled `Scanning` while it does so, and then show a determinate row. Its detail label shall show the provider whose root is being removed. A file that cannot be removed shall still propagate its error exactly as the command does today, after the live display closes.
+- For the OCR stage, a unit is one non-cached OCR-provider/image evaluation, across every OCR provider being run. This is the unit count that FR-2026-08-02-01 used for its overall row.
+- For a text-replacement stage, a unit is one successful OCR-result image in an OCR provider root that needs text-replacement regeneration, processed with that stage's text-replacement provider. An image whose OCR status is failed or unsupported has no replacement artifacts and shall not be counted.
+
+The current row's description shall name the stage: `Prepare inputs`, `Clean up`, `OCR`, or `Text replacement: <provider name>`. It shall be reset when the stage completes. For the OCR and text-replacement stages, its detail label shall show the OCR provider and the image's file name, using the label-length handling that FR-2026-09-03-01 defines. Each unit shall advance the current row once, whether the file succeeds, fails, or is skipped within its stage.
+
+When the OCR or a text-replacement stage has finished its files and is writing provider viewers and cache markers, its current row shall remain visible with a detail label `Writing viewer: <provider name>`. This label adds no units.
+
+**Scheduling.** The current row's per-file counts for one text-replacement stage require that stage to finish its images before the next text-replacement provider starts. The command may reorder or restructure its replacement work to achieve this. Every artifact it generates, its content, the format-version and cache-freshness markers, the viewers, and the continue-on-failure behaviour of FR-2026-08-01-03 and FR-2026-08-02-13 shall be unchanged by progress reporting.
+
+The existing one-line skipped-provider status of FR-2026-08-02-01 shall remain, shall be written through the live display's console, and the command shall report any skipped text-replacement stage in the same way. When Prepare inputs is the only stage, the display shall close as soon as it completes.
+
+### Rationale
+
+Text replacement is repeated for every text-replacement provider and can take as long as OCR on a large corpus. A language-folder progress row says nothing about which of these stages is active. Showing one overall unit per stage and a per-file current row for that stage lets a reviewer see which condition is running and how far through the corpus it is.
+
+Removing a large provider output tree before regeneration can take about a minute, and with no output the command appeared to hang. Input preparation, discovery, and checksumming can be equally slow on a large corpus. Naming these phases lets a reviewer tell that the command is busy rather than stuck.
+
+### Notes
+
+This requirement replaces the folder-based current-row mapping in FR-2026-08-02-01 and the OCR-evaluation bullet of FR-2026-09-03-01 for this command. The language-folder grouping is no longer a progress concept. Other behaviour of those requirements, including the Overall, Current, and ETA rendering and the non-interactive plain-text fallback, remains in force.
+
+The OCR stage's current row spans every OCR provider, so a run with two OCR providers has one OCR unit on the overall row and `images x 2` units on the current row.
+
+### Verification
+
+Automated tests shall use synthetic input trees, fake OCR providers, registered local test text-replacement providers, and mocked rendering boundaries. They shall verify:
+
+- the overall total and advancement for a full run: Prepare inputs, Clean up, OCR, and one unit for each text-replacement provider, with the overall row indeterminate until preparation finishes;
+- current-row totals and descriptions for every stage, with the per-stage reset between stages, including the indeterminate `Scanning` row followed by a determinate Clean up row when a synthetic provider root with known files is removed;
+- that the live display is already active during Prepare inputs and Clean up, using mocked preparation and file-removal boundaries, so a slow removal is visible;
+- a run whose OCR artifacts are current but whose text-replacement artifacts are stale, which shows only the Prepare inputs and text-replacement stages and no Clean up or OCR stage;
+- a run in which every provider output is current, which shows only the Prepare inputs stage and writes the skipped-provider lines above the display;
+- the `Writing viewer` detail label without an extra unit;
+- that a removal failure closes the display before the error propagates;
+- that failed and unsupported-language images are excluded from text-replacement totals, and that a failure within a stage still advances the current row once;
+- that a text-replacement stage completes all its images before the next provider begins; and
+- generated artifacts unchanged from those produced before this requirement.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-04
+
+| Property | Value |
+|----------|-------|
+| Title | Limit the number of images in an OCR-evaluation run |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-05, FR-2026-10-24-02, FR-2026-10-24-03, FR-2026-10-26-03 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall accept an optional `--max-images N` option, where `N` is a non-negative integer. When the option is absent, `N` shall be 25. A value of 0 shall mean no limit. A negative or non-integer value shall be rejected as a command-line error that names the option, before any preparation or OCR work begins.
+
+The limit shall apply to the number of bitmap images evaluated in one run. It shall be applied to the images that remain after the `--include` selection of FR-2026-10-24-03, whether or not `--include` is given. When more than `N` images remain, the command shall keep the first `N` in the command's existing deterministic discovery order, which is language directory and then sorted path, and shall drop the rest. The kept images shall be used for the input-tree checksum, OCR requests, text-replacement artifacts, viewers, and progress totals (FR-2026-10-26-03), so a dropped image shall not be OCR'd, replaced, listed in a viewer, or counted.
+
+The limit shall apply equally to every selected OCR provider, including an explicitly selected `google_cloud_vision` under FR-2026-10-24-02, so the default run sends at most 25 images to that provider.
+
+When the limit drops any image, the command shall write one line through the live display's console before the OCR stage starts. The line shall state the number kept, the number eligible, and that `--max-images 0` removes the limit and `--include` narrows the selection. The command shall write no such line when nothing is dropped. The command help shall document the option, its default, and the meaning of 0.
+
+Because the checksum covers the kept image set (FR-2026-10-24-03), a provider output root generated with a different limit or selection shall be treated as out of date and regenerated.
+
+### Rationale
+
+The evaluation was written for a small corpus. A real corpus of tens of documents, each containing many images, makes the default all-images run too slow for the quick manual review the command exists to support. A modest default limit keeps a bare run quick and bounded, while an explicit option and `--include` allow a larger or narrower run.
+
+### Notes
+
+The limit takes the first `N` images in sorted order and does not sample across languages or documents. A bare run can therefore cover only the first language directory or document whose images fill the limit, and a reviewer who wants other languages should use `--include`. A different selection strategy may be considered separately.
+
+Input preparation (FR-2026-08-02-05) is unchanged and still copies or extracts every selected source file. The limit reduces evaluation work, not preparation work. The new option is an evaluation-command option; FR-2026-08-02-05 still forbids preparation-specific options.
+
+Changing the limit changes the evaluated image set and so regenerates provider output (see Description). It shall not delete files in the input root.
+
+### Verification
+
+Automated tests shall use synthetic source trees and fake OCR providers. They shall verify:
+
+- the default of 25, an explicit limit, and 0 for no limit, with a synthetic tree larger than 25 images;
+- rejection of negative and non-integer values before any preparation or provider call;
+- that the first `N` images are kept in language-directory then sorted-path order, and that the rest are not passed to a provider, replaced, listed in a viewer, or counted in progress totals;
+- the limit applied after `--include`, and with no filter;
+- the dropped-image notice, including its counts, and its absence when nothing is dropped;
+- that a change of limit regenerates a previously generated provider root; and
+- that the limit applies to an explicitly selected `google_cloud_vision` fake provider.
+
+Tests shall not use confidential samples or derived artifacts.
+
+---
+
+## FR-2026-10-26-05
+
+| Property | Value |
+|----------|-------|
+| Title | Select the text-replacement provider run by OCR evaluation |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-26 |
+| Related Requirements | FR-2026-08-02-13, FR-2026-10-24-02, FR-2026-10-26-03, SR-2026-08-24-01 |
+
+### Description
+
+`scripts/ocr_evaluations.py` shall no longer run every locally eligible text-replacement provider. Its text-replacement artifact stage (FR-2026-08-02-13) shall always run the `identity` and `character_mask` providers, in that order, and shall run no other provider unless one is requested.
+
+The command shall accept an optional `--text-replacement PROVIDER` option that names one further registered text-replacement provider. The option shall accept any registered provider other than `identity` and `character_mask`, including `argos_translate`, `double_character_mask`, `half_character_mask`, and `google_cloud_translate`. The `google_cloud_translate` provider shall be selectable by this option even though it declares `LOCAL_EVALUATION_ELIGIBLE = False`, because the option is an explicit user selection. The option may be given at most once. Naming `identity` or `character_mask` shall not be an error and shall not run that provider twice. An unregistered name shall be rejected as a command-line error that names the option and lists the registered provider names, before any preparation, OCR, or provider call begins.
+
+When the option is absent, the command shall run exactly `identity` and `character_mask`. When it is present, the command shall run `identity`, `character_mask`, and the named provider, in that order. The `LOCAL_EVALUATION_ELIGIBLE` flag shall no longer decide which providers the evaluator runs.
+
+The text-replacement viewer, its dropdown, and its table (FR-2026-08-02-13) shall list exactly the providers that ran, in run order, with the detected-region mask option last. The initially selected option and displayed image shall be the provider named by `--text-replacement` when it is neither baseline provider, and `identity` otherwise. This amends the "first registered provider" initial selection in FR-2026-08-02-13.
+
+The text-replacement stages of the progress display (FR-2026-10-26-03) shall be one stage per provider that runs, so the number of such stages shall be two or three.
+
+An explicit `--text-replacement google_cloud_translate` run shall send the recognised text of the selected images, including confidential samples when selected, to Google Cloud Translation under SR-2026-08-24-01 and the provider's own data boundary. It shall send no source paths, filenames, metadata, or evaluation artifacts. The command help and developer documentation shall state that this selection sends recognised text to Google. A run that does not name `google_cloud_translate` shall not instantiate it or make a Translation API call.
+
+The text-replacement freshness marker (FR-2026-08-02-13) shall record the ordered provider names that produced the artifacts, in addition to the input checksum. A provider root whose OCR artifacts are current but whose recorded provider set differs from the requested provider set shall be treated as having stale text-replacement artifacts. The command shall regenerate only the text-replacement artifacts for that root, reusing the saved OCR JSON, and shall not call the OCR provider. Changing or removing `--text-replacement` shall therefore never leave a viewer that lists providers which did not run. The text-replacement artifact format version shall change accordingly.
+
+### Rationale
+
+The set of providers shown in the evaluation was growing, and the slowest, `argos_translate`, was run and shown first on every evaluation. `identity` and `character_mask` are cheap, local and deterministic, so they make a fast, useful baseline. A translation provider can then be chosen deliberately for the run, in the same way as an OCR provider is chosen with `--ocr`.
+
+### Notes
+
+`google_cloud_translate` is reachable only through an explicit selection, which matches the opt-in treatment of `google_cloud_vision` in FR-2026-10-24-02. Its EU endpoint restriction and credential rules are unchanged (see `google-cloud-translation-requirements.md` and SR-2026-08-24-01).
+
+`double_character_mask` and `half_character_mask` remain registered providers and remain available through this option, but they no longer run by default. The `LOCAL_EVALUATION_ELIGIBLE` flag stays on the plugins. It remains a plugin property read by other consumers, but this command no longer reads it.
+
+Only one provider can be added per run. Comparing more than one additional provider needs separate runs, which regenerate the text-replacement artifacts each time and reuse the saved OCR output.
+
+### Verification
+
+Automated tests shall use synthetic images, a fake OCR provider, and fake text-replacement providers or the local deterministic providers. They shall verify:
+
+- that no option runs exactly `identity` and `character_mask`, in that order, and no other registered provider is instantiated or called;
+- that `--text-replacement` with a registered provider runs that provider after the two baselines, and that this includes a fake provider that declares `LOCAL_EVALUATION_ELIGIBLE = False`;
+- that naming `identity` or `character_mask` runs it once;
+- that an unregistered name is rejected before preparation or any provider call, with the option and the registered names in the message;
+- that the viewer lists exactly the providers that ran, with the additional provider initially selected, and `identity` initially selected when none or a baseline provider was requested;
+- that the progress display has one text-replacement stage per provider that ran;
+- that changing the requested provider with unchanged input and a current OCR cache regenerates the text-replacement artifacts without calling the OCR provider, and that an unchanged provider set skips that regeneration;
+- that `google_cloud_translate` is not instantiated unless named; and
+- that the command help identifies the remote-text boundary.
+
+Tests shall not contact Google, require credentials, or use confidential samples or derived artifacts.
+
+---
+
+
+## FR-2026-10-27-02
+
+| Property | Value |
+|----------|-------|
+| Title | Skip a raster replacement whose text cannot fit its OCR region instead of failing the document |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User-reported failure: documents failed with "Replacement text could not fit the OCR region at a one-pixel font size" |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-02-10, FR-2026-08-03-03, FR-2026-08-28-03, FR-2026-08-02-09 |
+
+### Description
+
+The renderer of FR-2026-08-02-10 shall keep its rule that text is rendered only at a font size that fits the OCR region, down to a minimum of one pixel. A one-pixel font is too small to read in a bitmap, so the renderer shall not draw text below that fit, clipped or otherwise.
+
+When no font size from the largest fitting size down to one pixel lets the replacement text fit a region (for example a long translation in a very small detected region), the renderer shall skip that region's replacement instead of raising an error. A skipped region shall keep its original pixels: neither its background wipe nor any replacement text is drawn for it. The other regions of the same image shall be rendered as usual, and the image shall remain part of the output.
+
+Skipping is best effort and is not a failure. The folder-replacement command shall not count the document as failed, shall not print a failure or warning message, and shall not change the exit status because of a skipped region. A skipped region shall not count towards the replaced OCR image-region total.
+
+When debug output is enabled (`--debug`), the document's diagnostic sidecar (FR-2026-08-28-03) shall record one entry for each skipped region, with `kind` `skipped` and `reason_code` `bitmap_replacement_text_does_not_fit`. The entry shall carry the document-local location of the image when known, the region's index in the image's OCR order, the region's frame width and height in source-image pixels, and the replacement text's character count. It shall not record the replacement text, the OCR text, image pixels, or any other content, under the same restrictions as FR-2026-08-28-03. When debug output is disabled, nothing is recorded.
+
+The same rule applies when `scripts/ocr_evaluations.py` and the other OCR evaluation scripts render regions: they shall skip the region and continue, with no diagnostic sidecar. Rendering that succeeds is unchanged, including the upright-layout preference for small skew.
+
+### Rationale
+
+One tiny or degenerate OCR region, such as an icon or a speck read as text, can fail an entire document and discard all of its other translated content, even though every other region was handled. The same happens to a legitimate region whose translation is much longer than its source: a single Japanese character or a short label commonly becomes a whole English word or phrase, which cannot fit the region that held the single character, however small the font. The project's approach to rendering is best effort: a region that cannot be rendered legibly is left as it was and reported for diagnosis, rather than drawn illegibly or allowed to stop the document.
+
+### Notes
+
+A skipped region leaves the source text in the image untranslated. This is accepted, because the text did not fit even at one pixel, so it was not legible when replaced. The diagnostic entry lets the owner see how often it happens and where.
+
+Skipping includes the background wipe so that the original text is not erased with nothing to replace it. The two-pass rendering order (wipe every region, then draw every replacement) therefore needs the skip decision made before the wipe pass.
+
+### Verification
+
+Automated tests shall use synthetic images, polygons and text only. They shall verify that a long replacement in a tiny polygon no longer raises; that every pixel of an image whose only region is skipped is unchanged, including the wipe area; that a skipped region leaves another region in the same image rendered exactly as it would be alone; that a region which fits is rendered exactly as before; and that a synthetic folder-replacement document containing both a fitting and an unfittable region completes with an output file, no failure, zero failed files and a zero exit status. With `--debug`, they shall verify the sidecar entry, its fields, and that it contains no replacement or OCR text; without `--debug`, they shall verify that no sidecar is written.
+
+---
+
+## FR-2026-10-27-03
+
+| Property | Value |
+|----------|-------|
+| Title | Record the original Vision words and grouping decisions in OCR extra data |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-27-10, FR-2026-10-24-03, SR-2026-10-24-01 |
+
+### Description
+
+The `google_cloud_vision` provider shall populate the optional `extra` dictionary of every `OcrText` it returns with the information needed to understand how that region was grouped from the original Vision words. The data shall be stored under the single provider-namespaced key `google_cloud_vision`, and shall be JSON-compatible so that it survives the provider-result cache (FR-2026-08-27-10) and is written unchanged into the `extra` field of the `scripts/ocr_evaluations.py` JSON artifacts.
+
+For each region the data shall include:
+
+- the grouping version and the numeric thresholds in effect (the same values that make up the provider's cache identity);
+- `region_started_by`: the reason this region began and the measurements behind that decision. The reason shall be one of `paragraph_start`, `word_starts_line`, `previous_word_ends_line`, `direction_mismatch`, `baseline_offset`, `character_size`, `word_gap` or `background_colour` (FR-2026-10-27-04);
+- `words`: the original Vision words that were combined, in reading order, each with its text exactly as normalized before joining (including detected spaces), confidence, four-point source-image polygon, and whether it started or ended a line;
+- for each word, `symbols`: the word's Vision symbols in order, each with its text and, when Vision supplies a four-point box, that source-image polygon. This lets the owner compare glyph sizes that a word box, which Vision may normalise to the line height, hides;
+- for every word after the first, `joined_measurements`: the measurements that caused it to be joined to the previous word, so a wrongly merged region can be compared with the thresholds.
+
+Measurements shall be finite numbers: `direction_alignment` (cosine of the angle between reading directions), `baseline_offset_ratio` and `gap_ratio` (each relative to the larger of the two word-box heights), and `character_size_ratio` (the larger over the smaller of the line's typical word height and the next word's height). A measurement that was not evaluated for a decision (for example `character_size_ratio` when either side has no alphanumeric text, or any geometry when a break marker decided the split) shall be omitted rather than guessed.
+
+Recording this data shall not change the grouping, the region text, confidence or polygon, and shall not add another external call. The data shall hold only normalized values derived from the existing response; it shall not include the submitted image, credentials, the raw API response, or any other data excluded by SR-2026-10-24-01. Other OCR providers need not supply it.
+
+### Rationale
+
+The grouped region deliberately hides the Vision words it came from, which makes a wrong merge or split hard to diagnose. `OcrText.extra` was provided for provider-specific information with no cross-provider meaning, and the evaluator already writes it. Capturing the contributing words and the measured ratios allows the owner to tune the grouping thresholds from real evaluation output instead of by trial and error.
+
+### Notes
+
+The extra data holds the same OCR text as the region and the words' text, so it carries the same sensitivity. It remains in the local evaluation output and, when the opt-in cache is enabled, the local source-adjacent cache. It increases JSON and cache size in proportion to the number of words.
+
+### Verification
+
+Automated tests shall use synthetic Vision responses and shall not contact Google or use confidential samples. They shall verify that a merged region records each original word, polygon and join measurements; that a split region records the reason and measurements for each region's start, including a character-size split; that the extra data is JSON-serializable and round-trips through the provider-result cache; and that region text, confidence and polygons are unchanged by recording it.
+
+---
+
+## FR-2026-10-27-04
+
+| Property | Value |
+|----------|-------|
+| Title | Do not join Vision words that sit on clearly different backgrounds |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request, from OCR evaluation of a label whose two adjacent words are on different surfaces |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-10-24-03, FR-2026-10-27-03, FR-2026-08-27-10, SR-2026-10-24-01 |
+
+### Description
+
+The `google_cloud_vision` grouping of FR-2026-10-24-03 shall gain one further join rule based on the source image. A word shall not be joined to the line being built when the surface behind it is clearly different from the surface behind the line's last word, even when every existing rule would join them. This is a join rule: it shall be evaluated in the same pass as the existing join rules and shall never be applied by splitting a region that was already joined.
+
+The rule shall compare the surfaces just outside the facing ends of the two words, not the words' glyphs. For each of the previous word and the next word, it shall sample thin strips of the prepared image (named thickness) immediately above and below the word's box, restricted to a named fraction of the word's extent along the reading direction nearest the other word (a minimum span applies to very narrow boxes), measured in the line's reading-direction frame so that rotated text is handled. It shall take the median CIE Lab colour of each word's strips and compare the two as a CIE76 distance. The words shall not be joined when that distance reaches a named threshold. The rule shall be skipped, and the words judged by the existing rules alone, when no image is available, when no strip pixel lies inside the image, or when the two boxes touch or overlap along the reading direction (there is then no gap with distinct surfaces on either side). The text-region-colour estimator was evaluated for this purpose and rejected: its background confidence did not separate the reported label from legitimate joins in local evaluation output.
+
+The rule shall run last, only for a word that the existing rules would otherwise join, so it adds no image sampling for words that are already separated. It shall not change the existing rules, the order in which they are evaluated, or the text, confidence and polygon of a region. It shall use only the image already prepared for the Vision request and no further external service, and it shall not persist or transmit the image or colour data beyond the normalized `extra` data of FR-2026-10-27-03.
+
+When the rule is evaluated, the join measurements of FR-2026-10-27-03 shall include `background_colour_difference`. A region that begins because of this rule shall record the reason `background_colour`. The rule's threshold, strip thickness and extent fraction shall be part of the thresholds recorded in `extra`, and of the provider cache identity and evaluator artifact version, so changing any of them invalidates cached results and artifacts, and `_LINE_GROUPING_VERSION` shall be raised.
+
+### Rationale
+
+The word boxes and symbol boxes that Vision returns are normalised to the line height, so the character-size rule cannot see that two neighbouring words are drawn at different sizes. Such words are usually also visually separate objects, for example a label inside a shape beside text on the artwork behind it. The image shows that difference even though the OCR geometry does not.
+
+### Notes
+
+Initial values, calibrated against local evaluation output (four files, several hundred joins): colour-difference threshold 40.0, strip thickness 4 pixels, extent fraction 0.3 with a 4 pixel minimum span. With these values the reported label scored about 49 and every other join with a positive gap scored below about 27. The calibration margin is modest: shifting the word boxes by under one pixel moved the reported label between about 38 and 52, and a gradient background elsewhere reached about 34. If a legitimate join is split, or the label rejoins, use `background_colour_difference` in `extra` to retune the threshold.
+
+- The rule compares only the surface behind each word, not the text colour. Two words on the same surface in different colours are still joined.
+- Words whose boxes touch or overlap are not compared, so such pairs are never split by this rule.
+- A word on a photograph or gradient may give an unstable surface comparison. Sampling only the facing ends limits the effect of a gradient along a long line, but it is not eliminated.
+
+### Verification
+
+Automated tests shall use synthetic images and synthetic Vision responses only, and shall not contact Google or use confidential samples. They shall verify that adjacent words on clearly different flat backgrounds are not joined and that the second region records the `background_colour` reason, the measurement and the threshold; that adjacent words on the same background are joined as before and record the measurement; that glyph pixels inside the boxes do not affect the comparison; that no image leaves the existing behaviour unchanged; that the rule is not evaluated for a word the earlier rules separate; that the provider passes its prepared image to the rule; and that changing the rule's threshold changes the cache identity.
 
 ---

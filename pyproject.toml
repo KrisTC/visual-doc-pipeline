@@ -7,6 +7,7 @@ requires-python = "==3.13.14"
 dependencies = [
     "argostranslate>=1.11.0",
     "google-cloud-translate>=3.27.0",
+    "google-cloud-vision>=3.16.0",
     "numpy",
     "openpyxl",
     "paddleocr==3.7.0",
@@ -33,6 +34,8 @@ gpu = [
 [dependency-groups]
 dev = [
     "mypy",
+    "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "types-openpyxl",
 ]
 
@@ -71,3 +74,9 @@ python_version = "3.13"
 strict = true
 disallow_any_explicit = true
 warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra -p no:cacheprovider"
+verbosity_subtests = 2
