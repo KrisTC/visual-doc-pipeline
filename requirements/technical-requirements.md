@@ -827,3 +827,51 @@ The runners currently cannot pass `--durations`, `-k`, or similar options, so a 
 Today no test-specific environment variable exists; the runners only pass the optional `.env.local` file through `run.ps1` or `run.sh`. This requirement adds one, set by the runner for the test process when `--fast` is given and read only by the slow-test decorator. Its name will be chosen at implementation. Because `unittest` and `pytest` accept different options, `docs/development.md` lists the options for each runner. `--fast` combines with both parallel and `--serial` modes.
 
 ---
+
+## TR-2026-10-28-01
+
+| Property | Value |
+|----------|-------|
+| Title | Provide public CA trust in CPU and GPU container images |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request following container bootstrap TLS failure |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-27-04, FR-2026-09-07-01, TR-2026-09-07-01, TR-2026-09-10-01, SR-2026-09-07-01, SR-2026-10-28-01 |
+
+### Description
+
+Both the CPU and GPU final container images shall include a public CA trust
+store usable by the image's Python standard-library HTTPS client with its
+default configuration and non-root runtime user. An operator shall not need
+to mount a CA bundle or configure certificate environment variables for
+connections to the approved runtime-asset sources when their certificates
+chain to a publicly trusted CA.
+
+Runtime-asset downloads, including HTTPS redirects, shall retain certificate
+chain and hostname verification. This requirement does not change the pinned
+Noto archive digests, PaddleOCR's model-download behaviour, or the container
+startup restrictions in SR-2026-09-07-01. Support for an organisation-specific
+interception CA is a separate proposal in SR-2026-10-28-01.
+
+### Rationale
+
+The GPU image's Python runtime was observed to have no usable default CA
+trust store, causing first-use font downloads to fail before processing.
+Supplying public trust roots to both variants makes the documented bootstrap
+usable without an operator-provided CA on ordinary public-CA networks.
+
+### Verification
+
+Automated checks shall cover the CA-trust configuration of both image targets.
+An image-level network smoke check shall exercise the actual Python runtime in
+each final image as the non-root user, without a host CA mount or certificate
+environment override. It shall verify HTTPS certificate and hostname
+validation for both pinned Noto download URLs, including their redirects.
+The check shall not require a GPU, customer documents, or credentials, and
+shall report network or TLS failures rather than treating them as success.
+
+The image-level smoke check is separate from the pull-request CI workflow:
+TR-2026-09-10-01 currently prohibits running either image in that workflow.
+
+---
