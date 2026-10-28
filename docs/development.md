@@ -113,6 +113,12 @@ Evaluation artifacts are local and ignored by Git.
 
 ### Windows EMF previews
 
+Debug-enabled fitted-layout processing records `emf_layout_trace` separately
+from issue entries in the per-document diagnostic sidecar. The trace can
+contain source and replacement text and must be treated as sensitive local
+output. Geometry with an unresolved coordinate space or transform is marked
+accordingly; the trace describes processing decisions, not viewer rendering.
+
 On Windows, the development folder-replacement runner automatically invokes
 `scripts/emf_preview.py` after completing its scenarios. It can also be run
 independently on a revision, a scenario directory, or one processed EMF:

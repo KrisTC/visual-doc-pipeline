@@ -35,6 +35,7 @@ class VectorReplacementResult:
     replaced_image_regions: int = 0
     has_embedded_bitmaps: bool = False
     diagnostics: tuple[dict[str, object], ...] = ()
+    emf_layout_trace: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +106,7 @@ class FittedLine:
     text: str
     scale: float
     run: BoundedTextRun
+    layout_face: str | None = None
 
 
 def _line_box(text: str, font: SourceLineFont, width_pixels: float, height_pixels: float) -> BoundedTextBox:
@@ -208,4 +210,4 @@ def translate_and_fit_line(
             scale *= min(1.0, source_width / calibration_width)
     if scale <= 0.0:
         return None
-    return FittedLine(replacement, scale, run)
+    return FittedLine(replacement, scale, run, layout_typefaces[run.font_classification].getFamilyName())

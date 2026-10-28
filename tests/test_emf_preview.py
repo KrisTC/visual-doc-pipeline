@@ -14,10 +14,12 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageChops
 
+from pipeline.vector_text import replace_vector_text
 from pipeline.vector_text.emfplus import PlusRecord
 from scripts import emf_preview as preview
+from test_vector_text_replacer import _LongReplacementProvider
 
 
 class RectF(ctypes.Structure):
@@ -26,7 +28,8 @@ class RectF(ctypes.Structure):
 
 
 def _record_metafile(
-    kind: int, *, blue_fallback: bool = False, blue_plus: bool = False, draw_pen: bool = False
+    kind: int, *, blue_fallback: bool = False, blue_plus: bool = False, draw_pen: bool = False,
+    gdi_text: bool = False,
 ) -> bytes:
     gdi = ctypes.WinDLL("gdi32")
     user = ctypes.WinDLL("user32")
@@ -58,6 +61,14 @@ def _record_metafile(
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     plus.GdipDeletePen.argtypes = [ctypes.c_void_p]
+    plus.GdipGetDC.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+    plus.GdipReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.CreateFontW.argtypes = [ctypes.c_int] * 5 + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR]
+    gdi.CreateFontW.restype = ctypes.c_void_p
+    gdi.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.SelectObject.restype = ctypes.c_void_p
+    gdi.TextOutW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int]
+    gdi.DeleteObject.argtypes = [ctypes.c_void_p]
     plus.GdipGetHemfFromMetafile.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
     plus.GdipDisposeImage.argtypes = [ctypes.c_void_p]
     token = ctypes.c_size_t()
@@ -84,6 +95,18 @@ def _record_metafile(
             check(plus.GdipCreatePen1(0xFF000000, 2.0, 2, ctypes.byref(pen)))
             check(plus.GdipDrawLineI(graphics, pen, 0, 70, 80, 70))
             check(plus.GdipDeletePen(pen))
+        if gdi_text:
+            text_dc = ctypes.c_void_p()
+            check(plus.GdipGetDC(graphics, ctypes.byref(text_dc)))
+            font = gdi.CreateFontW(-30, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Arial")
+            if not font:
+                raise RuntimeError("Could not create synthetic GDI font.")
+            old_font = gdi.SelectObject(text_dc, font)
+            if not old_font or not gdi.TextOutW(text_dc, 5, 5, "Old", 3):
+                raise RuntimeError("Could not draw synthetic GDI text.")
+            gdi.SelectObject(text_dc, old_font)
+            gdi.DeleteObject(font)
+            check(plus.GdipReleaseDC(graphics, text_dc))
         check(plus.GdipDeleteBrush(brush))
         check(plus.GdipDeleteGraphics(graphics))
         check(plus.GdipGetHemfFromMetafile(metafile, ctypes.byref(handle)))
@@ -140,6 +163,45 @@ def _with_comments(metafile: bytes, comments: list[bytes]) -> bytes:
 
 @unittest.skipUnless(sys.platform == "win32", "Requires Windows GDI+.")
 class EmfPreviewTests(unittest.TestCase):
+    # Verifies FR-2026-10-28-03.
+    def test_fitted_gdi_font_is_used_by_both_windows_playback_paths(self) -> None:
+        source = _record_metafile(5, gdi_text=True)
+        result = replace_vector_text(
+            source, ".emf", lambda text: text, "en",
+            document_text_layout="preserve-basic-layout",
+            replacement_provider=_LongReplacementProvider(), target_language="en",
+        )
+        first_new_handle = struct.unpack_from("<H", source, 56)[0]
+        modified = bytearray(result.data)
+        changed = 0
+        offset = 0
+        while offset < len(modified):
+            kind, size = struct.unpack_from("<II", modified, offset)
+            if kind == 82 and struct.unpack_from("<I", modified, offset + 8)[0] >= first_new_handle:
+                height = struct.unpack_from("<i", modified, offset + 12)[0]
+                struct.pack_into("<i", modified, offset + 12, -1 if height < 0 else 1)
+                changed += 1
+            offset += size
+        self.assertGreater(changed, 0)
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 150)
+            renderer = preview.WindowsRenderer()
+            try:
+                altered = preview.Metafile(bytes(modified), metafile.width, metafile.height)
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        size = (metafile.width, metafile.height)
+                        normal = renderer.render(metafile, size, mode)
+                        smaller = renderer.render(altered, size, mode)
+                        self.assertIsNotNone(normal)
+                        self.assertIsNotNone(smaller)
+                        assert normal is not None and smaller is not None
+                        self.assertIsNotNone(ImageChops.difference(normal, smaller).getbbox())
+            finally:
+                renderer.close()
+
     # Verifies FR-2026-10-28-02.
     def test_native_playback_of_ordinary_dual_and_plus_only(self) -> None:
         renderer = preview.WindowsRenderer()

@@ -741,7 +741,7 @@ When an `EmfPlusDrawDriverString` text is replaced, the handler shall write one 
 
 The handler shall keep the output a valid EMF: the EMF+ record sizes, the `EMR_COMMENT` size and data size, the `EMR_HEADER` byte and record counts shall match the rewritten records, and the EMF+ header shall stay the first record after the `EMR_HEADER`.
 
-The handler shall not insert any record before the EMF+ header comment. The fitted source-font layout inserts its scaled GDI font records immediately after that comment. An EMF without an EMF+ stream shall produce the same output as before this requirement.
+The handler shall not insert any record before the EMF+ header comment. FR-2026-10-28-03 specifies placement of scaled GDI font records for EMF+ playback. An EMF without an EMF+ stream shall produce the same output as before this requirement, except as required by FR-2026-10-28-03.
 
 The handler shall leave an EMF+ text record unchanged, and shall add an `unsupported` entry to the output sidecar, when it cannot be replaced safely: the glyphs are glyph indices, the text is vertical, the record is malformed, the replacement needs characters outside the Basic Multilingual Plane, or the record needs regenerated positions but its font object is missing, is continued, or has a size unit that is not world or pixel. A malformed EMF+ comment is also left unchanged and reported as `unsupported`. When a fitted layout cannot be applied to a replaced EMF+ text because its font object is missing, its font size unit is not world or pixel, its extent is empty, no object identifier is free, or the bounded fit fails, the text shall be replaced at its source size and the output sidecar shall add one `layout_fallback` entry with `vector_format` `emf`, `container_kind` `emfplus_text_record`, and the source and replacement text. Neither entry is added when `--debug` is off, as for other vector diagnostics.
 
@@ -753,7 +753,7 @@ The fitted source-font layout inserted its scaled GDI font records before the EM
 
 ### Verification
 
-Automated tests shall use synthetic EMFs only. They shall verify that `EmfPlusDrawString` and character-glyph `EmfPlusDrawDriverString` text is replaced alongside GDI text records in a dual EMF; that the EMF+ record, comment and header sizes and the record count are consistent; that the EMF+ header stays the first record after the `EMR_HEADER` in all layout modes, including when scaled GDI font records are inserted; and that an EMF without EMF+ records produces unchanged output. They shall verify fitted font-object emission with an unused identifier, reuse of that object for repeated sizes, and the unmodified source font object; regenerated and first-position-only driver-string positions; each unsupported and fallback case and its sidecar entry; and that planning requests every text the apply step requests, so a planned run makes no further provider request.
+Automated tests shall use synthetic EMFs only. They shall verify that `EmfPlusDrawString` and character-glyph `EmfPlusDrawDriverString` text is replaced alongside GDI text records in a dual EMF; that the EMF+ record, comment and header sizes and the record count are consistent; that the EMF+ header stays the first record after the `EMR_HEADER` in all layout modes, including when scaled GDI font records are inserted; and that an EMF without EMF+ records produces unchanged output except as required by FR-2026-10-28-03. They shall verify fitted font-object emission with an unused identifier, reuse of that object for repeated sizes, and the unmodified source font object; regenerated and first-position-only driver-string positions; each unsupported and fallback case and its sidecar entry; and that planning requests every text the apply step requests, so a planned run makes no further provider request.
 
 ---
 
@@ -856,5 +856,117 @@ A dual EMF carries the same picture in the GDI stream and the EMF+ stream. Bitma
 ### Verification
 
 Automated tests shall use synthetic EMFs only. They shall verify that a PNG bitmap object, a JPEG bitmap object and each listed uncompressed pixel format are processed through the shared bitmap handler and re-embedded under the same object identifier with the source pixel dimensions and alpha; that a chunked bitmap object is reassembled and written back with a valid total size in every chunk and valid chunk sizes; that a nested EMF+-only metafile and a nested WMF have their text and bitmaps translated by their own handlers and embedded with a valid metafile data size; that nested units are listed after the parent's with path-style identifiers and share the one resolution with the parent's texts; that a nested metafile at a depth beyond the limit is left unchanged and, only with `--debug`, reported without content; that the EMF+ header stays the first record after the `EMR_HEADER` and that the EMF+ record, comment and header sizes and counts are consistent; that objects left unchanged are byte-identical; that each unsupported case is left unchanged and reported only with `--debug`; and that planning requests every text and image the apply step requests, so a planned run makes no further provider request.
+
+---
+
+## FR-2026-10-28-03
+
+| Property | Value |
+|----------|-------|
+| Title | Make fitted GDI fonts available during EMF+ playback |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF playback diagnosis |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-09-04-01, FR-2026-09-05-01, FR-2026-09-05-02, FR-2026-10-22-05, FR-2026-10-22-10, FR-2026-10-22-14, FR-2026-10-28-02 |
+
+### Description
+
+When either fitted layout rewrites a GDI text record using a cloned font, the
+EMF handler shall place the cloned font's creation and selection records so
+that both GDI playback and normal GDI+ playback can use the fitted font for
+that text. In an EMF+ stream, a generated GDI font used within an
+`EmfPlusGetDC` playback interval shall be created within that interval before
+its selection. A selection shall not depend on a generated font creation that
+the playback path skips.
+
+The handler shall keep the EMF+ header comment as the first record after
+`EMR_HEADER`, retain the source text position and graphics state, and restore
+the previously selected font after the fitted text. It shall preserve the
+order of source drawing operations and the existing grouping, clipping,
+fitting, and fallback rules. It shall keep EMF record sizes, header byte and
+record counts, and handle allocation valid. The same rules shall apply to
+standalone EMFs and nested EMFs through the existing nested-document handler;
+no special nested-only rendering path shall be introduced.
+
+### Rationale
+
+An EMF+ viewer can play GDI records only inside selected device-context
+intervals. A font created outside such an interval can be unavailable when a
+later text record selects it, leaving the replacement at an unintended size.
+
+### Verification
+
+Automated tests shall use synthetic EMFs only. They shall verify creation and
+selection order within an `EmfPlusGetDC` interval, restoration of the source
+font, valid handles and record counts, an unchanged first EMF+ header comment,
+ordinary EMF playback, grouped text, and nested EMF processing. On Windows,
+tests shall render a synthetic fitted example through both GDI and normal GDI+
+playback and verify that each reflects a changed fitted font size. Other
+platforms shall run the structural tests without requiring Windows playback.
+
+---
+
+## FR-2026-10-28-04
+
+| Property | Value |
+|----------|-------|
+| Title | Trace EMF fitted-layout decisions in debug sidecars |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF layout diagnosis |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-27-06, FR-2026-09-04-01, FR-2026-09-05-01, FR-2026-09-05-02, FR-2026-09-06-01, FR-2026-10-22-05, FR-2026-10-22-10, FR-2026-10-22-14, FR-2026-10-28-03 |
+
+### Description
+
+For a debug-enabled run requesting either fitted layout, the per-document
+diagnostic sidecar shall contain a separate EMF layout trace in addition to
+the existing issue entries. The trace shall cover each editable GDI text
+record considered for replacement, including successful individual fits,
+group anchors and suppressed group members, and direct-replacement fallbacks.
+It shall distinguish these outcomes without treating a successful fit as a
+`layout_fallback`. Existing issue-entry semantics shall remain unchanged.
+
+Each trace item shall identify the containing graphic and nested object path,
+the source text-record index and byte offset, the text-record type, and its
+group anchor and members where applicable. It shall record the available
+source and replacement text, the source origin, alignment, record bounds,
+explicit and active clip bounds, effective coordinate transform, source and
+fitting bounds, and the coordinate space or units of each geometry value.
+It shall identify how the fitting bound was obtained and any expansion or
+obstacle cap used. Unavailable values shall be represented explicitly rather
+than inferred.
+
+The trace shall record the requested source face, the source measurement and
+replacement layout faces when resolved, the source font size, selected fit
+scale, and emitted GDI font handle and size where applicable. It shall also
+record the output locations of generated font-creation and selection records
+and whether each was emitted within an `EmfPlusGetDC` interval. For a fallback
+it shall include the existing stable reason when available. The trace shall
+describe processing decisions and emitted records, not claim that a viewer
+actually rendered a particular font or that the glyphs fit.
+
+The trace shall be generated only when debug diagnostics are enabled, shall
+not invoke an OCR or replacement provider again, and shall not change the
+processed graphic or translation results. It shall follow the local sidecar
+and confidentiality rules of FR-2026-08-27-06. A development manifest or
+terminal summary shall not copy trace contents.
+
+### Rationale
+
+Successful fit decisions are not issue entries, so an otherwise empty sidecar
+cannot explain how bounds, grouping, font selection, and nested playback
+affected a visible result. A local trace makes those decisions inspectable in
+subsequent reviews without a separate investigation script.
+
+### Verification
+
+Automated tests shall use synthetic graphics and providers only. They shall
+verify individual fits, grouped and suppressed records, fallbacks, explicit
+and missing geometry, nested-object attribution, font-record placement, and
+preservation of existing issue entries. They shall verify that debug-disabled
+runs omit the trace, that debug mode makes no additional provider calls, and
+that enabling the trace does not change the generated graphic.
 
 ---

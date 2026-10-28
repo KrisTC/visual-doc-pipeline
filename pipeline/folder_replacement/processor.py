@@ -255,6 +255,7 @@ def replace_input_folder(
             result.ignored_files += 1
             continue
         document_diagnostics: list[dict[str, object]] = []
+        emf_layout_trace: list[dict[str, object]] = []
         counts_before = _document_totals(result)
         failure_context = FailureContext() if diagnostics_enabled else None
         processing_ocr: OcrProvider = ocr_provider
@@ -410,7 +411,7 @@ def replace_input_folder(
                 result.replaced_native_text_items += vector_result.replaced_text_items
                 result.replaced_image_regions += vector_result.replaced_image_regions
                 if diagnostics_enabled:
-                    append_vector_diagnostics(document_diagnostics, vector_result, None)
+                    append_vector_diagnostics(document_diagnostics, vector_result, None, emf_layout_trace)
                 if not vector_result.has_editable_text and not vector_result.has_embedded_bitmaps:
                     result.retained_vector_graphics += 1
                 work_completed("Applying vector graphic 1 of 1")
@@ -520,7 +521,7 @@ def replace_input_folder(
                 retained_vectors = office_result.retained_vectors
                 for media_part, media_vector in office_result.vector_results:
                     if diagnostics_enabled:
-                        append_vector_diagnostics(document_diagnostics, media_vector, media_part)
+                        append_vector_diagnostics(document_diagnostics, media_vector, media_part, emf_layout_trace)
                     if not media_vector.has_editable_text and not media_vector.has_embedded_bitmaps:
                         print(f"Retained vector without editable text: {source_path}", file=sys.stderr)
                 result.replaced_native_text_items += native_items
@@ -583,6 +584,7 @@ def replace_input_folder(
                         "providers": run_metrics.report(document_seconds),
                     },
                     cache_inventory=inventory,
+                    emf_layout_trace=emf_layout_trace,
                 )
             if display is not None:
                 display.complete_overall_source(completed_sources)
@@ -728,6 +730,7 @@ def _write_document_diagnostic(
     result: FolderReplacementResult,
     run_activity: dict[str, object] | None = None,
     cache_inventory: list[dict[str, object]] | None = None,
+    emf_layout_trace: list[dict[str, object]] | None = None,
 ) -> None:
     """Write one local JSON sidecar beside a document's intended output path."""
     intended_output = destination or output_root / relative_source_path
@@ -747,6 +750,8 @@ def _write_document_diagnostic(
         diagnostic["run_activity"] = run_activity
     if cache_inventory is not None:
         diagnostic["cache_inventory"] = cache_inventory
+    if emf_layout_trace:
+        diagnostic["emf_layout_trace"] = emf_layout_trace
     sidecar.write_text(
         json.dumps(
             diagnostic,

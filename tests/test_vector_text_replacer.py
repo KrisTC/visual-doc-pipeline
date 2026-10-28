@@ -22,6 +22,7 @@ from pipeline.vector_text.emf import (
     _emf_grouped_unclipped_fit_contexts,
     _emf_measured_source_bounds,
     _emf_unclipped_fit_contexts,
+    analyse_emf,
 )
 from pipeline.text_replacement import (
     TextReplacementItem,
@@ -61,6 +62,105 @@ def _stand_in_optional_faces() -> AbstractContextManager[object]:
 
 
 class VectorTextReplacerTests(unittest.TestCase):
+    # Verifies FR-2026-10-28-04.
+    def test_emf_trace_records_individual_fit_without_changing_output(self) -> None:
+        source = _emf_with_unclipped_text(line_x=60)
+        results = []
+        for enabled in (False, True):
+            document = analyse_emf(
+                source, source_language="en", target_language="en",
+                document_text_layout="preserve-basic-layout", trace_layout=enabled,
+            )
+            results.append(document.apply(_mask, _LongReplacementProvider()))
+        self.assertEqual(results[0].data, results[1].data)
+        self.assertEqual((), results[0].emf_layout_trace)
+        [trace] = results[1].emf_layout_trace
+        self.assertEqual("individual_fit", trace["outcome"])
+        self.assertEqual("Old", trace["source_text"])
+        self.assertEqual("A considerably longer heading", trace["replacement_text"])
+        self.assertIsNotNone(trace["source_bounds"])
+        self.assertIsNotNone(trace["fitting_bounds"])
+        self.assertIsNotNone(trace["source_measurement_face"])
+        self.assertIsNotNone(trace["replacement_layout_face"])
+        self.assertEqual(
+            {"m11": 1.0, "m12": 0.0, "m21": 0.0, "m22": 1.0, "dx": 0.0, "dy": 0.0},
+            trace["effective_transform"],
+        )
+        font = trace["generated_font"]
+        self.assertIsInstance(font, dict)
+        assert isinstance(font, dict)
+        self.assertEqual(82, struct.unpack_from("<I", results[1].data, font["creation_record_offset"])[0])
+        self.assertEqual(37, struct.unpack_from("<I", results[1].data, font["selection_record_offset"])[0])
+        self.assertEqual((), results[1].diagnostics)
+
+    # Verifies FR-2026-10-28-04.
+    def test_emf_trace_records_groups_and_fallbacks(self) -> None:
+        grouped = analyse_emf(
+            _emf_with_grouped_unclipped_text(line_x=60), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        anchor, member = grouped.emf_layout_trace
+        self.assertEqual("group_anchor", anchor["outcome"])
+        self.assertEqual("suppressed_group_member", member["outcome"])
+        self.assertEqual(anchor["record_offset"], member["group_anchor_offset"])
+        self.assertEqual(anchor["group_member_offsets"], member["group_member_offsets"])
+        self.assertEqual("", member["replacement_text"])
+
+        fallback = analyse_emf(
+            _emf_with_unclipped_text(transform_records=(_emf_restore_dc_record(-1),)),
+            source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        [fallback_trace] = fallback.emf_layout_trace
+        self.assertEqual("fallback", fallback_trace["outcome"])
+        self.assertIsNone(fallback_trace["source_measurement_face"])
+        self.assertEqual(fallback.diagnostics[0]["reason_code"], fallback_trace["fallback_reason"])
+        untraced = analyse_emf(
+            _emf_with_unclipped_text(transform_records=(_emf_restore_dc_record(-1),)),
+            source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=False,
+        ).apply(_mask, _LongReplacementProvider())
+        self.assertEqual(untraced.data, fallback.data)
+        self.assertEqual(untraced.diagnostics, fallback.diagnostics)
+
+    # Verifies FR-2026-10-28-04.
+    def test_emf_trace_reports_clipped_fit_and_unknown_stock_font(self) -> None:
+        clipped = analyse_emf(
+            _emf_with_clipped_text(()), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        [trace] = clipped.emf_layout_trace
+        self.assertEqual("individual_fit", trace["outcome"])
+        self.assertEqual(trace["explicit_clip_bounds"], trace["fitting_bounds"])
+        decisions = trace["fit_decisions"]
+        units = trace["geometry_units"]
+        assert isinstance(decisions, dict) and isinstance(units, dict)
+        self.assertEqual("explicit_clip", decisions["bound_basis"])
+        self.assertEqual("EMF logical units", units["fitting_bounds"])
+
+        stock = analyse_emf(
+            _emf_with_stock_font_group(), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        for item in stock.emf_layout_trace:
+            self.assertIsNone(item["requested_source_face"])
+            self.assertIsNone(item["source_font_size_points"])
+
+        invalid_clip = bytearray(_emf_with_clipped_text(()))
+        text_record = _emf_exttextout_record("Old", 0, 0, 40, 20, clipped=True)
+        text_offset = invalid_clip.index(text_record)
+        struct.pack_into("<iiii", invalid_clip, text_offset + 56, 0, 0, 0, 20)
+        result = analyse_emf(
+            bytes(invalid_clip), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        [invalid_trace] = result.emf_layout_trace
+        self.assertEqual("fallback", invalid_trace["outcome"])
+        self.assertEqual([0, 0], invalid_trace["origin"])
+        self.assertEqual([0, 0, 0, 20], invalid_trace["explicit_clip_bounds"])
+        self.assertIsNone(invalid_trace["fitting_bounds"])
+        self.assertIsNotNone(invalid_trace["coordinate_state"])
+
     # Verifies FR-2026-08-04-07, FR-2026-10-22-11 and FR-2026-10-22-12.
     def test_fits_svg_text_with_and_without_a_clip_rectangle(self) -> None:
         result = replace_vector_text(
@@ -260,9 +360,9 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual("A considerably longer heading", _emf_text(result.data))
         self.assertEqual((0.0, 0.0), _emf_text_scales(result.data)[0])
         font_heights = _emf_font_heights(result.data)
-        self.assertLess(abs(font_heights[0]), abs(font_heights[1]))
-        self.assertEqual(-20, font_heights[1])
-        self.assertEqual([1, 82, 82], _emf_record_types(result.data)[:3])
+        self.assertLess(abs(font_heights[1]), abs(font_heights[0]))
+        self.assertEqual(-20, font_heights[0])
+        self.assertEqual([1, 82, 37], _emf_record_types(result.data)[:3])
         self.assertEqual(10, struct.unpack_from("<I", result.data, 52)[0])
         self.assertEqual(3, struct.unpack_from("<H", result.data, 56)[0])
 
@@ -305,7 +405,7 @@ class VectorTextReplacerTests(unittest.TestCase):
             ["A considerably longer grouped heading", ""], _emf_texts(result.data)
         )
         self.assertEqual(2, result.replaced_text_items)
-        self.assertLess(abs(_emf_font_heights(result.data)[0]), 20)
+        self.assertLess(abs(_emf_font_heights(result.data)[-1]), 20)
         self.assertTrue(_emf_is_structurally_valid(result.data))
 
     # Verifies FR-2026-09-05-02.
@@ -498,7 +598,7 @@ class VectorTextReplacerTests(unittest.TestCase):
 
         self.assertEqual(["AB"], provider.requests)
         self.assertEqual(["A longer coherent replacement", ""], _emf_texts(result.data))
-        self.assertEqual([1, 82], _emf_record_types(result.data)[:2])
+        self.assertEqual([1, 37, 82, 37, 84], _emf_record_types(result.data)[:5])
         self.assertTrue(_emf_is_structurally_valid(result.data))
 
     # Verifies FR-2026-09-05-02.
@@ -574,7 +674,7 @@ class VectorTextReplacerTests(unittest.TestCase):
             target_language="en",
         )
         self.assertEqual((0.0, 0.0), _emf_text_scales(result.data)[0])
-        self.assertLess(abs(_emf_font_heights(result.data)[0]), 20)
+        self.assertLess(abs(_emf_font_heights(result.data)[-1]), 20)
 
     # Verifies FR-2026-09-05-01.
     def test_unclipped_emf_fitting_accepts_rotation_reflection_and_shear(self) -> None:
@@ -602,7 +702,7 @@ class VectorTextReplacerTests(unittest.TestCase):
                     replacement_provider=_LongReplacementProvider(),
                     target_language="en",
                 )
-                self.assertLess(abs(_emf_font_heights(result.data)[0]), 20)
+                self.assertLess(abs(_emf_font_heights(result.data)[-1]), 20)
                 self.assertIn(transform_record, result.data)
                 self.assertTrue(_emf_is_structurally_valid(result.data))
 
@@ -642,7 +742,7 @@ class VectorTextReplacerTests(unittest.TestCase):
         )
 
         self.assertEqual("A considerably longer heading", _emf_text(result.data))
-        self.assertLess(abs(_emf_font_heights(result.data)[0]), 20)
+        self.assertLess(abs(_emf_font_heights(result.data)[-1]), 20)
 
     # Verifies FR-2026-09-05-01.
     def test_unclipped_emf_fitting_accepts_all_world_transform_operations(self) -> None:

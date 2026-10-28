@@ -92,6 +92,35 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementVectorTests(FolderReplacementTestCase):
+    # Verifies FR-2026-10-28-04.
+    def test_debug_emf_trace_is_separate_and_does_not_change_processing(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            (input_root / "graphic.emf").write_bytes(_unclipped_emf_with_vertical_rule())
+            providers = [
+                _RecordingReplacementProvider(replacement_text="A considerably longer heading"),
+                _RecordingReplacementProvider(replacement_text="A considerably longer heading"),
+            ]
+            for enabled, provider in zip((False, True), providers):
+                result = self._run(
+                    input_root, root / ("debug" if enabled else "normal"),
+                    _EmptyOcrProvider(), provider,
+                    document_text_layout="preserve-basic-layout", diagnostics_enabled=enabled,
+                )
+                self.assertEqual([], result.failures)
+            self.assertEqual((root / "normal" / "graphic.emf").read_bytes(),
+                             (root / "debug" / "graphic.emf").read_bytes())
+            self.assertEqual(providers[0].requests, providers[1].requests)
+            self.assertFalse((root / "normal" / "graphic.emf.diagnostics.json").exists())
+            report = json.loads((root / "debug" / "graphic.emf.diagnostics.json").read_text("utf-8"))
+            self.assertEqual([], report["entries"])
+            [trace] = report["emf_layout_trace"]
+            self.assertEqual("individual_fit", trace["outcome"])
+            self.assertEqual("Old", trace["source_text"])
+            self.assertEqual([], trace["nested_object_path"])
+
     # Verifies FR-2026-08-03-05.
     def test_replaces_editable_svg_vector_text_without_ocr(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -203,7 +232,7 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
                 emf_data = archive.read("ppt/media/vector.emf")
             self.assertEqual((0.0, 0.0), _emf_text_scales(emf_data)[0])
             font_heights = _emf_font_heights(emf_data)
-            self.assertLess(abs(font_heights[0]), abs(font_heights[1]))
+            self.assertLess(abs(font_heights[1]), abs(font_heights[0]))
 
     # Verifies FR-2026-09-06-01.
     def test_pptx_emf_fallbacks_write_local_record_diagnostics(self) -> None:
@@ -261,6 +290,10 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
                 "ppt/media/sheared.emf",
                 fallbacks["emf_fitted_layout_sheared_transform_unavailable"]["location"]["package_part"],
             )
+            traces = {item["package_part"]: item for item in sidecar["emf_layout_trace"]}
+            self.assertEqual(set(traces), {"ppt/media/rotated.emf", "ppt/media/sheared.emf"})
+            self.assertEqual("fallback", traces["ppt/media/rotated.emf"]["outcome"])
+            self.assertEqual(rotated["reason_code"], traces["ppt/media/rotated.emf"]["fallback_reason"])
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:

@@ -37,7 +37,7 @@ from test_vector_emfplus import (
     _plus_header,
     _plus_records,
 )
-from test_vector_text_replacer import _emf_is_structurally_valid, _wmf_with_text
+from test_vector_text_replacer import _emf_is_structurally_valid, _emf_with_unclipped_text, _wmf_with_text
 
 _VERSION = 0xDBC01002
 _IMAGE_FLAGS = 5 << 8
@@ -287,6 +287,33 @@ class EmfPlusMetafileObjectTests(unittest.TestCase):
 
 
 class EmfPlusImagePlanTests(unittest.TestCase):
+    # Verifies FR-2026-10-28-03 and FR-2026-10-28-04.
+    def test_nested_emf_trace_preserves_object_path_and_local_offsets(self) -> None:
+        inner = bytearray(_emf_with_unclipped_text())
+        inner[40:44] = b" EMF"
+        middle = bytearray(_emf_with_image(_metafile_data(bytes(inner)), object_id=9))
+        middle[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(middle)), object_id=3)
+        diagnostics: list[dict[str, object]] = []
+        plan = plan_vector(
+            source, ".emf", _EmptyOcrProvider(), "en", "en",
+            document_text_layout="preserve-basic-layout", diagnostics=diagnostics,
+        )
+        engine = TranslationEngine(_RecordingProvider(), "en", "en")
+        result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+        [trace] = result.emf_layout_trace
+        self.assertEqual([3, 9], trace["nested_object_path"])
+        self.assertEqual("individual_fit", trace["outcome"])
+        [middle_object] = _image_objects(result.data)
+        [inner_object] = _image_objects(middle_object.payload)
+        font = trace["generated_font"]
+        self.assertIsInstance(font, dict)
+        assert isinstance(font, dict)
+        self.assertEqual(82, struct.unpack_from("<I", inner_object.payload, font["creation_record_offset"])[0])
+        self.assertEqual(37, struct.unpack_from("<I", inner_object.payload, font["selection_record_offset"])[0])
+        self.assertTrue(_emf_is_structurally_valid(inner_object.payload))
+        self.assertEqual(0, engine.plan_misses)
+
     # Verifies FR-2026-10-22-14: nested graphics get path-style units after the parent's.
     def test_nested_graphics_are_planned_as_child_units(self) -> None:
         source = _emf_with_image(_metafile_data(_nested_emf("inner")))

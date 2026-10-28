@@ -442,6 +442,68 @@ class EmfPlusFittedLayoutTests(unittest.TestCase):
             _emf_records(with_plus)[1],
         )
 
+    # Verifies FR-2026-10-28-03: fitted fonts are created in the active GDI interval.
+    def test_fitted_gdi_font_is_created_inside_getdc_interval(self) -> None:
+        header_comment = _comment(_plus_header())
+        getdc_comment = _comment(_plus_record(0x4004, 0, b""))
+        source = _emf_from_records(
+            header_comment,
+            _emf_font_record("Noto Sans JP"),
+            getdc_comment,
+            _emf_select_object_record(1),
+            _emf_exttextout_record("Old", 0, 0, 40, 20),
+        )
+
+        _document, result = self._fitted(source, "preserve-basic-layout-source-font")
+
+        records = _emf_records(result.data)
+        self.assertEqual(header_comment, records[1])
+        self.assertEqual(getdc_comment, records[3])
+        text_index = next(index for index, record in enumerate(records) if struct.unpack_from("<I", record)[0] == 84)
+        generated_font, generated_selection = records[text_index - 2:text_index]
+        self.assertEqual(82, struct.unpack_from("<I", generated_font)[0])
+        self.assertEqual(37, struct.unpack_from("<I", generated_selection)[0])
+        self.assertEqual(struct.unpack_from("<I", generated_font, 8)[0], struct.unpack_from("<I", generated_selection, 8)[0])
+        self.assertLess(struct.unpack_from("<I", generated_font, 8)[0], struct.unpack_from("<H", result.data, 56)[0])
+        self.assertEqual(1, struct.unpack_from("<I", records[text_index + 1], 8)[0])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+        traced = emf.analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout-source-font", trace_layout=True,
+        ).apply(lambda text: _LONG_TEXT, _LongReplacementProvider())
+        self.assertEqual(result.data, traced.data)
+        [trace] = traced.emf_layout_trace
+        generated = trace["generated_font"]
+        assert isinstance(generated, dict)
+        self.assertTrue(generated["within_emfplus_getdc"])
+
+    # Verifies FR-2026-10-28-03.
+    def test_grouped_gdi_font_is_created_inside_getdc_interval(self) -> None:
+        header_comment = _comment(_plus_header())
+        getdc_comment = _comment(_plus_record(0x4004, 0, b""))
+        source = _emf_from_records(
+            header_comment,
+            _emf_font_record("Noto Sans JP"),
+            getdc_comment,
+            _emf_select_object_record(1),
+            _emf_exttextout_record("A", 0, 0, 10, 20),
+            _emf_exttextout_record("B", 10, 0, 40, 20),
+        )
+        _document, result = self._fitted(source, "preserve-basic-layout-source-font")
+        records = _emf_records(result.data)
+        self.assertEqual(header_comment, records[1])
+        self.assertEqual(getdc_comment, records[3])
+        text_indices = [index for index, record in enumerate(records) if struct.unpack_from("<I", record)[0] == 84]
+        self.assertEqual(2, len(text_indices))
+        anchor = text_indices[0]
+        self.assertEqual(82, struct.unpack_from("<I", records[anchor - 2])[0])
+        self.assertEqual(37, struct.unpack_from("<I", records[anchor - 1])[0])
+        self.assertEqual(struct.unpack_from("<I", records[anchor - 2], 8)[0],
+                         struct.unpack_from("<I", records[anchor - 1], 8)[0])
+        self.assertEqual(1, struct.unpack_from("<I", records[anchor + 1], 8)[0])
+        self.assertEqual(0, struct.unpack_from("<I", records[text_indices[1]], 44)[0])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+
 
 if __name__ == "__main__":
     unittest.main()
