@@ -16,6 +16,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urljoin
 from xml.etree import ElementTree
 
 from PIL import Image
@@ -385,11 +386,12 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                     self.assertIn(f'en/{name}.png.json', item)
                     self.assertIn('target="_blank"', item)
                     self.assertIn('alt="Original input"', item)
-                    self.assertIn(f'en/{name}.png.masked.svg', item)
+                    mask_name = "masked.svg" if viewer is ocr_viewer else "replacement-masked.svg"
+                    self.assertIn(f'en/{name}.png.{mask_name}', item)
                 self.assertNotIn('.overview { display: flex', overview)
             for name in ("first", "second"):
                 self.assertEqual(2, ocr_viewer.count(f'data="en/{name}.png.masked.svg"'))
-                self.assertEqual(2, replacement.count(f'value="en/{name}.png.masked.svg"'))
+                self.assertEqual(2, replacement.count(f'value="en/{name}.png.replacement-masked.svg"'))
             for index in (1, 2):
                 for suffix in (str(index), f"overview-{index}"):
                     preview = f"replacement-preview-{suffix}"
@@ -500,7 +502,7 @@ for (const origin of [0, 3]) {
                 check=True, capture_output=True, text=True,
             )
 
-    # Verifies FR-2026-10-27-06.
+    # Verifies FR-2026-10-27-06 and FR-2026-10-28-01.
     def test_stale_replacement_viewer_regenerates_without_rerunning_ocr(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             input_root, output_root = _make_images(Path(temporary_directory), 1)
@@ -509,7 +511,7 @@ for (const origin of [0, 3]) {
             ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
             provider_root = output_root / "fake"
             (provider_root / ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
-                "13\n", encoding="ascii"
+                "14\n", encoding="ascii"
             )
             ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
             self.assertEqual(1, provider.calls)
@@ -1329,7 +1331,7 @@ for (const origin of [0, 3]) {
                 ">Detected regions masked</option>", replacement_viewer
             )
             self.assertIn(
-                '<option value="collection/en/nested/success.png.masked.svg">'
+                '<option value="collection/en/nested/success.png.replacement-masked.svg">'
                 "Detected regions masked</option>",
                 replacement_viewer,
             )
@@ -1359,12 +1361,32 @@ for (const origin of [0, 3]) {
                 f'src="{first_preview_path}">',
                 replacement_viewer,
             )
-            self.assertIn(
-                '<tr><td>1</td>', replacement_viewer
+            self.assertIn(f'<tr id="{viewer_row_identifiers[0]}"><td>1</td>', replacement_viewer)
+            self.assertNotIn(f'<tr id="{viewer_row_identifiers[1]}">', replacement_viewer)
+            self.assertIn('tr:target td', replacement_viewer)
+            replacement_svg = ElementTree.parse(
+                success_base.with_name("success.png.replacement-masked.svg")
+            ).getroot()
+            replacement_links = replacement_svg.findall(f"{svg_namespace}a")
+            self.assertEqual(1, len(replacement_links))
+            self.assertEqual(
+                f"../../../text-replacement.html#{viewer_row_identifiers[0]}",
+                replacement_links[0].get("href"),
             )
-            self.assertNotIn(
-                '<tr><td>2</td>', replacement_viewer
+            self.assertEqual("_top", replacement_links[0].get("target"))
+            # Verifies FR-2026-10-28-01 for file URLs opened from a standalone SVG.
+            replacement_svg_url = success_base.with_name("success.png.replacement-masked.svg").as_uri()
+            self.assertEqual(
+                (provider_root / "text-replacement.html").as_uri() + "#" + viewer_row_identifiers[0],
+                urljoin(replacement_svg_url, replacement_links[0].get("href", "")),
             )
+            self.assertEqual(
+                (provider_root / "index.html").as_uri() + "#" + viewer_row_identifiers[0],
+                urljoin(masked_path.as_uri(), masked_svg.findall(f"{svg_namespace}a")[0].get("href", "")),
+            )
+            inactive = replacement_svg.findall(f"{svg_namespace}polygon")
+            self.assertEqual(1, len(inactive))
+            self.assertEqual("low confidence", inactive[0].findtext(f"{svg_namespace}title"))
             self.assertEqual(
                 2,
                 replacement_viewer.count('alt="Original input"'),

@@ -70,7 +70,7 @@ TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "14"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "15"
 BASELINE_TEXT_REPLACEMENT_PROVIDERS = ("identity", "character_mask")
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
@@ -786,6 +786,11 @@ def _write_text_replacement_report(
             continue
         succeeded = not item.failed
         ocr_result = item.ocr_result
+        if succeeded and ocr_result is not None:
+            _replacement_mask_path(provider_root, image).write_text(
+                _masked_svg(provider_root, image, _image_size(image.path), ocr_result, replacement=True),
+                encoding="utf-8",
+            )
         entries.append(
             ViewerEntry(
                 image,
@@ -885,6 +890,10 @@ def _masked_image_path(provider_root: Path, image: EvaluationImage) -> Path:
     return provider_root / image.relative_path.parent / f"{image.relative_path.name}.masked.svg"
 
 
+def _replacement_mask_path(provider_root: Path, image: EvaluationImage) -> Path:
+    return provider_root / image.relative_path.parent / f"{image.relative_path.name}.replacement-masked.svg"
+
+
 # Characters that XML 1.0 forbids, which provider text can contain.
 _INVALID_XML_CHARACTERS = re.compile("[^\u0009\u000a\u000d\u0020-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
 
@@ -900,11 +909,14 @@ def _masked_svg(
     image: EvaluationImage,
     image_size: tuple[int, int],
     result: OcrResult,
+    *,
+    replacement: bool = False,
 ) -> str:
-    """Build a standalone SVG showing the input with every detection masked and linked."""
+    """Build a standalone SVG with links to rows in the selected viewer."""
     svg_directory = _masked_image_path(provider_root, image).parent
     source_url = html.escape(_relative_url(image.path, svg_directory), quote=True)
-    viewer_url = _relative_url(provider_root / VIEWER_FILENAME, svg_directory)
+    viewer_name = TEXT_REPLACEMENT_VIEWER_FILENAME if replacement else VIEWER_FILENAME
+    viewer_url = _relative_url(provider_root / viewer_name, svg_directory)
     width, height = image_size
     regions: list[str] = []
     for region_index, text_item in enumerate(result.text_items, start=1):
@@ -914,9 +926,11 @@ def _masked_svg(
         )
         title = html.escape(_INVALID_XML_CHARACTERS.sub("", text_item.text), quote=False)
         polygon = f'<polygon points="{points}" fill="black"><title>{title}</title></polygon>'
-        # Every detected region has an OCR viewer table row, so every polygon is linked.
-        target = html.escape(f"{viewer_url}#{_region_element_id(image, region_index)}", quote=True)
-        regions.append(f'<a href="{target}" target="_top">{polygon}</a>')
+        if replacement and text_item.confidence < TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:
+            regions.append(polygon)
+        else:
+            target = html.escape(f"{viewer_url}#{_region_element_id(image, region_index)}", quote=True)
+            regions.append(f'<a href="{target}" target="_top">{polygon}</a>')
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
@@ -1068,6 +1082,7 @@ def _write_text_replacement_viewer(
     .top-preview img {{ display: block; max-width: 100%; }}
     object {{ background: white; border: 1px solid #cbd5e1; display: block; }}
     [hidden] {{ display: none !important; }}
+    tr:target td {{ background: #fef9c3; }}
     table {{ border-collapse: collapse; margin-top: 1rem; width: auto; }} th, td {{ border: 1px solid #cbd5e1; padding: .5rem; text-align: left; vertical-align: top; }}
     th {{ background: #f1f5f9; }} td img {{ max-height: 120px; }}
   </style>
@@ -1173,7 +1188,7 @@ def _replacement_preview_html(
 ) -> str:
     """Render a selectable preview for an overview or breakdown."""
     image_path = _relative_url(entry.image.path, provider_root)
-    masked_path = _relative_url(_masked_image_path(provider_root, entry.image), provider_root)
+    masked_path = _relative_url(_replacement_mask_path(provider_root, entry.image), provider_root)
     preview_identifier = f"replacement-preview-{identifier_suffix}"
     preview_sources = tuple(
         _relative_url(
@@ -1227,7 +1242,7 @@ def _replacement_text_region_row(
         for provider_index, provider_name in enumerate(replacement_provider_names, start=1)
     )
     return (
-        f"<tr><td>{region_index}</td>"
+        f'<tr id="{html.escape(_region_element_id(image, region_index), quote=True)}"><td>{region_index}</td>'
         f"{_replacement_image_cell(original_path, f'Original text region {region_index}') }"
         f"{replacement_cells}</tr>"
     )

@@ -1316,3 +1316,32 @@ A shared selection makes it easier to compare all images under the same replacem
 ### Verification
 
 Automated tests shall use synthetic images and verify that changing a dropdown in either the overview or a breakdown updates every dropdown and its own image's preview for each provider and the detection mask, without a page reload. Tests shall verify that mask links remain usable and that a stale text-replacement viewer is regenerated without rerunning current OCR.
+
+---
+
+## FR-2026-10-28-01
+
+| Property | Value |
+|----------|-------|
+| Title | Navigate from a detection mask to the current viewer's region |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-02-13, FR-2026-10-26-02, FR-2026-10-27-05, FR-2026-10-27-06 |
+
+### Description
+
+When a reviewer activates a detected-region polygon in an OCR viewer mask, the viewer shall navigate to and highlight that region's OCR table row on the same page. When a reviewer activates a detected-region polygon in a text-replacement viewer mask and that region has a replacement table row, the viewer shall navigate to and highlight that row on the text-replacement page. This behaviour shall work from both overview and individual breakdown previews, including locally opened generated pages.
+
+Replacement table rows shall have stable, page-unique region identifiers corresponding to their OCR regions. Existing mask tooltips, the synchronized preview selection, and standalone mask behaviour shall remain available. This requirement amends FR-2026-10-26-02's rule that a mask activated from the text-replacement page navigates to the OCR viewer. The OCR and text-replacement artifact freshness rules shall regenerate any artifacts made stale by the change.
+
+The mask shall continue to show regions below confidence `0.65`, which FR-2026-08-02-13 excludes from the replacement table. Activating such a region on the text-replacement page shall do nothing; its tooltip shall remain available.
+
+### Rationale
+
+A mask click should take a reviewer to the relevant detail in the viewer they are using.
+
+### Verification
+
+Use synthetic images and OCR results to verify navigation and row highlighting from both preview locations in both viewers, including local file access, matching identifiers across images with the same filename, and retained tooltips and standalone mask behaviour. Verify that low-confidence regions remain visible with tooltips but do not navigate from the replacement page, and verify cache invalidation.
