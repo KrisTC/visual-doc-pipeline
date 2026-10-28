@@ -1,5 +1,257 @@
 # Changelog
 
+## [0.3.0](https://github.com/KrisTC/visual-doc-pipeline/compare/v0.2.0...v0.3.0) (2026-10-28)
+
+### Google Cloud Vision OCR
+
+This release adds `google_cloud_vision` as an OCR provider for extracting text
+from images. Vision detects languages in the image and groups words into text
+regions suitable for replacement, with grouping decisions available in OCR
+result data. The existing `paddleocr` provider remains the default.
+
+Select `--ocr google_cloud_vision` in folder processing or OCR evaluation to use
+it. This sends image content to Google Cloud Vision's EU endpoint; automatic OCR
+evaluations do not select Vision. See [Google Cloud setup](docs/google-cloud-setup.md).
+
+### Supporting development and improvements
+
+The work supporting Vision OCR also improved evaluation, review, and reliability:
+
+- OCR evaluation pages now show image overviews, interactive region masks and
+  synchronized replacement previews. Runs can be narrowed with `--include`,
+  default to 25 images, and support `--max-images 0` for no limit. They run the
+  `identity` and `character_mask` replacement providers by default and accept
+  an additional provider through `--text-replacement`. Explicitly selecting
+  Google Cloud Translation sends recognised text to Google Cloud Translation.
+- Raster replacement accounts for the page behind transparent images. Regions
+  whose replacement text cannot fit retain their original pixels instead of
+  failing the document.
+- A Windows review tool opens translated PowerPoint, Word and Excel files beside
+  their sources. Folder processing skips Office temporary owner files and makes
+  translated output filenames valid on Windows.
+- The test runner supports parallel execution, forwarded arguments and a fast
+  subset. Serial execution remains available. See the
+  [development documentation](docs/development.md).
+
+### Known issue
+
+EMF images are not yet processed as well as intended. This is particularly
+noticeable in PowerPoint presentations containing embedded EMF images. Improving
+EMF processing is targeted for the next release.
+
+### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| SR-2026-10-24-01 | Google Cloud Vision credentials and remote-image boundary | Implemented | KrisTC |
+
+### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| TR-2026-10-27-01 | Command-line argument tests run in process | Implemented | KrisTC |
+| TR-2026-10-27-02 | Parallel test execution by default | Implemented | KrisTC |
+| TR-2026-10-27-03 | Test runners forward arguments and support a fast subset | Implemented | KrisTC |
+
+### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-26-02 | Skip Office temporary owner files in folder replacement and OCR evaluation input preparation | Implemented | KrisTC |
+| FR-2026-10-27-01 | Make translated output filenames valid on the output filesystem | Implemented | KrisTC |
+| FR-2026-10-27-05 | Review translated PowerPoint output against its source | Implemented | KrisTC |
+| FR-2026-10-27-06 | Review translated Word and Excel output against its source | Implemented | KrisTC |
+
+### Raster Ocr Requirements
+
+Requirements for Raster images, OCR providers, OCR evaluation, or replacement-image rendering.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-24-01 | Add Google Cloud Vision OCR provider | Implemented | KrisTC |
+| FR-2026-10-24-02 | Manually evaluate Google Cloud Vision OCR | Implemented | KrisTC |
+| FR-2026-10-24-03 | Targeted OCR evaluation and Vision text grouping | Implemented | KrisTC |
+| FR-2026-10-26-01 | Estimate and render raster replacement text against an assumed page colour | Implemented | KrisTC |
+| FR-2026-10-26-02 | Replace the masked bitmap with a linked SVG detection mask | Implemented | KrisTC |
+| FR-2026-10-26-03 | Report every stage of OCR evaluation in its progress display | Implemented | KrisTC |
+| FR-2026-10-26-04 | Limit the number of images in an OCR-evaluation run | Implemented | KrisTC |
+| FR-2026-10-26-05 | Select the text-replacement provider run by OCR evaluation | Implemented | KrisTC |
+| FR-2026-10-27-02 | Skip a raster replacement whose text cannot fit its OCR region instead of failing the document | Implemented | KrisTC |
+| FR-2026-10-27-03 | Record the original Vision words and grouping decisions in OCR extra data | Implemented | KrisTC |
+| FR-2026-10-27-04 | Do not join Vision words that sit on clearly different backgrounds | Implemented | KrisTC |
+| FR-2026-10-27-05 | Show an interactive image overview in OCR evaluation viewers | Implemented | KrisTC |
+| FR-2026-10-27-06 | Synchronize text-replacement preview selections | Implemented | KrisTC |
+| FR-2026-10-28-01 | Navigate from a detection mask to the current viewer's region | Implemented | KrisTC |
+
+### Requirement details
+
+#### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+##### SR-2026-10-24-01 — Google Cloud Vision credentials and remote-image boundary [Implemented]
+
+###### Rationale
+
+Cloud OCR introduces an external image-processing boundary. Reusing the established Google credential configuration and requiring the EU endpoint makes the data flow and regional processing choice explicit while limiting what the provider sends and records.
+
+#### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+##### TR-2026-10-27-01 — Command-line argument tests run in process [Implemented]
+
+###### Rationale
+
+Each subprocess re-imports the full folder-replacement pipeline (about 1.8 s per start, measured on the development machine), so one test with several argument-error cases cost over 13 s. Argument handling is Python logic that does not need a new interpreter; only the direct-script launch path does.
+
+##### TR-2026-10-27-02 — Parallel test execution by default [Implemented]
+
+###### Rationale
+
+The test suite is dominated by independent, CPU-bound document and image processing. Parallel execution by default reduces wall time on multi-core machines without changing the tests, which is the purpose of a fast edit-test loop. A serial mode remains available so that a failure can be reproduced without concurrency as a factor.
+
+##### TR-2026-10-27-03 — Test runners forward arguments and support a fast subset [Implemented]
+
+###### Rationale
+
+The runners currently cannot pass `--durations`, `-k`, or similar options, so a developer must call the wrapper by hand to profile or filter. A deliberately skip-visible fast subset shortens the edit-test loop without silently reducing what the suite verifies for a merge.
+
+#### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+##### FR-2026-10-26-02 — Skip Office temporary owner files in folder replacement and OCR evaluation input preparation [Implemented]
+
+###### Rationale
+
+An owner file has a document extension but holds only a short user and machine name, not an OOXML package, so processing it always fails. In folder replacement it makes a run exit non-zero, and in OCR evaluation input preparation it aborts the whole run. Such files appear whenever a source folder is copied while a document is open.
+
+##### FR-2026-10-27-01 — Make translated output filenames valid on the output filesystem [Implemented]
+
+###### Rationale
+
+The output name is the translation of the input file's name (FR-2026-08-03-03). The input name is always valid on the source filesystem, but the translated name is new text that nothing has validated against Windows rules. A translator may introduce a forbidden character that the source name did not contain: it may turn Japanese brackets or other punctuation into an English phrase with a colon, add a question mark or quotation marks, render a full-width punctuation mark as its ASCII form, or end a name with a full stop. Full-width forms such as `：` and `？` are legal in a Windows filename, but their ASCII equivalents are not. In a failed run the source name held no ASCII colon, and the translated name did.
+
+A single such name currently fails the whole document after all of its translation work has been done, because the error appears only at the final rename. The failure depends on the provider's wording, so it is not predictable from the input and can appear for any provider.
+
+##### FR-2026-10-27-05 — Review translated PowerPoint output against its source [Implemented]
+
+###### Rationale
+
+Reviewing a development run requires opening each translated deck next to its source. Listing the revision's decks and printing the review command removes manual path entry between runs.
+
+##### FR-2026-10-27-06 — Review translated Word and Excel output against its source [Implemented]
+
+###### Rationale
+
+Translated Word and Excel output is reviewed the same way as PowerPoint output. Using the same workflow keeps the review step consistent across the document types the pipeline produces.
+
+#### Raster Ocr Requirements
+
+Requirements for Raster images, OCR providers, OCR evaluation, or replacement-image rendering.
+
+##### FR-2026-10-24-01 — Add Google Cloud Vision OCR provider [Implemented]
+
+###### Rationale
+
+Cloud Vision provides dense document OCR through a selectable managed provider while retaining the pipeline's normalized OCR result model and PaddleOCR default.
+Google Vision OCR provider may be more useful when a GPU is not available as the CPU version of PaddleOCR can be very slow.
+
+##### FR-2026-10-24-02 — Manually evaluate Google Cloud Vision OCR [Implemented]
+
+###### Rationale
+
+An opt-in evaluator run lets the developer compare Cloud Vision OCR against the local visual corpus while preventing a default evaluation from transmitting images.
+
+##### FR-2026-10-24-03 — Targeted OCR evaluation and Vision text grouping [Implemented]
+
+###### Rationale
+
+The evaluation corpus is large, and an explicit source-path selection lets the developer assess a document or small group without running OCR on unrelated images. Matching source paths lets preparation skip unrelated document extraction as well as provider calls. Word regions are too small for useful translation, while Vision paragraph regions can combine text from visually separate lines and lose bullet or indentation structure. Text with a distinct visual size on the same line may be a separate label and needs its own replacement bounds.
+
+##### FR-2026-10-26-01 — Estimate and render raster replacement text against an assumed page colour [Implemented]
+
+###### Rationale
+
+A transparent PNG in a document can look correct on the page while its stored pixels mislead colour estimation. Antialiasing pixels with low alpha and unrelated hidden RGB can form the apparent text colour, and replacement text drawn with that colour is nearly invisible on any page. The page colour supplies the missing context in one place, keeps the source's transparency in the output, and guarantees legible opaque text.
+
+##### FR-2026-10-26-02 — Replace the masked bitmap with a linked SVG detection mask [Implemented]
+
+###### Rationale
+
+A vector mask keeps the original bitmap pixels unmodified, avoids a second raster copy, and gives every detection a hyperlink target. A reviewer can click a masked region and land on its OCR table row instead of matching a position by eye.
+
+##### FR-2026-10-26-03 — Report every stage of OCR evaluation in its progress display [Implemented]
+
+###### Rationale
+
+Text replacement is repeated for every text-replacement provider and can take as long as OCR on a large corpus. A language-folder progress row says nothing about which of these stages is active. Showing one overall unit per stage and a per-file current row for that stage lets a reviewer see which condition is running and how far through the corpus it is.
+
+Removing a large provider output tree before regeneration can take about a minute, and with no output the command appeared to hang. Input preparation, discovery, and checksumming can be equally slow on a large corpus. Naming these phases lets a reviewer tell that the command is busy rather than stuck.
+
+##### FR-2026-10-26-04 — Limit the number of images in an OCR-evaluation run [Implemented]
+
+###### Rationale
+
+The evaluation was written for a small corpus. A real corpus of tens of documents, each containing many images, makes the default all-images run too slow for the quick manual review the command exists to support. A modest default limit keeps a bare run quick and bounded, while an explicit option and `--include` allow a larger or narrower run.
+
+##### FR-2026-10-26-05 — Select the text-replacement provider run by OCR evaluation [Implemented]
+
+###### Rationale
+
+The set of providers shown in the evaluation was growing, and the slowest, `argos_translate`, was run and shown first on every evaluation. `identity` and `character_mask` are cheap, local and deterministic, so they make a fast, useful baseline. A translation provider can then be chosen deliberately for the run, in the same way as an OCR provider is chosen with `--ocr`.
+
+##### FR-2026-10-27-02 — Skip a raster replacement whose text cannot fit its OCR region instead of failing the document [Implemented]
+
+###### Rationale
+
+One tiny or degenerate OCR region, such as an icon or a speck read as text, can fail an entire document and discard all of its other translated content, even though every other region was handled. The same happens to a legitimate region whose translation is much longer than its source: a single Japanese character or a short label commonly becomes a whole English word or phrase, which cannot fit the region that held the single character, however small the font. The project's approach to rendering is best effort: a region that cannot be rendered legibly is left as it was and reported for diagnosis, rather than drawn illegibly or allowed to stop the document.
+
+##### FR-2026-10-27-03 — Record the original Vision words and grouping decisions in OCR extra data [Implemented]
+
+###### Rationale
+
+The grouped region deliberately hides the Vision words it came from, which makes a wrong merge or split hard to diagnose. `OcrText.extra` was provided for provider-specific information with no cross-provider meaning, and the evaluator already writes it. Capturing the contributing words and the measured ratios allows the owner to tune the grouping thresholds from real evaluation output instead of by trial and error.
+
+##### FR-2026-10-27-04 — Do not join Vision words that sit on clearly different backgrounds [Implemented]
+
+###### Rationale
+
+The word boxes and symbol boxes that Vision returns are normalised to the line height, so the character-size rule cannot see that two neighbouring words are drawn at different sizes. Such words are usually also visually separate objects, for example a label inside a shape beside text on the artwork behind it. The image shows that difference even though the OCR geometry does not.
+
+##### FR-2026-10-27-05 — Show an interactive image overview in OCR evaluation viewers [Implemented]
+
+###### Rationale
+
+Showing the interactive previews together lets reviewers quickly inspect all processed images before examining individual region tables.
+
+##### FR-2026-10-27-06 — Synchronize text-replacement preview selections [Implemented]
+
+###### Rationale
+
+A shared selection makes it easier to compare all images under the same replacement provider or mask.
+
+##### FR-2026-10-28-01 — Navigate from a detection mask to the current viewer's region [Implemented]
+
+###### Rationale
+
+A mask click should take a reviewer to the relevant detail in the viewer they are using.
+
 ## [0.2.0](https://github.com/KrisTC/visual-doc-pipeline/compare/v0.1.0...v0.2.0) (2026-10-23)
 
 **Headline: massively faster translation.** Previously, every string in a document
