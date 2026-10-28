@@ -64,13 +64,13 @@ BITMAP_EXTENSIONS = {".bmp", ".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", "
 
 CHECKSUM_FILENAME = ".input.sha256"
 ARTIFACT_FORMAT_VERSION_FILENAME = ".artifact-format-version"
-ARTIFACT_FORMAT_VERSION = "5"
-VISION_ARTIFACT_FORMAT_VERSION = "5-vision-auto-language-v1"
+ARTIFACT_FORMAT_VERSION = "7"
+VISION_ARTIFACT_FORMAT_VERSION = "7-vision-auto-language-v1"
 TEXT_REPLACEMENT_CHECKSUM_FILENAME = ".text-replacement.input.sha256"
 TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME = (
     ".text-replacement-artifact-format-version"
 )
-TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "11"
+TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION = "14"
 BASELINE_TEXT_REPLACEMENT_PROVIDERS = ("identity", "character_mask")
 VIEWER_FILENAME = "index.html"
 TEXT_REPLACEMENT_VIEWER_FILENAME = "text-replacement.html"
@@ -992,6 +992,11 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
     rendered_entries = "\n".join(
         _viewer_entry_html(provider_root, entry) for entry in entries
     )
+    overview = "\n".join(
+        f'<article class="overview-item">{_overview_header_html(provider_root, entry)}'
+        f'{_ocr_preview_html(provider_root, entry)}</article>'
+        for entry in entries if entry.succeeded
+    )
     document = f"""<!doctype html>
 <html lang="en" translate="no">
 <head>
@@ -1004,7 +1009,8 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
     main {{ margin: 0 auto; max-width: 1100px; padding: 2rem; }}
     article {{ background: white; border: 1px solid #d9dee7; border-radius: 8px; margin: 1rem 0; padding: 1rem; }}
     h1, h2 {{ margin-top: 0; }} .failed {{ border-left: 5px solid #b91c1c; }}
-    .images {{ display: flex; flex-wrap: wrap; gap: 1rem; }} figure {{ margin: 0; max-width: 46%; }}
+    .images {{ display: flex; flex-wrap: nowrap; gap: 1rem; }}
+    .images figure {{ box-sizing: border-box; flex: 0 0 calc(50% - .5rem); margin: 0; min-width: 0; }}
     img {{ border: 1px solid #cbd5e1; height: auto; max-width: 100%; }} figcaption {{ font-size: .9rem; }}
     table {{ border-collapse: collapse; margin-top: 1rem; width: 100%; }} th, td {{ border: 1px solid #cbd5e1; padding: .5rem; text-align: left; vertical-align: top; }}
     th {{ background: #f1f5f9; }} td img {{ max-height: 120px; }}
@@ -1018,6 +1024,7 @@ def _write_viewer(provider_root: Path, entries: list[ViewerEntry]) -> None:
   <main>
     <h1>OCR evaluation</h1>
     <p>{len(entries)} image evaluation(s).</p>
+    <section><h2>Image overview</h2><div class="overview">{overview}</div></section>
     {rendered_entries}
   </main>
 </body>
@@ -1037,6 +1044,12 @@ def _write_text_replacement_viewer(
             provider_root, entry, replacement_provider_names, entry_index
         )
         for entry_index, entry in enumerate(entries, start=1)
+    )
+    overview = "\n".join(
+        f'<article class="overview-item">{_overview_header_html(provider_root, entry)}'
+        f'{_replacement_preview_html(provider_root, entry, replacement_provider_names, f"overview-{entry_index}")}</article>'
+        for entry_index, entry in enumerate(entries, start=1)
+        if entry.succeeded and entry.replacement_succeeded
     )
     document = f"""<!doctype html>
 <html lang="en">
@@ -1063,21 +1076,28 @@ def _write_text_replacement_viewer(
   <main>
     <h1>OCR text-replacement evaluation</h1>
     <p>{len(entries)} image evaluation(s).</p>
+    <section><h2>Image overview</h2><div class="overview">{overview}</div></section>
     {rendered_entries}
   </main>
   <script>
-    document.querySelectorAll("select[data-replacement-preview]").forEach((select) => {{
+    const selects = document.querySelectorAll("select[data-replacement-preview]");
+    selects.forEach((select) => {{
       select.addEventListener("change", () => {{
-        const preview = document.getElementById(select.dataset.replacementPreview);
-        const mask = document.getElementById(select.dataset.replacementMask);
-        const showMask = select.value.endsWith(".svg");
-        if (showMask) {{
-          if (mask.getAttribute("data") !== select.value) mask.setAttribute("data", select.value);
-        }} else {{
-          preview.src = select.value;
-        }}
-        preview.hidden = showMask;
-        mask.hidden = !showMask;
+        // All dropdowns have the same option order, but image-specific URLs.
+        const selectedIndex = select.selectedIndex;
+        selects.forEach((target) => {{
+          target.selectedIndex = selectedIndex;
+          const preview = document.getElementById(target.dataset.replacementPreview);
+          const mask = document.getElementById(target.dataset.replacementMask);
+          const showMask = target.value.endsWith(".svg");
+          if (showMask) {{
+            if (mask.getAttribute("data") !== target.value) mask.setAttribute("data", target.value);
+          }} else {{
+            preview.src = target.value;
+          }}
+          preview.hidden = showMask;
+          mask.hidden = !showMask;
+        }});
       }});
     }});
   </script>
@@ -1085,6 +1105,25 @@ def _write_text_replacement_viewer(
 </html>
 """
     (provider_root / TEXT_REPLACEMENT_VIEWER_FILENAME).write_text(document, encoding="utf-8")
+
+
+def _overview_header_html(provider_root: Path, entry: ViewerEntry) -> str:
+    title = html.escape(entry.image.relative_path.as_posix())
+    language = html.escape(entry.image.language)
+    result_path = html.escape(_relative_url(_result_json_path(provider_root, entry.image), provider_root), quote=True)
+    return (
+        f'<h3>{title}</h3><p>Language: {language}. '
+        f'<a href="{result_path}" target="_blank" rel="noopener">JSON result</a></p>'
+    )
+
+
+def _ocr_preview_html(provider_root: Path, entry: ViewerEntry) -> str:
+    image_path = html.escape(_relative_url(entry.image.path, provider_root), quote=True)
+    masked_path = _relative_url(_masked_image_path(provider_root, entry.image), provider_root)
+    return f"""<div class="images">
+    <figure><img alt="Original input" src="{image_path}"><figcaption>Input</figcaption></figure>
+    <figure>{_mask_object_html(masked_path, _image_size(entry.image.path))}<figcaption>Detected regions masked</figcaption></figure>
+  </div>"""
 
 
 def _replacement_viewer_entry_html(
@@ -1099,9 +1138,43 @@ def _replacement_viewer_entry_html(
   <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}. Status: failed.</p>
 </article>"""
 
+    if not entry.replacement_succeeded:
+        return f"""<article class="failed">
+  <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}→en. OCR succeeded; text-replacement artifacts failed.</p>
+</article>"""
+
+    rows = "".join(
+        _replacement_text_region_row(
+            provider_root, entry.image, region_index, replacement_provider_names
+        )
+        for region_index, confidence in enumerate(entry.confidences, start=1)
+        if confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
+    )
+    table = (
+        f"<p>No text regions met the {TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:.2f} confidence threshold.</p>"
+        if not rows
+        else f"""<table>
+  <thead><tr><th>Region</th><th>Original text image</th>{''.join(f'<th>{html.escape(name)}</th>' for name in replacement_provider_names)}</tr></thead>
+  <tbody>{rows}</tbody>
+</table>"""
+    )
+    return f"""<article>
+  <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}→en. Status: succeeded.</p>
+  {_replacement_preview_html(provider_root, entry, replacement_provider_names, str(entry_index))}
+  {table}
+</article>"""
+
+
+def _replacement_preview_html(
+    provider_root: Path,
+    entry: ViewerEntry,
+    replacement_provider_names: tuple[str, ...],
+    identifier_suffix: str,
+) -> str:
+    """Render a selectable preview for an overview or breakdown."""
     image_path = _relative_url(entry.image.path, provider_root)
     masked_path = _relative_url(_masked_image_path(provider_root, entry.image), provider_root)
-    preview_identifier = f"replacement-preview-{entry_index}"
+    preview_identifier = f"replacement-preview-{identifier_suffix}"
     preview_sources = tuple(
         _relative_url(
             _replacement_complete_image_path(provider_root, entry.image, provider_index), provider_root
@@ -1122,35 +1195,16 @@ def _replacement_viewer_entry_html(
         f"{provider_options}"
         f'<option value="{html.escape(masked_path, quote=True)}">Detected regions masked</option>'
     )
-    rows = "".join(
-        _replacement_text_region_row(
-            provider_root, entry.image, region_index, replacement_provider_names
-        )
-        for region_index, confidence in enumerate(entry.confidences, start=1)
-        if confidence >= TEXT_REPLACEMENT_MINIMUM_CONFIDENCE
-    )
-    table = (
-        f"<p>No text regions met the {TEXT_REPLACEMENT_MINIMUM_CONFIDENCE:.2f} confidence threshold.</p>"
-        if not rows
-        else f"""<table>
-  <thead><tr><th>Region</th><th>Original text image</th>{''.join(f'<th>{html.escape(name)}</th>' for name in replacement_provider_names)}</tr></thead>
-  <tbody>{rows}</tbody>
-</table>"""
-    )
     first_preview = preview_sources[initial_index] if preview_sources else ""
-    return f"""<article>
-  <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}→en. Status: succeeded.</p>
-  <div class="top-previews">
+    return f"""<div class="top-previews">
     <figure class="top-preview"><img alt="Original input" src="{html.escape(image_path, quote=True)}"><figcaption>Input</figcaption></figure>
     <div class="complete-preview top-preview">
       <img id="{preview_identifier}" alt="Complete text-replacement preview" src="{html.escape(first_preview, quote=True)}">
       {_mask_object_html(None, _image_size(entry.image.path), f"{preview_identifier}-mask", hidden=True)}
-      <label for="replacement-select-{entry_index}">Complete replacement preview</label>
-      <select id="replacement-select-{entry_index}" data-replacement-preview="{preview_identifier}" data-replacement-mask="{preview_identifier}-mask">{options}</select>
+      <label for="replacement-select-{identifier_suffix}">Complete replacement preview</label>
+      <select id="replacement-select-{identifier_suffix}" data-replacement-preview="{preview_identifier}" data-replacement-mask="{preview_identifier}-mask">{options}</select>
     </div>
-  </div>
-  {table}
-</article>"""
+  </div>"""
 
 
 def _replacement_text_region_row(
@@ -1188,7 +1242,6 @@ def _replacement_image_cell(url: str, alternative_text: str) -> str:
 
 
 def _viewer_entry_html(provider_root: Path, entry: ViewerEntry) -> str:
-    image_path = _relative_url(entry.image.path, provider_root)
     result_path = _relative_url(_result_json_path(provider_root, entry.image), provider_root)
     title = html.escape(entry.image.relative_path.as_posix())
     if not entry.succeeded:
@@ -1196,12 +1249,6 @@ def _viewer_entry_html(provider_root: Path, entry: ViewerEntry) -> str:
   <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}. Status: failed.</p>
   <p><a href="{html.escape(result_path, quote=True)}" target="_blank" rel="noopener">JSON result</a></p>
 </article>"""
-    if not entry.replacement_succeeded:
-        return f"""<article class="failed">
-  <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}→en. OCR succeeded; text-replacement artifacts failed.</p>
-</article>"""
-
-    masked_path = _relative_url(_masked_image_path(provider_root, entry.image), provider_root)
     text_rows = "".join(
         _text_region_row(provider_root, entry.image, index, text, confidence)
         for index, (text, confidence) in enumerate(
@@ -1218,10 +1265,7 @@ def _viewer_entry_html(provider_root: Path, entry: ViewerEntry) -> str:
     )
     return f"""<article>
   <h2>{title}</h2><p>Language: {html.escape(entry.image.language)}. Status: succeeded. <a href="{html.escape(result_path, quote=True)}" target="_blank" rel="noopener">JSON result</a></p>
-  <div class="images">
-    <figure><img alt="Original input" src="{html.escape(image_path, quote=True)}"><figcaption>Input</figcaption></figure>
-    <figure>{_mask_object_html(masked_path, _image_size(entry.image.path))}<figcaption>Detected regions masked</figcaption></figure>
-  </div>
+  {_ocr_preview_html(provider_root, entry)}
   {text_table}
 </article>"""
 

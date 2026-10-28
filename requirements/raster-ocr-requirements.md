@@ -1260,3 +1260,59 @@ Initial values, calibrated against local evaluation output (four files, several 
 Automated tests shall use synthetic images and synthetic Vision responses only, and shall not contact Google or use confidential samples. They shall verify that adjacent words on clearly different flat backgrounds are not joined and that the second region records the `background_colour` reason, the measurement and the threshold; that adjacent words on the same background are joined as before and record the measurement; that glyph pixels inside the boxes do not affect the comparison; that no image leaves the existing behaviour unchanged; that the rule is not evaluated for a word the earlier rules separate; that the provider passes its prepared image to the rule; and that changing the rule's threshold changes the cache identity.
 
 ---
+
+---
+
+## FR-2026-10-27-05
+
+| Property | Value |
+|----------|-------|
+| Title | Show an interactive image overview in OCR evaluation viewers |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-01-03, FR-2026-08-02-02, FR-2026-08-02-08, FR-2026-08-02-13, FR-2026-10-26-02, FR-2026-10-26-05 |
+
+### Description
+
+Each provider's OCR evaluation viewer and text-replacement results page shall show an overview of the successful image evaluations together near the top of the page, before the individual image breakdowns. The overview shall show each successful image in its own row, with the original input beside the interactive output preview, the image identity and language, and a link to its OCR JSON result. It shall not include the text-detail tables. The existing image previews and tables in the individual breakdowns shall remain.
+
+The OCR overview previews shall retain the detection-mask interactions specified by FR-2026-10-26-02, including region tooltips and links to the corresponding OCR table rows. The text-replacement overview previews shall retain the provider and detection-mask selection behaviour specified by FR-2026-08-02-13, FR-2026-10-26-02, and FR-2026-10-26-05, including the mask's region tooltips and links. These interactions shall also continue to work in the individual breakdowns.
+
+The OCR and text-replacement artifact format versions shall change so existing cached viewers are regenerated with the overview, subject to the existing stage-specific freshness rules.
+
+### Rationale
+
+Showing the interactive previews together lets reviewers quickly inspect all processed images before examining individual region tables.
+
+### Verification
+
+Automated tests shall use synthetic inputs and verify that both pages show one input-and-output row and a JSON link for each successful image before the breakdowns, with no detail tables in the overview, retain the existing breakdown previews and tables, and preserve the applicable selection and mask-link behaviour in both locations. Tests shall also verify that stale viewer artifacts are regenerated under the existing cache rules.
+
+---
+
+## FR-2026-10-27-06
+
+| Property | Value |
+|----------|-------|
+| Title | Synchronize text-replacement preview selections |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-27 |
+| Related Requirements | FR-2026-08-02-13, FR-2026-10-26-02, FR-2026-10-26-05, FR-2026-10-27-05 |
+
+### Description
+
+On a provider's text-replacement results page, changing any complete-image preview dropdown shall select the same text-replacement provider or detected-region mask in every preview dropdown on that page, including those in the overview and the individual breakdowns. Every preview shall immediately show the corresponding output for its own image, without reloading the page. The dropdowns shall all reflect the shared selection.
+
+The existing initial selection, provider ordering, and detection-mask interactions remain governed by FR-2026-10-26-02 and FR-2026-10-26-05. The text-replacement artifact format version shall change so cached replacement viewers are regenerated under the existing stage-specific freshness rules.
+
+### Rationale
+
+A shared selection makes it easier to compare all images under the same replacement provider or mask.
+
+### Verification
+
+Automated tests shall use synthetic images and verify that changing a dropdown in either the overview or a breakdown updates every dropdown and its own image's preview for each provider and the detection mask, without a page reload. Tests shall verify that mask links remain usable and that a stale text-replacement viewer is regenerated without rerunning current OCR.
