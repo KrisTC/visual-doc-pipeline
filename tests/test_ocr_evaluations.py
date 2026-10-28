@@ -8,12 +8,15 @@ from contextlib import redirect_stdout
 from io import StringIO
 import json
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urljoin
 from xml.etree import ElementTree
 
 from PIL import Image
@@ -346,6 +349,176 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 (provider_root / ocr_evaluation.ARTIFACT_FORMAT_VERSION_FILENAME)
                 .read_text(encoding="ascii")
                 .strip(),
+            )
+
+    # Verifies FR-2026-10-27-05.
+    def test_overviews_retain_interactive_previews_for_each_successful_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            provider_root = root / "provider"
+            provider_root.mkdir()
+            entries = []
+            for name in ("first", "second", "failed"):
+                path = root / f"{name}.png"
+                Image.new("RGB", (80, 60), "white").save(path)
+                image = ocr_evaluation.EvaluationImage("en", path, Path(f"en/{name}.png"))
+                succeeded = name != "failed"
+                entries.append(ocr_evaluation.ViewerEntry(image, succeeded, (0.9,), ("text",), succeeded))
+
+            ocr_evaluation._write_viewer(provider_root, entries)
+            ocr_evaluation._write_text_replacement_viewer(
+                provider_root, entries, ("identity", "character_mask")
+            )
+            ocr_viewer = (provider_root / "index.html").read_text(encoding="utf-8")
+            replacement = (provider_root / "text-replacement.html").read_text(encoding="utf-8")
+            for viewer in (ocr_viewer, replacement):
+                overview, breakdowns = viewer.split("</section>", 1)
+                self.assertIn("en/first.png", overview)
+                self.assertIn("en/second.png", overview)
+                self.assertNotIn("en/failed.png", overview)
+                self.assertNotIn("<table>", overview)
+                self.assertIn("<table>", breakdowns)
+                overview_items = re.findall(
+                    r'<article class="overview-item">(.*?)</article>', overview, re.DOTALL
+                )
+                self.assertEqual(2, len(overview_items))
+                for name, item in zip(("first", "second"), overview_items, strict=True):
+                    self.assertIn(f'en/{name}.png.json', item)
+                    self.assertIn('target="_blank"', item)
+                    self.assertIn('alt="Original input"', item)
+                    mask_name = "masked.svg" if viewer is ocr_viewer else "replacement-masked.svg"
+                    self.assertIn(f'en/{name}.png.{mask_name}', item)
+                self.assertNotIn('.overview { display: flex', overview)
+            for name in ("first", "second"):
+                self.assertEqual(2, ocr_viewer.count(f'data="en/{name}.png.masked.svg"'))
+                self.assertEqual(2, replacement.count(f'value="en/{name}.png.replacement-masked.svg"'))
+            for index in (1, 2):
+                for suffix in (str(index), f"overview-{index}"):
+                    preview = f"replacement-preview-{suffix}"
+                    self.assertIn(f'id="{preview}"', replacement)
+                    self.assertIn(f'data-replacement-preview="{preview}"', replacement)
+                    self.assertIn(f'data-replacement-mask="{preview}-mask"', replacement)
+            self.assertIn('document.querySelectorAll("select[data-replacement-preview]")', replacement)
+            self.assertIn('tr:target td', ocr_viewer)
+
+    # Verifies FR-2026-10-27-05.
+    def test_old_viewer_versions_regenerate_at_their_existing_stage_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            provider_root = output_root / "fake"
+            self.assertEqual(1, provider.calls)
+
+            (provider_root / ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+                "12\n", encoding="ascii"
+            )
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(1, provider.calls)
+            self.assertIn("Image overview", (provider_root / "text-replacement.html").read_text())
+            self.assertEqual(
+                ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION,
+                (provider_root / ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME)
+                .read_text().strip(),
+            )
+
+            (provider_root / ocr_evaluation.ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+                "6\n", encoding="ascii"
+            )
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(2, provider.calls)
+            self.assertIn("Image overview", (provider_root / "index.html").read_text())
+
+    # Verifies FR-2026-10-27-06.
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required to exercise viewer JavaScript")
+    def test_replacement_dropdowns_synchronize_across_images_and_locations(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            provider_root = root / "provider"
+            provider_root.mkdir()
+            entries = []
+            for name in ("first", "second"):
+                path = root / f"{name}.png"
+                Image.new("RGB", (80, 60), "white").save(path)
+                image = ocr_evaluation.EvaluationImage("en", path, Path(f"en/{name}.png"))
+                entries.append(ocr_evaluation.ViewerEntry(image, True, (0.9,), ("text",), True))
+            ocr_evaluation._write_text_replacement_viewer(
+                provider_root, entries, ("identity", "character_mask", "extra")
+            )
+            viewer = (provider_root / "text-replacement.html").read_text(encoding="utf-8")
+            selects = re.findall(
+                r'<select id="([^"]+)" data-replacement-preview="([^"]+)" '
+                r'data-replacement-mask="([^"]+)">(.*?)</select>', viewer
+            )
+            self.assertEqual(4, len(selects))
+            select_data = [
+                {"id": select_id, "preview": preview, "mask": mask,
+                 "options": re.findall(r'<option value="([^"]+)"', options)}
+                for select_id, preview, mask, options in selects
+            ]
+            script = re.search(r"<script>(.*?)</script>", viewer, re.DOTALL)
+            assert script is not None
+            harness = r"""
+const assert = require("node:assert/strict");
+const rows = JSON.parse(process.argv[1]);
+const elements = {};
+const mockSelects = rows.map((row) => {
+  elements[row.preview] = {src: "", hidden: false};
+  elements[row.mask] = {
+    hidden: true, attributes: {},
+    getAttribute(name) { return this.attributes[name] ?? null; },
+    setAttribute(name, value) { this.attributes[name] = value; }
+  };
+  return {
+    dataset: {replacementPreview: row.preview, replacementMask: row.mask},
+    selectedIndex: 2,
+    get value() { return row.options[this.selectedIndex]; },
+    addEventListener(name, handler) { assert.equal(name, "change"); this.onChange = handler; }
+  };
+});
+const document = {
+  querySelectorAll() { return mockSelects; },
+  getElementById(id) { return elements[id]; }
+};
+""" + script.group(1) + r"""
+for (const origin of [0, 3]) {
+  for (const choice of [0, 1, 2, 3, 0]) {
+    selects[origin].selectedIndex = choice;
+    selects[origin].onChange();
+    for (let i = 0; i < selects.length; i++) {
+      const select = selects[i], row = rows[i];
+      const preview = elements[row.preview], mask = elements[row.mask];
+      assert.equal(select.selectedIndex, choice);
+      assert.equal(preview.hidden, choice === 3);
+      assert.equal(mask.hidden, choice !== 3);
+      assert.equal(choice === 3 ? mask.getAttribute("data") : preview.src, row.options[choice]);
+    }
+  }
+}
+"""
+            subprocess.run(
+                [shutil.which("node") or "node", "-e", harness, json.dumps(select_data)],
+                check=True, capture_output=True, text=True,
+            )
+
+    # Verifies FR-2026-10-27-06 and FR-2026-10-28-01.
+    def test_stale_replacement_viewer_regenerates_without_rerunning_ocr(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            input_root, output_root = _make_images(Path(temporary_directory), 1)
+            provider = FakeOcrProvider()
+            factory = OcrProviderFactory({"fake": lambda: provider})
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            provider_root = output_root / "fake"
+            (provider_root / ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME).write_text(
+                "14\n", encoding="ascii"
+            )
+            ocr_evaluation.evaluate_ocr_inputs(input_root, output_root, factory)
+            self.assertEqual(1, provider.calls)
+            self.assertEqual(
+                ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION,
+                (provider_root / ocr_evaluation.TEXT_REPLACEMENT_ARTIFACT_FORMAT_VERSION_FILENAME)
+                .read_text(encoding="ascii").strip(),
             )
 
     # Verifies FR-2026-08-02-02 and FR-2026-10-24-03.
@@ -840,7 +1013,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             self.assertEqual(["identity", "character_mask"], created)
             viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
             self.assertEqual(
-                ["identity", "character_mask"],
+                ["identity", "character_mask"] * 2,
                 re.findall(r"<option [^>]*>([a-z_]+)</option>", viewer),
             )
 
@@ -867,7 +1040,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
             )
             viewer = (output_root / "fake" / "text-replacement.html").read_text(encoding="utf-8")
             self.assertEqual(
-                ["identity", "character_mask", "remote_fake"],
+                ["identity", "character_mask", "remote_fake"] * 2,
                 re.findall(r"<option [^>]*>([a-z_]+)</option>", viewer),
             )
             self.assertRegex(viewer, r'<option [^>]*provider-0003\.png" selected>remote_fake<')
@@ -1158,7 +1331,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 ">Detected regions masked</option>", replacement_viewer
             )
             self.assertIn(
-                '<option value="collection/en/nested/success.png.masked.svg">'
+                '<option value="collection/en/nested/success.png.replacement-masked.svg">'
                 "Detected regions masked</option>",
                 replacement_viewer,
             )
@@ -1168,7 +1341,7 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 replacement_viewer,
             )
             self.assertIn('data-replacement-mask="replacement-preview-2-mask"', replacement_viewer)
-            self.assertIn('select.value.endsWith(".svg")', replacement_viewer)
+            self.assertIn('target.value.endsWith(".svg")', replacement_viewer)
             self.assertIn('.top-previews { display: flex; flex-wrap: nowrap;', replacement_viewer)
             self.assertIn('flex: 0 0 calc(50% - .5rem);', replacement_viewer)
             self.assertIn('.top-preview img { display: block; max-width: 100%; }', replacement_viewer)
@@ -1188,14 +1361,34 @@ class RunOcrEvaluationsTests(unittest.TestCase):
                 f'src="{first_preview_path}">',
                 replacement_viewer,
             )
-            self.assertIn(
-                '<tr><td>1</td>', replacement_viewer
+            self.assertIn(f'<tr id="{viewer_row_identifiers[0]}"><td>1</td>', replacement_viewer)
+            self.assertNotIn(f'<tr id="{viewer_row_identifiers[1]}">', replacement_viewer)
+            self.assertIn('tr:target td', replacement_viewer)
+            replacement_svg = ElementTree.parse(
+                success_base.with_name("success.png.replacement-masked.svg")
+            ).getroot()
+            replacement_links = replacement_svg.findall(f"{svg_namespace}a")
+            self.assertEqual(1, len(replacement_links))
+            self.assertEqual(
+                f"../../../text-replacement.html#{viewer_row_identifiers[0]}",
+                replacement_links[0].get("href"),
             )
-            self.assertNotIn(
-                '<tr><td>2</td>', replacement_viewer
+            self.assertEqual("_top", replacement_links[0].get("target"))
+            # Verifies FR-2026-10-28-01 for file URLs opened from a standalone SVG.
+            replacement_svg_url = success_base.with_name("success.png.replacement-masked.svg").as_uri()
+            self.assertEqual(
+                (provider_root / "text-replacement.html").as_uri() + "#" + viewer_row_identifiers[0],
+                urljoin(replacement_svg_url, replacement_links[0].get("href", "")),
             )
             self.assertEqual(
-                1,
+                (provider_root / "index.html").as_uri() + "#" + viewer_row_identifiers[0],
+                urljoin(masked_path.as_uri(), masked_svg.findall(f"{svg_namespace}a")[0].get("href", "")),
+            )
+            inactive = replacement_svg.findall(f"{svg_namespace}polygon")
+            self.assertEqual(1, len(inactive))
+            self.assertEqual("low confidence", inactive[0].findtext(f"{svg_namespace}title"))
+            self.assertEqual(
+                2,
                 replacement_viewer.count('alt="Original input"'),
             )
             self.assertNotIn('alt="Detected text masked in black"', replacement_viewer)
