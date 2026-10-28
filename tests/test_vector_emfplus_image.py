@@ -12,7 +12,10 @@ from PIL import Image
 
 from pipeline.folder_replacement.planning import NESTED_DOCUMENT_MAX_DEPTH, plan_and_apply
 from pipeline.folder_replacement.vector import apply_vector, plan_vector
-from pipeline.text_replacement import TextUnit, TranslationEngine
+from pipeline.text_replacement import (
+    TextReplacementItem, TextReplacementRequest, TextReplacementResult, TextUnit,
+    TranslationEngine, replace_each,
+)
 from pipeline.vector_text import analyse_vector_text
 from pipeline.vector_text.common import VectorReplacementResult
 from pipeline.vector_text.emfplus import parse_comment
@@ -37,7 +40,10 @@ from test_vector_emfplus import (
     _plus_header,
     _plus_records,
 )
-from test_vector_text_replacer import _emf_is_structurally_valid, _emf_with_unclipped_text, _wmf_with_text
+from test_vector_text_replacer import (
+    _emf_is_structurally_valid, _emf_move_to_record, _emf_text_clips, _emf_text_options,
+    _emf_texts, _emf_with_unclipped_text, _wmf_with_text,
+)
 
 _VERSION = 0xDBC01002
 _IMAGE_FLAGS = 5 << 8
@@ -287,6 +293,41 @@ class EmfPlusMetafileObjectTests(unittest.TestCase):
 
 
 class EmfPlusImagePlanTests(unittest.TestCase):
+    # Verifies FR-2026-10-28-05.
+    def test_nested_emf_preserves_shape_and_overlap_protection(self) -> None:
+        class _Provider(_RecordingProvider):
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
+                )
+
+        rectangle = struct.pack("<IIiiii", 43, 24, -10, -10, 55, 30)
+        inner = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=60, transform_records=(rectangle,),
+            adjacent_preamble=(_emf_move_to_record(-100, -100),),
+        ))
+        inner[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(inner)), object_id=3)
+        diagnostics: list[dict[str, object]] = []
+        plan = plan_vector(
+            source, ".emf", _EmptyOcrProvider(), "en", "en",
+            document_text_layout="preserve-basic-layout", diagnostics=diagnostics,
+        )
+        provider = _Provider()
+        engine = TranslationEngine(provider, "en", "en")
+        result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+        [inner_object] = _image_objects(result.data)
+        self.assertEqual(["W" * 500, "i"], _emf_texts(inner_object.payload))
+        self.assertTrue(_emf_text_options(inner_object.payload)[0] & 4)
+        self.assertLessEqual(_emf_text_clips(inner_object.payload)[0][2], 60)
+        self.assertIn(rectangle, _emf_records(inner_object.payload))
+        self.assertTrue(_emf_is_structurally_valid(inner_object.payload))
+        self.assertEqual([3], result.emf_layout_trace[0]["nested_object_path"])
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertEqual(0, engine.plan_misses)
+
     # Verifies FR-2026-10-28-03 and FR-2026-10-28-04.
     def test_nested_emf_trace_preserves_object_path_and_local_offsets(self) -> None:
         inner = bytearray(_emf_with_unclipped_text())

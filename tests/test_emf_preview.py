@@ -16,10 +16,13 @@ from unittest.mock import patch
 
 from PIL import Image, ImageChops
 
+from pipeline.text_replacement import TextReplacementItem, TextReplacementRequest, TextReplacementResult, replace_each
 from pipeline.vector_text import replace_vector_text
+from pipeline.vector_text.common import ETO_CLIPPED
+from pipeline.vector_text.emf import analyse_emf
 from pipeline.vector_text.emfplus import PlusRecord
 from scripts import emf_preview as preview
-from test_vector_text_replacer import _LongReplacementProvider
+from test_vector_text_replacer import _emf_text_clips, _emf_text_options
 
 
 class RectF(ctypes.Structure):
@@ -140,6 +143,96 @@ def _record_metafile(
         plus.GdiplusShutdown(token)
 
 
+def _record_gdi_overlap_metafile(*, rotated: bool, opaque: bool = False, angle: int = 90) -> bytes:
+    class _Transform(ctypes.Structure):
+        _fields_ = [(name, ctypes.c_float) for name in ("m11", "m12", "m21", "m22", "dx", "dy")]
+
+    gdi = ctypes.WinDLL("gdi32")
+    user = ctypes.WinDLL("user32")
+    user.GetDC.argtypes = [ctypes.c_void_p]
+    user.GetDC.restype = ctypes.c_void_p
+    user.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.CreateEnhMetaFileW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.POINTER(wintypes.RECT), ctypes.c_wchar_p]
+    gdi.CreateEnhMetaFileW.restype = ctypes.c_void_p
+    gdi.CloseEnhMetaFile.argtypes = [ctypes.c_void_p]
+    gdi.CloseEnhMetaFile.restype = ctypes.c_void_p
+    gdi.CreateFontW.argtypes = [ctypes.c_int] * 5 + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR]
+    gdi.CreateFontW.restype = ctypes.c_void_p
+    gdi.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.SelectObject.restype = ctypes.c_void_p
+    gdi.GetStockObject.argtypes = [ctypes.c_int]
+    gdi.GetStockObject.restype = ctypes.c_void_p
+    gdi.TextOutW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int]
+    gdi.ExtTextOutW.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.c_int, wintypes.UINT, ctypes.POINTER(wintypes.RECT),
+        wintypes.LPCWSTR, wintypes.UINT, ctypes.c_void_p,
+    ]
+    gdi.Rectangle.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    gdi.MoveToEx.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    gdi.SetBkMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi.SetBkColor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    gdi.SetTextColor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    gdi.SetGraphicsMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi.SetWorldTransform.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Transform)]
+    gdi.SaveDC.argtypes = [ctypes.c_void_p]
+    gdi.RestoreDC.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi.GetEnhMetaFileBits.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
+    gdi.DeleteEnhMetaFile.argtypes = [ctypes.c_void_p]
+    gdi.DeleteObject.argtypes = [ctypes.c_void_p]
+    screen = user.GetDC(None)
+    frame = wintypes.RECT(0, 0, 2540, 2540)
+    dc = gdi.CreateEnhMetaFileW(screen, None, ctypes.byref(frame), None)
+    font = gdi.CreateFontW(-20, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Arial")
+    if not dc or not font:
+        raise RuntimeError("Could not create synthetic GDI metafile.")
+    old_font = gdi.SelectObject(dc, font)
+    gdi.SetBkMode(dc, 1)
+    if rotated:
+        gdi.SaveDC(dc)
+        gdi.SetGraphicsMode(dc, 2)
+        transforms = {
+            90: (0, 1, -1, 0, 35, 10),
+            180: (-1, 0, 0, -1, 95, 45),
+            270: (0, -1, 1, 0, 15, 95),
+        }
+        matrix = _Transform(*transforms[angle])
+        if not gdi.SetWorldTransform(dc, ctypes.byref(matrix)) or not gdi.TextOutW(dc, 0, 0, "Old", 3):
+            raise RuntimeError("Could not draw rotated synthetic text.")
+        gdi.RestoreDC(dc, -1)
+        neighbour = {90: (15, 70), 180: (5, 20), 270: (15, 5)}[angle]
+    elif opaque:
+        gdi.SetBkColor(dc, 0x0000FF00)
+        opaque_rect = wintypes.RECT(5, 5, 75, 50)
+        if not gdi.ExtTextOutW(dc, 10, 15, 2, ctypes.byref(opaque_rect), "Old", 3, None):
+            raise RuntimeError("Could not draw opaque synthetic text.")
+        neighbour = (80, 15)
+    else:
+        old_brush = gdi.SelectObject(dc, gdi.GetStockObject(5))
+        gdi.Rectangle(dc, 5, 5, 70, 50)
+        gdi.SelectObject(dc, old_brush)
+        if not gdi.TextOutW(dc, 10, 15, "Old", 3):
+            raise RuntimeError("Could not draw synthetic text.")
+        neighbour = (80, 15)
+    gdi.MoveToEx(dc, -100, -100, None)
+    gdi.SetTextColor(dc, 0x000000FF)
+    if not gdi.TextOutW(dc, *neighbour, "Value", 5):
+        raise RuntimeError("Could not draw synthetic neighbouring text.")
+    gdi.SelectObject(dc, old_font)
+    handle = gdi.CloseEnhMetaFile(dc)
+    gdi.DeleteObject(font)
+    user.ReleaseDC(None, screen)
+    if not handle:
+        raise RuntimeError("Could not close synthetic GDI metafile.")
+    try:
+        size = gdi.GetEnhMetaFileBits(handle, 0, None)
+        buffer = ctypes.create_string_buffer(size)
+        if gdi.GetEnhMetaFileBits(handle, size, buffer) != size:
+            raise RuntimeError("Could not read synthetic GDI metafile.")
+        return buffer.raw
+    finally:
+        gdi.DeleteEnhMetaFile(handle)
+
+
 def _comment_record(identifier: bytes, body: bytes) -> bytes:
     data = identifier + body
     padded = data + b"\0" * (-len(data) % 4)
@@ -163,13 +256,169 @@ def _with_comments(metafile: bytes, comments: list[bytes]) -> bytes:
 
 @unittest.skipUnless(sys.platform == "win32", "Requires Windows GDI+.")
 class EmfPreviewTests(unittest.TestCase):
+    # Verifies FR-2026-10-28-05.
+    def test_fitted_text_stays_inside_shape_in_both_playback_paths(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("Wide heading" if text == "Old" else "i", 1.0),
+                )
+
+        source = _record_gdi_overlap_metafile(rotated=False)
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(lambda text: text, _Provider())
+        decisions = result.emf_layout_trace[0]["fit_decisions"]
+        assert isinstance(decisions, dict)
+        self.assertLessEqual(decisions["expansion_limits"]["right"], 70)
+        without_text = bytearray(result.data)
+        offset = 0
+        while offset < len(without_text):
+            record_type, size = struct.unpack_from("<II", without_text, offset)
+            if record_type == 84:
+                struct.pack_into("<I", without_text, offset + 44, 0)
+                break
+            offset += size
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            reference = preview.Metafile(bytes(without_text), metafile.width, metafile.height)
+            device_width, _, millimetres_width, _ = struct.unpack_from("<iiii", source, 72)
+            frame_left, _, frame_right, _ = struct.unpack_from("<iiii", source, 24)
+            scale_x = metafile.width * millimetres_width * 100 / (device_width * (frame_right - frame_left))
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        size = (metafile.width, metafile.height)
+                        fitted = renderer.render(metafile, size, mode)
+                        background = renderer.render(reference, size, mode)
+                        assert fitted is not None and background is not None
+                        bounds = ImageChops.difference(fitted, background).getbbox()
+                        self.assertIsNotNone(bounds)
+                        assert bounds is not None
+                        self.assertLessEqual(bounds[2], 70 * scale_x + 3)
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-28-05.
+    def test_opaque_background_survives_overlap_clip_in_both_playback_paths(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
+                )
+
+        source = _record_gdi_overlap_metafile(rotated=False, opaque=True)
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(lambda text: text, _Provider())
+        options = _emf_text_options(result.data)
+        self.assertTrue(options[0] & 2)
+        self.assertTrue(options[1] & ETO_CLIPPED)
+        self.assertEqual((5, 5, 75, 50), _emf_text_clips(result.data)[0])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            original = preview.Metafile(source, metafile.width, metafile.height)
+            device_width, device_height, millimetres_width, millimetres_height = struct.unpack_from("<iiii", source, 72)
+            sample = (
+                round(7 * metafile.width * millimetres_width * 100 / (device_width * 2540)),
+                round(40 * metafile.height * millimetres_height * 100 / (device_height * 2540)),
+            )
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        size = (metafile.width, metafile.height)
+                        before = renderer.render(original, size, mode)
+                        after = renderer.render(metafile, size, mode)
+                        assert before is not None and after is not None
+                        self.assertEqual((0, 255, 0), before.getpixel(sample))
+                        self.assertEqual(before.getpixel(sample), after.getpixel(sample))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-28-05.
+    def test_overlap_clips_render_in_both_windows_playback_paths(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
+                )
+
+        for angle in (0, 90, 180, 270):
+            with self.subTest(angle=angle), TemporaryDirectory() as temporary:
+                source = _record_gdi_overlap_metafile(rotated=bool(angle), angle=angle or 90)
+                result = analyse_emf(
+                    source, source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout", trace_layout=True,
+                ).apply(lambda text: text, _Provider())
+                self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+                self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+                clip = _emf_text_clips(result.data)[0]
+                if not angle:
+                    decisions = result.emf_layout_trace[0]["fit_decisions"]
+                    assert isinstance(decisions, dict)
+                    self.assertLessEqual(decisions["expansion_limits"]["right"], 70)
+                modified = bytearray(result.data)
+                offset = 0
+                while offset < len(modified):
+                    kind, size = struct.unpack_from("<II", modified, offset)
+                    if kind == 84:
+                        options = struct.unpack_from("<I", modified, offset + 52)[0]
+                        struct.pack_into("<I", modified, offset + 52, options & ~ETO_CLIPPED)
+                        break
+                    offset += size
+                path = Path(temporary) / "synthetic.emf"
+                path.write_bytes(result.data)
+                metafile = preview._checked_metafile(path, 192)
+                device_width, device_height, millimetres_width, millimetres_height = struct.unpack_from("<iiii", source, 72)
+                frame_left, frame_top, frame_right, frame_bottom = struct.unpack_from("<iiii", source, 24)
+                scale_x = metafile.width * millimetres_width * 100 / (device_width * (frame_right - frame_left))
+                scale_y = metafile.height * millimetres_height * 100 / (device_height * (frame_bottom - frame_top))
+                unclipped = preview.Metafile(bytes(modified), metafile.width, metafile.height)
+                renderer = preview.WindowsRenderer()
+                try:
+                    for mode in ("gdi", "gdiplus"):
+                        with self.subTest(mode=mode):
+                            size = (metafile.width, metafile.height)
+                            protected = renderer.render(metafile, size, mode)
+                            overflowing = renderer.render(unclipped, size, mode)
+                            assert protected is not None and overflowing is not None
+                            difference = ImageChops.difference(protected, overflowing)
+                            bounds = difference.getbbox()
+                            self.assertIsNotNone(bounds)
+                            assert bounds is not None
+                            if angle == 90:
+                                self.assertGreaterEqual(bounds[1], (clip[2] + 10) * scale_y - 3, (clip, bounds))
+                            elif angle == 180:
+                                self.assertLessEqual(bounds[2], (95 - clip[2]) * scale_x + 3, (clip, bounds))
+                            elif angle == 270:
+                                self.assertLessEqual(bounds[3], (95 - clip[2]) * scale_y + 3, (clip, bounds))
+                            else:
+                                self.assertGreaterEqual(bounds[0], clip[2] * scale_x - 3, (clip, bounds))
+                finally:
+                    renderer.close()
+
     # Verifies FR-2026-10-28-03.
     def test_fitted_gdi_font_is_used_by_both_windows_playback_paths(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("Longer", 1.0))
+
         source = _record_metafile(5, gdi_text=True)
         result = replace_vector_text(
             source, ".emf", lambda text: text, "en",
             document_text_layout="preserve-basic-layout",
-            replacement_provider=_LongReplacementProvider(), target_language="en",
+            replacement_provider=_Provider(), target_language="en",
         )
         first_new_handle = struct.unpack_from("<H", source, 56)[0]
         modified = bytearray(result.data)

@@ -92,6 +92,50 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementVectorTests(FolderReplacementTestCase):
+    # Verifies FR-2026-09-06-01 and FR-2026-10-28-05.
+    def test_debug_emf_direct_fallback_reports_state_and_transform(self) -> None:
+        invalid_state = bytearray(_unclipped_emf_with_vertical_rule())
+        line_record = struct.pack("<IIii", 54, 16, 60, 30)
+        position = invalid_state.index(line_record) + len(line_record)
+        invalid_state[position:position] = struct.pack("<IIi", 34, 12, -1)
+        struct.pack_into("<I", invalid_state, 48, len(invalid_state))
+        struct.pack_into("<I", invalid_state, 52, struct.unpack_from("<I", invalid_state, 52)[0] + 1)
+        sources = {
+            "state": (bytes(invalid_state), "emf_fitted_layout_coordinate_state_unresolved"),
+            "transform": (_emf_with_transformed_degenerate_bounds(0.0, 0.0, 0.0, 1.0),
+                          "emf_fitted_layout_transform_invalid"),
+        }
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            for name, (source, _) in sources.items():
+                (input_root / f"{name}.emf").write_bytes(source)
+            providers = [_RecordingReplacementProvider(), _RecordingReplacementProvider()]
+            for enabled, provider in zip((False, True), providers):
+                result = self._run(
+                    input_root, root / ("debug" if enabled else "normal"),
+                    _EmptyOcrProvider(), provider,
+                    document_text_layout="preserve-basic-layout", diagnostics_enabled=enabled,
+                )
+                self.assertEqual([], result.failures)
+            self.assertEqual(providers[0].requests, providers[1].requests)
+            for name, (_, reason) in sources.items():
+                with self.subTest(case=name):
+                    self.assertEqual((root / "normal" / f"{name}.emf").read_bytes(),
+                                     (root / "debug" / f"{name}.emf").read_bytes())
+                    self.assertFalse((root / "normal" / f"{name}.emf.diagnostics.json").exists())
+                    report = json.loads((root / "debug" / f"{name}.emf.diagnostics.json").read_text("utf-8"))
+                    [entry] = report["entries"]
+                    self.assertEqual("layout_fallback", entry["kind"])
+                    self.assertEqual(reason, entry["reason_code"])
+                    self.assertEqual("Old", entry["source_text"])
+                    self.assertEqual("###", entry["replacement_text"])
+                    self.assertEqual(1, entry["location"]["record_index"])
+                    [trace] = report["emf_layout_trace"]
+                    self.assertEqual("fallback", trace["outcome"])
+                    self.assertEqual(reason, trace["fallback_reason"])
+
     # Verifies FR-2026-10-28-04.
     def test_debug_emf_trace_is_separate_and_does_not_change_processing(self) -> None:
         with TemporaryDirectory() as temporary_directory:

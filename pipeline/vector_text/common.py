@@ -107,6 +107,7 @@ class FittedLine:
     scale: float
     run: BoundedTextRun
     layout_face: str | None = None
+    layout_width: float = 0.0
 
 
 def _line_box(text: str, font: SourceLineFont, width_pixels: float, height_pixels: float) -> BoundedTextBox:
@@ -204,10 +205,14 @@ def translate_and_fit_line(
     scale = min(1.0, width_pixels / text_width)
     if height_pixels is not None:
         scale = min(scale, height_pixels / line_height)
+    calibrated_width = text_width
     if calibration_width is not None and calibration_width > 0:
         source_width = float(layout_font.measureText(calibration_text or source_text))
         if source_width > 0.0:
             scale *= min(1.0, source_width / calibration_width)
+            calibrated_width *= max(1.0, calibration_width / source_width)
     if scale <= 0.0:
         return None
-    return FittedLine(replacement, scale, run, layout_typefaces[run.font_classification].getFamilyName())
+    return FittedLine(
+        replacement, scale, run, layout_typefaces[run.font_classification].getFamilyName(), calibrated_width
+    )

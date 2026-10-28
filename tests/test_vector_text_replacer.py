@@ -14,6 +14,7 @@ from PIL import Image
 
 from pipeline import bounded_text_layout
 from pipeline.vector_text import replace_vector_text
+from pipeline.vector_text.common import ETO_CLIPPED
 from pipeline.vector_text.emf import (
     _EmfCoordinateState,
     _EmfFont,
@@ -336,7 +337,857 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual("#####", _emf_text(result.data))
         self.assertEqual(len(result.data), struct.unpack_from("<I", result.data, 48)[0])
 
-    # Verifies FR-2026-09-04-01.
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_respects_enclosing_rectangle_after_restore(self) -> None:
+        for translated in (False, True):
+            with self.subTest(translated=translated):
+                rectangle = struct.pack(
+                    "<IIiiii", 43, 24, -30 if translated else -10, -10,
+                    40 if translated else 60, 30,
+                )
+                records = (
+                    _emf_save_dc_record(),
+                    *(() if not translated else (
+                        _emf_modify_world_transform_record(1.0, 0.0, 0.0, 1.0, 20.0, 0.0),
+                    )),
+                    rectangle,
+                    _emf_restore_dc_record(-1),
+                )
+                source = _emf_with_unclipped_text(transform_records=records)
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    source, measure_source_fonts=False
+                ).values()))
+                self.assertGreater(context.fitting_bounds.right, 40)
+                self.assertLessEqual(context.fitting_bounds.right, 60)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_rectangle_expansion_accounts_for_pen_and_brush(self) -> None:
+        rectangle = struct.pack("<IIiiii", 43, 24, -10, -10, 60, 30)
+        wide_pen = struct.pack("<IIIIiiI", 38, 28, 2, 0, 10, 0, 0)
+        cases = (
+            ((wide_pen, _emf_select_object_record(2), rectangle), 55),
+            ((_emf_select_object_record(0x80000008),
+              _emf_select_object_record(0x80000005), rectangle), 200),
+        )
+        for records, right in cases:
+            with self.subTest(right=right):
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    _emf_with_unclipped_text(transform_records=records),
+                    measure_source_fonts=False,
+                ).values()))
+                self.assertEqual(right, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_uses_conservative_polygon_bounds(self) -> None:
+        for top, expected in ((0, 54), (50, 200)):
+            with self.subTest(top=top):
+                polygon = struct.pack(
+                    "<IIiiiiIiiiiii", 3, 52, 55, top, 65, top + 20, 3,
+                    55, top, 65, top, 60, top + 20,
+                )
+                source = _emf_with_unclipped_text(transform_records=(polygon,))
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    source, measure_source_fonts=False
+                ).values()))
+                self.assertEqual(expected, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_uses_bitmap_device_bounds(self) -> None:
+        bitmap = bytearray(_emf_with_stretchdibits_image()[88:-20])
+        for top, expected in ((0, 55), (50, 200)):
+            with self.subTest(top=top):
+                struct.pack_into("<iiii", bitmap, 8, 55, top, 65, top + 20)
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    _emf_with_unclipped_text(transform_records=(bytes(bitmap),)),
+                    measure_source_fonts=False,
+                ).values()))
+                self.assertEqual(expected, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_overflow_is_clipped_before_polytext(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("W" * 500, 1.0))
+
+        polytext = struct.pack(
+            "<IIiiiiIffIiiIIIiiiiI4s", 97, 84, 55, 0, 65, 20, 1, 1.0, 1.0, 1,
+            55, 0, 1, 80, 0, 0, 0, 0, 0, 0, b"A\0\0\0",
+        )
+        for grouped, opaque in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(grouped=grouped, opaque=opaque):
+                source = bytearray(
+                    _emf_with_grouped_unclipped_text(preamble_records=(polytext,)) if grouped else
+                    _emf_with_unclipped_text(transform_records=(polytext,))
+                )
+                if opaque:
+                    offset = 0
+                    while offset < len(source):
+                        record_type, size = struct.unpack_from("<II", source, offset)
+                        if record_type == 84:
+                            struct.pack_into("<Iiiii", source, offset + 52, 2, 0, 0, 50, 20)
+                            break
+                        offset += size
+                result = analyse_emf(
+                    bytes(source), source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout", trace_layout=True,
+                ).apply(_mask, _Provider())
+                text_index = 1 if opaque else 0
+                self.assertEqual("W" * 500, _emf_texts(result.data)[text_index])
+                self.assertTrue(_emf_text_options(result.data)[text_index] & ETO_CLIPPED)
+                self.assertLessEqual(_emf_text_clips(result.data)[text_index][2], 55)
+                if opaque:
+                    self.assertTrue(_emf_text_options(result.data)[0] & 2)
+                self.assertIn(polytext, result.data)
+                self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05.
+    @unittest.expectedFailure
+    def test_emf_overflow_is_clipped_before_unbounded_small_text(self) -> None:
+        small_text = struct.pack(
+            "<IIiiIIIff4s", 108, 40, 55, 10, 1, 0x300, 1, 1.0, 1.0, b"A\0\0\0",
+        )
+        result = analyse_emf(
+            _emf_with_unclipped_text(transform_records=(small_text,)),
+            source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        self.assertIn(small_text, result.data)
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 55)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_respects_visible_pixel(self) -> None:
+        for vertical, expected in ((10, 55), (50, 200)):
+            with self.subTest(vertical=vertical):
+                pixel = struct.pack("<IIiiI", 15, 20, 55, vertical, 0)
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    _emf_with_unclipped_text(transform_records=(pixel,)),
+                    measure_source_fonts=False,
+                ).values()))
+                self.assertEqual(expected, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_polygon_expansion_accounts_for_pen_width(self) -> None:
+        polygon = struct.pack(
+            "<IIiiiiIiiiiii", 3, 52, 55, 0, 65, 20, 3,
+            55, 0, 65, 0, 60, 20,
+        )
+        wide_pen = struct.pack("<IIIIiiI", 38, 28, 2, 0, 10, 0, 0)
+        context = next(iter(_emf_unclipped_fit_contexts(
+            _emf_with_unclipped_text(transform_records=(wide_pen, _emf_select_object_record(2), polygon)),
+            measure_source_fonts=False,
+        ).values()))
+        self.assertEqual(50, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_invisible_emf_polygon_does_not_limit_expansion(self) -> None:
+        polygon = struct.pack(
+            "<IIiiiiIiiiiii", 3, 52, 55, 0, 65, 20, 3,
+            55, 0, 65, 0, 60, 20,
+        )
+        records = (
+            _emf_select_object_record(0x80000008),
+            _emf_select_object_record(0x80000005),
+            polygon,
+        )
+        context = next(iter(_emf_unclipped_fit_contexts(
+            _emf_with_unclipped_text(transform_records=records), measure_source_fonts=False,
+        ).values()))
+        self.assertEqual(200, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_stops_for_unresolved_miter_joins(self) -> None:
+        pen = bytearray(52)
+        struct.pack_into("<III", pen, 0, 95, len(pen), 2)
+        struct.pack_into("<II", pen, 28, 0x00012000, 10)
+        polygon = struct.pack(
+            "<IIiiiiIiiiiii", 3, 52, 55, 0, 65, 20, 3,
+            55, 0, 65, 0, 60, 20,
+        )
+        context = next(iter(_emf_unclipped_fit_contexts(
+            _emf_with_unclipped_text(transform_records=(bytes(pen), _emf_select_object_record(2), polygon)),
+            measure_source_fonts=False, trace_layout=True,
+        ).values()))
+        self.assertLessEqual(context.fitting_bounds.right, 40)
+        assert context.trace_info is not None
+        self.assertEqual("unresolved_graphics_geometry", context.trace_info["expansion_status"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_stops_for_unresolved_clip_or_drawing(self) -> None:
+        unresolved_clip = struct.pack("<IIII", 75, 16, 0, 3)
+        flood_fill = struct.pack("<IIiiII", 53, 24, 50, 10, 0, 0)
+        excluded_clip = struct.pack("<IIiiii", 29, 24, 50, -10, 60, 30)
+        offset_clip = struct.pack("<IIii", 26, 16, 1, 0)
+        path_clip = struct.pack("<III", 67, 12, 1)
+        meta_clip = struct.pack("<II", 28, 8)
+        angle_arc = struct.pack("<IIiiIff", 41, 28, 55, 10, 5, 0.0, 90.0)
+        small_text = struct.pack("<IIiiIIIff4s", 108, 40, 55, 10, 1, 0x300, 1, 1.0, 1.0, b"A\0\0\0")
+        gl_record = struct.pack("<III", 102, 12, 0)
+        bounded_gl_record = struct.pack("<IIiiiiI", 103, 28, 50, 0, 60, 20, 0)
+        plus_drawing = struct.pack(
+            "<III4sHHIIIIffff", 70, 52, 40, b"EMF+", 0x400A, 0x8000, 36, 24,
+            0xFF000000, 1, 55.0, 0.0, 10.0, 20.0,
+        )
+        for record in (unresolved_clip, flood_fill, plus_drawing, excluded_clip, offset_clip, path_clip,
+                   meta_clip, angle_arc, small_text, gl_record, bounded_gl_record):
+            with self.subTest(record_type=struct.unpack_from("<I", record)[0]):
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    _emf_with_unclipped_text(transform_records=(record,)),
+                    measure_source_fonts=False, trace_layout=True,
+                ).values()))
+                self.assertLessEqual(context.fitting_bounds.right, 40)
+                assert context.trace_info is not None
+                self.assertIn("unresolved", str(context.trace_info["expansion_status"]))
+                grouped, _suppressed = _emf_grouped_unclipped_fit_contexts(
+                    _emf_with_grouped_unclipped_text(preamble_records=(record,)),
+                    measure_source_fonts=False,
+                )
+                for group_context in grouped.values():
+                    self.assertLessEqual(group_context.fitting_bounds.right, 40)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_meta_region_remains_unresolved_after_rectangular_clip(self) -> None:
+        meta_clip = struct.pack("<II", 28, 8)
+        for mode in (1, 5):
+            rectangle_clip = struct.pack(
+                "<IIIIIIIIiiiiiiii", 75, 64, 48, mode, 32, 1, 1, 16,
+                0, -100, 200, 100, 0, -100, 200, 100,
+            )
+            with self.subTest(mode=mode):
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    _emf_with_unclipped_text(transform_records=(meta_clip, rectangle_clip)),
+                    measure_source_fonts=False, trace_layout=True,
+                ).values()))
+                self.assertLessEqual(context.fitting_bounds.right, 40)
+                assert context.trace_info is not None
+                self.assertIn("unresolved", str(context.trace_info["expansion_status"]))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_colour_management_does_not_restore_invalid_geometry(self) -> None:
+        invalid_state = _emf_restore_dc_record(-1)
+        colour_management = struct.pack("<III", 98, 12, 1)
+        result = analyse_emf(
+            _emf_with_unclipped_text(transform_records=(invalid_state, colour_management)),
+            source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _LongReplacementProvider())
+        [trace] = result.emf_layout_trace
+        self.assertEqual("fallback", trace["outcome"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_mirrored_layout_does_not_use_unmirrored_expansion(self) -> None:
+        for layout, expected_expansion in ((1, False), (0, True)):
+            with self.subTest(layout=layout):
+                source = _emf_with_unclipped_text(
+                    transform_records=(struct.pack("<III", 115, 12, layout),),
+                )
+                context = next(iter(_emf_unclipped_fit_contexts(
+                    source, measure_source_fonts=False,
+                ).values()))
+                self.assertEqual(expected_expansion, context.allows_expansion)
+                if not expected_expansion:
+                    self.assertLessEqual(context.fitting_bounds.width, context.source_bounds.width)
+                result = analyse_emf(
+                    source, source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout", trace_layout=True,
+                ).apply(_mask, _LongReplacementProvider())
+                self.assertEqual("individual_fit", result.emf_layout_trace[0]["outcome"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_grouped_enclosing_rectangle_respects_paint_order(self) -> None:
+        rectangle = struct.pack("<IIiiii", 43, 24, -10, -10, 60, 30)
+        null_brush = _emf_select_object_record(0x80000005)
+        cases = (
+            ((rectangle,), (), 57),
+            ((), (rectangle,), 38),
+            ((null_brush,), (rectangle,), 57),
+        )
+        for preamble, trailing, expected_right in cases:
+            with self.subTest(preamble=preamble, trailing=trailing):
+                contexts, _suppressed = _emf_grouped_unclipped_fit_contexts(
+                    _emf_with_grouped_unclipped_text(
+                        preamble_records=preamble, trailing_records=trailing,
+                    ), measure_source_fonts=False,
+                )
+                self.assertEqual(1, len(contexts))
+                self.assertEqual(expected_right, next(iter(contexts.values())).fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_plus_state_only_comments_do_not_block_expansion(self) -> None:
+        plus_header = struct.pack("<HHIIIIII", 0x4001, 0, 28, 16, 0xDBC01002, 0, 96, 96)
+        get_dc = struct.pack("<HHII", 0x4004, 0, 12, 0)
+        data = b"EMF+" + plus_header + get_dc
+        comment = struct.pack("<III", 70, 12 + len(data), len(data)) + data
+        context = next(iter(_emf_unclipped_fit_contexts(
+            _emf_with_unclipped_text(transform_records=(comment,)), measure_source_fonts=False,
+        ).values()))
+        self.assertEqual(200, context.fitting_bounds.right)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_respects_intersect_clip_rect(self) -> None:
+        intersect_clip = struct.pack("<IIiiii", 30, 24, 0, -100, 60, 100)
+        transformed_clip = (
+            _emf_set_world_transform_record(1, 0, 0, 1, 20, 0),
+            struct.pack("<IIiiii", 30, 24, -20, -100, 40, 100),
+            _emf_set_world_transform_record(1, 0, 0, 1),
+        )
+        for records in ((intersect_clip,), transformed_clip):
+            with self.subTest(transformed=len(records) > 1):
+                individual = _emf_with_unclipped_text(transform_records=records)
+                context = next(iter(_emf_unclipped_fit_contexts(individual, measure_source_fonts=False).values()))
+                self.assertEqual(context.fitting_bounds.right, 60)
+                grouped = _emf_with_grouped_unclipped_text(preamble_records=records)
+                contexts, _suppressed = _emf_grouped_unclipped_fit_contexts(grouped, measure_source_fonts=False)
+                group_context = next(iter(contexts.values()))
+                assert group_context.render_bounds is not None
+                self.assertEqual(group_context.render_bounds.right, 60)
+
+    # Verifies FR-2026-10-28-05.
+    def test_grouped_emf_expansion_respects_enclosing_rectangle(self) -> None:
+        rectangle = struct.pack("<IIiiii", 43, 24, -10, -10, 60, 30)
+        source = _emf_with_grouped_unclipped_text(preamble_records=(rectangle,))
+        contexts, suppressed = _emf_grouped_unclipped_fit_contexts(
+            source, measure_source_fonts=False, trace_layout=True
+        )
+        self.assertEqual(1, len(suppressed))
+        context = next(iter(contexts.values()))
+        assert context.render_bounds is not None and context.trace_info is not None
+        self.assertGreater(context.render_bounds.right, 40)
+        self.assertLessEqual(context.render_bounds.right, 60)
+        obstacles = context.trace_info["limiting_obstacles"]
+        assert isinstance(obstacles, list)
+        self.assertTrue(any(
+            obstacle.get("kind") == "shape"
+            and obstacle.get("record_offset") == source.find(rectangle)
+            and obstacle.get("coordinate_space") == "EMF device units"
+            for obstacle in obstacles
+        ))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_text_obstacle_trace_names_record_and_coordinate_space(self) -> None:
+        source = _emf_with_unclipped_text(
+            adjacent_text_left=60, adjacent_preamble=(_emf_move_to_record(-100, -100),),
+        )
+        contexts = _emf_unclipped_fit_contexts(source, measure_source_fonts=False, trace_layout=True)
+        context = next(iter(contexts.values()))
+        assert context.trace_info is not None
+        obstacles = context.trace_info["limiting_obstacles"]
+        assert isinstance(obstacles, list)
+        neighbour = _emf_exttextout_record("Value", 60, 0, 120, 20)
+        self.assertTrue(any(
+            obstacle.get("kind") == "text"
+            and obstacle.get("record_offset") == source.find(neighbour)
+            and obstacle.get("coordinate_space") == "EMF device units"
+            for obstacle in obstacles
+        ))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_uses_line_transform_at_draw_time(self) -> None:
+        records = (
+            _emf_save_dc_record(),
+            _emf_modify_world_transform_record(1.0, 0.0, 0.0, 1.0, 20.0, 0.0),
+            _emf_move_to_record(40, -10),
+            _emf_line_to_record(40, 30),
+            _emf_restore_dc_record(-1),
+        )
+        context = next(iter(_emf_unclipped_fit_contexts(
+            _emf_with_unclipped_text(transform_records=records),
+            measure_source_fonts=False,
+        ).values()))
+        self.assertGreaterEqual(context.fitting_bounds.right, 59)
+        self.assertLessEqual(context.fitting_bounds.right, 60)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_expansion_respects_measured_unbounded_neighbour(self) -> None:
+        source = _emf_with_unclipped_text(
+            adjacent_text_left=60, adjacent_record_bounded=False
+        )
+        context = next(iter(_emf_unclipped_fit_contexts(
+            source, measure_source_fonts=False
+        ).values()))
+        self.assertGreater(context.fitting_bounds.right, 40)
+        self.assertLessEqual(context.fitting_bounds.right, 60)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_minimum_size_overflow_is_clipped_before_neighbour(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "Value", 1.0),
+                )
+
+        source = _emf_with_unclipped_text(
+            adjacent_text_left=60,
+            adjacent_preamble=(_emf_move_to_record(-100, -100),),
+        )
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 500, _emf_texts(result.data)[0])
+        self.assertIn(-1, _emf_font_heights(result.data))
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 60)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05.
+    def test_grouped_emf_minimum_size_overflow_is_clipped_before_neighbour(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("Value" if text == "Value" else "W" * 500, 1.0),
+                )
+
+        source = _emf_with_grouped_unclipped_text(
+            trailing_records=(
+                _emf_move_to_record(-100, -100),
+                _emf_exttextout_record("Value", 60, 0, 120, 20),
+            ),
+        )
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 500, _emf_texts(result.data)[0])
+        self.assertEqual("", _emf_texts(result.data)[1])
+        self.assertIn(-1, _emf_font_heights(result.data))
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 60)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05.
+    def test_grouped_clipped_emf_overflow_is_clipped_before_neighbour(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("i" if text == "Value" else "W" * 500, 1.0),
+                )
+
+        source = _emf_with_grouped_unclipped_text(
+            clipped=True,
+            trailing_records=(
+                _emf_move_to_record(-100, -100),
+                _emf_exttextout_record("Value", 120, 0, 180, 20),
+            ),
+        )
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 500, _emf_texts(result.data)[0])
+        self.assertEqual("", _emf_texts(result.data)[1])
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 120)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_opposing_replacements_do_not_overlap_in_shared_gap(self) -> None:
+        class _Provider:
+            calls = 0
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.calls += 1
+                return replace_each(request, lambda text: TextReplacementItem("W" * 12, 1.0))
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=300, font_height=-100, header_right=700,
+            adjacent_preamble=(
+                _emf_move_to_record(-100, -100), _emf_set_text_alignment_record(2),
+            ),
+        ))
+        struct.pack_into("<i", source, 20, 200)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 0, 0, 200, 100)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 300, 0, 500, 100)
+                    struct.pack_into("<i", source, offset + 36, 500)
+                text_index += 1
+            offset += size
+        provider = _Provider()
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, provider)
+        self.assertEqual(["W" * 12, "W" * 12], _emf_texts(result.data))
+        self.assertEqual(2, provider.calls)
+        self.assertTrue(all(option & ETO_CLIPPED for option in _emf_text_options(result.data)))
+        clips = _emf_text_clips(result.data)
+        self.assertLessEqual(clips[0][2], clips[1][0])
+        self.assertTrue(all(item["overlap_protection_clipped"] for item in result.emf_layout_trace))
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+        untraced_provider = _Provider()
+        untraced = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        ).apply(_mask, untraced_provider)
+        self.assertEqual(result.data, untraced.data)
+        self.assertEqual(2, untraced_provider.calls)
+
+        class _ShortProvider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("i", 1.0))
+
+        short = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _ShortProvider())
+        self.assertFalse(any(option & ETO_CLIPPED for option in _emf_text_options(short.data)))
+        self.assertFalse(any(item["overlap_protection_clipped"] for item in short.emf_layout_trace))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_replacement_respects_neighbours_original_area(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 350 if text == "Old" else "i", 1.0),
+                )
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=300, font_height=-100, header_right=700,
+            transform_records=(
+                _emf_save_dc_record(), _emf_set_world_transform_record(1, 0, 0, 1, 1, 0),
+            ),
+            adjacent_preamble=(
+                _emf_restore_dc_record(-1), _emf_move_to_record(-100, -100),
+                _emf_set_text_alignment_record(2),
+            ),
+        ))
+        struct.pack_into("<i", source, 20, 200)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 1, 0, 201, 100)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 300, 0, 500, 100)
+                    struct.pack_into("<i", source, offset + 36, 500)
+                text_index += 1
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 350, _emf_texts(result.data)[0])
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 300)
+        self.assertFalse(_emf_text_options(result.data)[1] & ETO_CLIPPED)
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_opaque_text_overlap_preserves_background_rectangle(self) -> None:
+        class _Provider:
+            calls = 0
+
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.calls += 1
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 350 if text == "Old" else "i", 1.0),
+                )
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=300, font_height=-100, header_right=700,
+            transform_records=(
+                _emf_save_dc_record(), _emf_set_world_transform_record(1, 0, 0, 1, 1, 0),
+            ),
+            adjacent_preamble=(
+                _emf_restore_dc_record(-1), _emf_move_to_record(-100, -100),
+                _emf_set_text_alignment_record(2),
+            ),
+        ))
+        struct.pack_into("<i", source, 20, 200)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 1, 0, 201, 100)
+                    struct.pack_into("<Iiiii", source, offset + 52, 2, 0, 0, 250, 100)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 300, 0, 500, 100)
+                    struct.pack_into("<i", source, offset + 36, 500)
+                text_index += 1
+            offset += size
+        provider = _Provider()
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, provider)
+        self.assertEqual(["", "W" * 350, "i"], _emf_texts(result.data))
+        self.assertEqual(2, provider.calls)
+        options = _emf_text_options(result.data)
+        self.assertTrue(options[0] & 2)
+        self.assertFalse(options[0] & ETO_CLIPPED)
+        self.assertFalse(options[1] & 2)
+        self.assertTrue(options[1] & ETO_CLIPPED)
+        clips = _emf_text_clips(result.data)
+        self.assertEqual((0, 0, 250, 100), clips[0])
+        self.assertLessEqual(clips[1][2], 299)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertTrue(_emf_is_structurally_valid(result.data))
+
+        class _TwoLongReplacements:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * (350 if text == "Old" else 12), 1.0),
+                )
+
+        traced = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _TwoLongReplacements())
+        generated_font = traced.emf_layout_trace[1]["generated_font"]
+        assert isinstance(generated_font, dict)
+        record_types = _emf_record_types(traced.data)
+        for prefix, expected_type in (("creation", 82), ("selection", 37)):
+            self.assertEqual(expected_type, record_types[generated_font[f"{prefix}_record_index"]])
+            self.assertEqual(expected_type, struct.unpack_from(
+                "<I", traced.data, generated_font[f"{prefix}_record_offset"]
+            )[0])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_overlapping_source_bounds_still_limit_replacement(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
+                )
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=80, font_height=-100, header_right=400,
+            transform_records=(
+                _emf_save_dc_record(), _emf_set_world_transform_record(1, 0, 0, 1, 1, 0),
+            ),
+            adjacent_preamble=(
+                _emf_restore_dc_record(-1), _emf_move_to_record(-100, -100),
+                _emf_set_text_alignment_record(2),
+            ),
+        ))
+        struct.pack_into("<i", source, 20, 200)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 1, 0, 101, 100)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 80, 0, 180, 100)
+                    struct.pack_into("<i", source, offset + 36, 180)
+                text_index += 1
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 500, _emf_texts(result.data)[0])
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 79)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_fully_overlapping_sources_can_hide_text_without_dropping_it(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("i", 1.0))
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=1, font_height=-100, header_right=400,
+            transform_records=(
+                _emf_save_dc_record(), _emf_set_world_transform_record(1, 0, 0, 1, 1, 0),
+            ),
+            adjacent_preamble=(
+                _emf_restore_dc_record(-1), _emf_move_to_record(-100, -100),
+                _emf_set_text_alignment_record(2),
+            ),
+        ))
+        struct.pack_into("<i", source, 20, 200)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                struct.pack_into("<iiii", source, offset + 8, 1, 0, 101, 100)
+                if text_index == 1:
+                    struct.pack_into("<i", source, offset + 36, 101)
+                text_index += 1
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual(["i", "i"], _emf_texts(result.data))
+        self.assertTrue(all(option & ETO_CLIPPED for option in _emf_text_options(result.data)))
+        self.assertTrue(all(item["overlap_protection_clipped"] for item in result.emf_layout_trace))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_minimum_size_text_that_fits_does_not_gain_clip(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("i", 1.0))
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=60,
+            adjacent_preamble=(_emf_move_to_record(-100, -100),),
+        ))
+        offset = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                struct.pack_into("<i", source, offset + 20, 1)
+                break
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertIn(-1, _emf_font_heights(result.data))
+        self.assertFalse(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertFalse(result.emf_layout_trace[0]["overlap_protection_clipped"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_quarter_turn_overflow_is_clipped_before_neighbour(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 2000 if text == "Old" else "i", 1.0),
+                )
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=0, font_height=-100, header_right=700,
+            transform_records=(
+                _emf_save_dc_record(),
+                _emf_set_world_transform_record(0, 1, -1, 0, 100, 0),
+            ),
+            adjacent_preamble=(_emf_restore_dc_record(-1), _emf_move_to_record(-100, -100)),
+        ))
+        struct.pack_into("<i", source, 20, 600)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 0, 0, 100, 200)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 0, 300, 100, 400)
+                    struct.pack_into("<ii", source, offset + 36, 0, 300)
+                text_index += 1
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        self.assertEqual("W" * 2000, _emf_texts(result.data)[0])
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertLessEqual(_emf_text_clips(result.data)[0][2], 300)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+        self.assertEqual(result.emf_layout_trace[0]["source_bounds"], result.emf_layout_trace[0]["fitting_bounds"])
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_scaled_quarter_turns_clip_in_logical_coordinates(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 2000 if text == "Old" else "i", 1.0),
+                )
+
+        cases = (
+            ((0, 2, -2, 0, 200, 0), (0, 0, 200, 400), (0, 600, 200, 700)),
+            ((-2, 0, 0, -2, 800, 200), (400, 0, 800, 200), (0, 0, 200, 200)),
+            ((0, -2, 2, 0, 0, 800), (0, 400, 200, 800), (0, 0, 200, 200)),
+        )
+        for transform, first_bounds, second_bounds in cases:
+            with self.subTest(transform=transform):
+                source = bytearray(_emf_with_unclipped_text(
+                    adjacent_text_left=0, font_height=-100, header_right=1000,
+                    transform_records=(_emf_save_dc_record(), _emf_set_world_transform_record(*transform)),
+                    adjacent_preamble=(_emf_restore_dc_record(-1), _emf_move_to_record(-100, -100)),
+                ))
+                struct.pack_into("<i", source, 20, 1000)
+                offset = 0
+                text_index = 0
+                while offset < len(source):
+                    record_type, size = struct.unpack_from("<II", source, offset)
+                    if record_type == 84:
+                        bounds = first_bounds if text_index == 0 else second_bounds
+                        struct.pack_into("<iiii", source, offset + 8, *bounds)
+                        if text_index == 1:
+                            struct.pack_into("<ii", source, offset + 36, bounds[0], bounds[1])
+                        text_index += 1
+                    offset += size
+                result = analyse_emf(
+                    bytes(source), source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout", trace_layout=True,
+                ).apply(_mask, _Provider())
+                self.assertEqual("W" * 2000, _emf_texts(result.data)[0])
+                self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+                self.assertLessEqual(_emf_text_clips(result.data)[0][2], 300)
+                self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+                self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05.
+    def test_emf_quarter_turn_preserves_and_tightens_existing_clip(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 2000 if text == "Old" else "i", 1.0),
+                )
+
+        source = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=0, font_height=-100, header_right=700,
+            record_clipped=True, first_clip_bounds=(0, 0, 5000, 100),
+            transform_records=(
+                _emf_save_dc_record(), _emf_set_world_transform_record(0, 1, -1, 0, 100, 0),
+            ),
+            adjacent_preamble=(_emf_restore_dc_record(-1), _emf_move_to_record(-100, -100)),
+        ))
+        struct.pack_into("<i", source, 20, 600)
+        offset = 0
+        text_index = 0
+        while offset < len(source):
+            record_type, size = struct.unpack_from("<II", source, offset)
+            if record_type == 84:
+                if text_index == 0:
+                    struct.pack_into("<iiii", source, offset + 8, 0, 0, 100, 200)
+                else:
+                    struct.pack_into("<iiii", source, offset + 8, 0, 300, 100, 400)
+                    struct.pack_into("<ii", source, offset + 36, 0, 300)
+                text_index += 1
+            offset += size
+        result = analyse_emf(
+            bytes(source), source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(_mask, _Provider())
+        clip = _emf_text_clips(result.data)[0]
+        self.assertEqual("W" * 2000, _emf_texts(result.data)[0])
+        self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
+        self.assertGreaterEqual(clip[0], 0)
+        self.assertGreaterEqual(clip[1], 0)
+        self.assertLessEqual(clip[2], 300)
+        self.assertLessEqual(clip[3], 100)
+        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
+
+    # Verifies FR-2026-09-04-01 and FR-2026-10-28-05.
     def test_fits_unclipped_emf_text_and_stops_at_a_vertical_line(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
@@ -356,7 +1207,7 @@ class VectorTextReplacerTests(unittest.TestCase):
             target_language="en",
         )
 
-        self.assertEqual(60, context.fitting_bounds.right)
+        self.assertEqual(59, context.fitting_bounds.right)
         self.assertEqual("A considerably longer heading", _emf_text(result.data))
         self.assertEqual((0.0, 0.0), _emf_text_scales(result.data)[0])
         font_heights = _emf_font_heights(result.data)
@@ -366,7 +1217,7 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual(10, struct.unpack_from("<I", result.data, 52)[0])
         self.assertEqual(3, struct.unpack_from("<H", result.data, 56)[0])
 
-    # Verifies FR-2026-09-05-02.
+    # Verifies FR-2026-09-05-02 and FR-2026-10-28-05.
     def test_fits_contiguous_emf_records_as_one_expanding_visual_line(self) -> None:
         class _Provider:
             def __init__(self) -> None:
@@ -397,9 +1248,9 @@ class VectorTextReplacerTests(unittest.TestCase):
         self.assertEqual(1, len(contexts))
         self.assertEqual(1, len(suppressed))
         context = next(iter(contexts.values()))
-        self.assertEqual(58, context.fitting_bounds.right)
+        self.assertEqual(57, context.fitting_bounds.right)
         assert context.render_bounds is not None
-        self.assertEqual(60, context.render_bounds.right)
+        self.assertEqual(59, context.render_bounds.right)
         self.assertEqual(["AB"], provider.requests)
         self.assertEqual(
             ["A considerably longer grouped heading", ""], _emf_texts(result.data)
@@ -1102,19 +1953,29 @@ def _emf_with_unclipped_text(
     *,
     line_x: int | None = None,
     adjacent_text_left: int | None = None,
+    adjacent_record_bounded: bool = True,
+    adjacent_preamble: tuple[bytes, ...] = (),
     transform_records: tuple[bytes, ...] = (),
     font_family: str = "Noto Sans JP",
     header_right: int = 200,
     font_height: int = -20,
     record_bounded: bool = True,
+    record_clipped: bool = False,
+    first_clip_bounds: tuple[int, int, int, int] | None = None,
 ) -> bytes:
     records = [_emf_font_record(font_family, height=font_height), _emf_select_object_record(1)]
     records.extend(transform_records)
     if line_x is not None:
         records.extend((_emf_move_to_record(line_x, -10), _emf_line_to_record(line_x, 30)))
-    records.append(_emf_exttextout_record("Old", 0, 0, 40, 20, bounded=record_bounded))
+    records.append(_emf_exttextout_record(
+        "Old", 0, 0, 40, 20, bounded=record_bounded,
+        clipped=record_clipped, clip_bounds=first_clip_bounds,
+    ))
     if adjacent_text_left is not None:
-        records.append(_emf_exttextout_record("Value", adjacent_text_left, 0, 120, 20))
+        records.extend(adjacent_preamble)
+        records.append(_emf_exttextout_record(
+            "Value", adjacent_text_left, 0, 120, 20, bounded=adjacent_record_bounded
+        ))
     header = bytearray(88)
     struct.pack_into("<II", header, 0, 1, len(header))
     struct.pack_into("<iiii", header, 8, 0, -100, header_right, 100)
@@ -1134,10 +1995,13 @@ def _emf_with_grouped_unclipped_text(
     clipped: bool = False,
     state_only_intervening: bool = False,
     state_clip_right: int | None = None,
+    preamble_records: tuple[bytes, ...] = (),
+    trailing_records: tuple[bytes, ...] = (),
 ) -> bytes:
     records = [
         _emf_font_record("Noto Sans JP"),
         _emf_select_object_record(1),
+        *preamble_records,
         _emf_exttextout_record(
             "A", 0, 0, 10, 20, clipped=clipped,
             clip_bounds=(0, 0, 100, 20) if clipped else None,
@@ -1148,7 +2012,7 @@ def _emf_with_grouped_unclipped_text(
     if state_only_intervening:
         records.extend((
             _emf_save_dc_record(),
-            struct.pack("<III", 28, 12, 10),
+            struct.pack("<IIf", 58, 12, 10.0),
             struct.pack("<III", 70, 12, 0),
             _emf_extselect_clip_rect_record(0, -100, 200, 100),
             _emf_restore_dc_record(-1),
@@ -1166,6 +2030,7 @@ def _emf_with_grouped_unclipped_text(
         ))
     if line_x is not None:
         records.extend((_emf_move_to_record(line_x, -10), _emf_line_to_record(line_x, 30)))
+    records.extend(trailing_records)
     header = bytearray(88)
     struct.pack_into("<II", header, 0, 1, len(header))
     struct.pack_into("<iiii", header, 8, 0, -100, 200, 100)
@@ -1203,7 +2068,7 @@ def _emf_with_text_state_changed_group() -> bytes:
         _emf_select_object_record(2),
         _emf_set_text_color_record(0x0000FF),
         _emf_set_text_alignment_record(0x0002),
-        struct.pack("<IIi", 108, 12, 1),
+        struct.pack("<IIi", 18, 12, 1),
         struct.pack("<IIii", 120, 16, 1, 1),
         _emf_exttextout_record("BBB", 10, 0, 50, 20),
     ]

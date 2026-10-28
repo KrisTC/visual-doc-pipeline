@@ -69,31 +69,40 @@ if TYPE_CHECKING:
 _EMR_EXTTEXTOUTA = 83
 _EMR_EXTTEXTOUTW = 84
 _EMR_STRETCHDIBITS = 81
+_EMR_EXTCREATEPEN = 95
 _EMR_SETWINDOWEXTEX = 9
 _EMR_SETWINDOWORGEX = 10
 _EMR_SETVIEWPORTEXTEX = 11
 _EMR_SETVIEWPORTORGEX = 12
+_EMR_SETPIXELV = 15
 _EMR_SETWORLDTRANSFORM = 35
 _EMR_MODIFYWORLDTRANSFORM = 36
 _EMR_SELECTOBJECT = 37
+_EMR_CREATEPEN = 38
+_EMR_CREATEBRUSHINDIRECT = 39
 _EMR_DELETEOBJECT = 40
+_EMR_RECTANGLE = 43
 _EMR_SAVEDC = 33
 _EMR_RESTOREDC = 34
 _EMR_SETTEXTALIGN = 22
 _EMR_SETTEXTCOLOR = 24
 _EMR_SETBKMODE = 18
 _EMR_SETBKCOLOR = 25
+_EMR_OFFSETCLIPRGN = 26
 _EMR_MOVETOEX = 27
-_EMR_SETMITERLIMIT = 28
+_EMR_SETMETARGN = 28
+_EMR_EXCLUDECLIPRECT = 29
+_EMR_INTERSECTCLIPRECT = 30
 _EMR_LINETO = 54
+_EMR_SETMITERLIMIT = 58
+_EMR_SELECTCLIPPATH = 67
 _EMR_GDICOMMENT = 70
 _EMR_EXTSELECTCLIPRGN = 75
 _EMR_EXTCREATEFONTINDIRECTW = 82
 _EMR_SETMAPMODE = 17
 _EMR_SCALEVIEWPORTEXTEX = 31
 _EMR_SCALEWINDOWEXTEX = 32
-_EMR_SETGRAPHICSMODE = 98
-_EMR_SETTEXTCHAREXTRA = 108
+_EMR_SETLAYOUT = 115
 _EMR_SETTEXTJUSTIFICATION = 120
 _EMF_HEADER_RECORD_TYPE = 1
 _EMF_SIGNATURE = b" EMF"
@@ -113,7 +122,16 @@ _MWT_RIGHTMULTIPLY = 3
 _MWT_SET = 4
 _MM_TEXT = 1
 _SUPPORTED_MAP_MODES = frozenset(range(1, 9))
-_SUPPORTED_GRAPHICS_MODES = frozenset({1, 2})
+_EMR_BOUNDED_GRAPHICS = frozenset({
+    2, 3, 4, 5, 6, 7, 8, 56, 62, 63, 64, 71, 72, 73, 74,
+    76, 77, 78, 79, 80, 81, 85, 86, 87, 88, 89, 90, 91, 92,
+    96, 97, 114, 116, 118,
+})
+_EMR_BOX_GRAPHICS = frozenset({42, 44, 45, 46, 47, 55})
+_EMR_UNBOUNDED_GRAPHICS = frozenset({41, 53, 102, 103, 105, 106, 108})
+_EMR_STROKED_BOUNDED_GRAPHICS = frozenset({
+    2, 3, 4, 5, 6, 7, 8, 56, 63, 64, 85, 86, 87, 88, 89, 90, 91, 92,
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +214,7 @@ class _EmfCoordinateState:
     viewport_extent: tuple[float, float] = (1.0, 1.0)
     map_mode: int = _MM_TEXT
     graphics_mode: int = 1
+    layout: int = 0
     valid: bool = True
 
     @property
@@ -203,6 +222,7 @@ class _EmfCoordinateState:
         return (
             self.valid
             and self.map_mode == _MM_TEXT
+            and not self.layout & 1
             and self.world.permits_axis_aligned_expansion
             and self.window_extent[0] * self.viewport_extent[0] > 0.0
             and self.window_extent[1] * self.viewport_extent[1] > 0.0
@@ -221,6 +241,8 @@ class _EmfDrawingState:
     current_position: tuple[int, int] | None = None
     active_clip: _EmfRectangle | None = None
     clip_state_valid: bool = True
+    pen: tuple[bool, int] | None = (True, 0)
+    brush: str | None = "solid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +264,17 @@ class _EmfTextFitContext:
     remove_explicit_clip: bool = False
     group_offsets: tuple[int, ...] = ()
     trace_info: dict[str, object] | None = None
+    overlap_clip_bounds: _EmfRectangle | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _EmfExpansionShape:
+    bounds: _EmfRectangle
+    interior: _EmfRectangle | None
+    enclosing: bool
+    filled: bool
+    offset: int
+    kind: str = "shape"
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,6 +298,16 @@ class _EmfTextCandidate:
     uses_fallback_font: bool = False
     active_clip: _EmfRectangle | None = None
     clip_state_valid: bool = True
+
+
+@dataclass(slots=True)
+class _EmfFittedPlacement:
+    record_index: int
+    source_bounds: _EmfRectangle
+    replacement_bounds: _EmfRectangle
+    coordinate: _EmfCoordinateState
+    trace_item: dict[str, object] | None
+    background_record: bytes = b""
 
 
 def is_emf(data: bytes) -> bool:
@@ -310,7 +353,9 @@ def analyse_emf(
     """Parse an EMF once and list its texts and images; replace nothing yet."""
     if len(data) < 8:
         raise ValueError("Invalid EMF image.")
-    trace_candidates: dict[int, _EmfTextCandidate] | None = {} if trace_layout else None
+    trace_candidates: dict[int, _EmfTextCandidate] | None = (
+        {} if document_text_layout in _FITTED_LAYOUTS else None
+    )
     individual_contexts = (
         _emf_unclipped_fit_contexts(
             data,
@@ -550,6 +595,7 @@ class EmfDocument:
             self.images()
         fitted_layout = self._layout in _FITTED_LAYOUTS
         records: list[bytes] = []
+        fitted_placements: list[_EmfFittedPlacement] = []
         next_font_handle = self._next_font_handle
         plus_state = _EmfPlusState(set(self._plus_object_ids), {})
         replaced_items = 0
@@ -582,7 +628,7 @@ class EmfDocument:
             if record_type in {_EMR_EXTTEXTOUTA, _EMR_EXTTEXTOUTW}:
                 text_record_index += 1
                 context = self._fitted_contexts.get(offset)
-                fit_trace: dict[str, object] | None = {} if self._trace_layout else None
+                fit_trace: dict[str, object] = {}
                 (
                     record,
                     changed,
@@ -692,6 +738,7 @@ class EmfDocument:
                         "replacement_layout_face": None if fit_trace is None else fit_trace.get("replacement_layout_face"),
                         "fit_scale": fitted_scale if used_fitted_layout and offset not in self._suppressed_group_members else None,
                         "fallback_reason": None if fallback is None else fallback.get("reason_code"),
+                        "overlap_protection_clipped": False if fit_trace is None else fit_trace.get("overlap_protection_clipped", False),
                         "generated_font": None,
                     }
                     local_trace.append(trace_item)
@@ -715,6 +762,14 @@ class EmfDocument:
                     if use_dominant_colour:
                         assert context is not None and context.text_color is not None
                         records.append(_emf_set_text_color_record(context.text_color))
+                    if used_fitted_layout and offset not in self._suppressed_group_members and replacement_text is not None:
+                        placement = _emf_fitted_placement(
+                            len(records), record, self._trace_candidates.get(offset),
+                            context, fitted_scale, fit_trace, trace_item, replacement_text,
+                            self._layout == "preserve-basic-layout-source-font",
+                        )
+                        if placement is not None:
+                            fitted_placements.append(placement)
                     records.append(record)
                     if use_dominant_colour:
                         assert context is not None and context.restore_text_color is not None
@@ -723,6 +778,14 @@ class EmfDocument:
                         assert context is not None
                         records.append(_emf_select_object_record(context.font_handle))
                     continue
+                if used_fitted_layout and offset not in self._suppressed_group_members and replacement_text is not None:
+                    placement = _emf_fitted_placement(
+                        len(records), record, self._trace_candidates.get(offset),
+                        context, fitted_scale, fit_trace, trace_item, replacement_text,
+                        self._layout == "preserve-basic-layout-source-font",
+                    )
+                    if placement is not None:
+                        fitted_placements.append(placement)
             elif (
                 record_type == _EMR_STRETCHDIBITS
                 and replace_image is not None
@@ -745,13 +808,27 @@ class EmfDocument:
                 has_editable_text = has_editable_text or replaced_texts > 0
                 rewrote_objects = rewrote_objects or record is not source.data
             records.append(record)
+        outer_bounds = _emf_header_bounds(self._records[0].data) if self._records else None
+        if outer_bounds is not None:
+            fixed_text_bounds = tuple(
+                bounds for source in self._records
+                if source.record_type in {96, 97}
+                if (bounds := _emf_record_bounds(source.data)) is not None
+            )
+            _emf_clip_overlapping_fitted_placements(
+                records, fitted_placements, outer_bounds, fixed_text_bounds
+            )
         result = bytearray(b"".join(records))
         if self._trace_layout:
             record_offsets: list[int] = []
+            record_indices: list[int] = []
             output_offset = 0
+            output_index = 0
             for output_record in records:
                 record_offsets.append(output_offset)
+                record_indices.append(output_index)
                 output_offset += len(output_record)
+                output_index += _emf_record_count(output_record)
             for item in local_trace:
                 generated_font = item.get("generated_font")
                 if isinstance(generated_font, dict):
@@ -760,6 +837,8 @@ class EmfDocument:
                     if isinstance(creation_index, int) and isinstance(selection_index, int):
                         generated_font["creation_record_offset"] = record_offsets[creation_index]
                         generated_font["selection_record_offset"] = record_offsets[selection_index]
+                        generated_font["creation_record_index"] = record_indices[creation_index]
+                        generated_font["selection_record_index"] = record_indices[selection_index]
         if (has_editable_text or rewrote_objects) and len(result) >= 56:
             struct.pack_into("<I", result, 48, len(result))
             struct.pack_into("<I", result, 52, _emf_record_count(result))
@@ -1097,10 +1176,12 @@ def _emf_layout_fallback_diagnostic(
     """Describe one safe direct-replacement fallback."""
     if fit_context is not None:
         reason_code = "emf_fitted_layout_fit_unsuccessful"
-    elif coordinate_state is None or not coordinate_state.valid:
+    elif coordinate_state is None:
         reason_code = "emf_fitted_layout_coordinate_state_unresolved"
     elif not coordinate_state.world.is_finite_and_invertible:
         reason_code = "emf_fitted_layout_transform_invalid"
+    elif not coordinate_state.valid:
+        reason_code = "emf_fitted_layout_coordinate_state_unresolved"
     elif not coordinate_state.world.permits_axis_aligned_expansion:
         x_axis = (coordinate_state.world.m11, coordinate_state.world.m12)
         y_axis = (coordinate_state.world.m21, coordinate_state.world.m22)
@@ -1164,7 +1245,7 @@ def _emf_text_coordinate_states(data: bytes) -> dict[int, _EmfCoordinateState]:
             _EMR_SETMAPMODE,
             _EMR_SCALEVIEWPORTEXTEX,
             _EMR_SCALEWINDOWEXTEX,
-            _EMR_SETGRAPHICSMODE,
+            _EMR_SETLAYOUT,
         }:
             state = replace(
                 state, coordinate=_emf_coordinate_after_record(state.coordinate, record_type, record)
@@ -1180,10 +1261,16 @@ def _emf_unclipped_fit_contexts(
 ) -> dict[int, _EmfTextFitContext]:
     """Collect conservative measured bounds for eligible un-clipped EMF text."""
     candidates: list[_EmfTextCandidate] = []
+    obstacle_candidates: list[_EmfTextCandidate] = []
     source_rectangles: list[tuple[int, _EmfRectangle]] = []
     lines: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    shapes: list[_EmfExpansionShape] = []
+    unresolved_shape = False
+    unresolved_text = False
     fonts: dict[int, _EmfFont] = {}
     font_records: dict[int, bytes] = {}
+    pens: dict[int, tuple[bool, int] | None] = {}
+    brushes: dict[int, str | None] = {}
     state = _EmfDrawingState()
     saved_states: list[tuple[int, _EmfDrawingState]] = []
     next_save_identifier = 1
@@ -1196,6 +1283,7 @@ def _emf_unclipped_fit_contexts(
         if record_size < 8 or offset + record_size > len(data):
             return {}
         record = data[offset : offset + record_size]
+        state = _emf_shape_state_after_record(state, record_type, record, pens, brushes)
         if record_type == _EMR_EXTCREATEFONTINDIRECTW:
             font = _emf_font(record)
             if font is not None:
@@ -1233,13 +1321,53 @@ def _emf_unclipped_fit_contexts(
             state = replace(state, text_color=struct.unpack_from("<I", record, 8)[0])
         elif record_type == _EMR_EXTSELECTCLIPRGN:
             state = _emf_drawing_state_after_extselectcliprgn(state, record)
+        elif record_type == _EMR_INTERSECTCLIPRECT:
+            state = _emf_drawing_state_after_intersectcliprect(state, record)
+        elif record_type in {_EMR_OFFSETCLIPRGN, _EMR_SETMETARGN, _EMR_EXCLUDECLIPRECT, _EMR_SELECTCLIPPATH}:
+            state = replace(state, clip_state_valid=False)
         elif record_type == _EMR_MOVETOEX and len(record) >= 16:
             state = replace(state, current_position=struct.unpack_from("<ii", record, 8))
         elif record_type == _EMR_LINETO and len(record) >= 16:
             end = struct.unpack_from("<ii", record, 8)
             if state.current_position is not None:
-                lines.append((state.current_position, end))
+                shape = _emf_expansion_line(state.current_position, end, state, offset)
+                if shape is None:
+                    unresolved_shape = True
+                else:
+                    shapes.append(shape)
+            else:
+                unresolved_shape = True
             state = replace(state, current_position=end)
+        elif record_type == _EMR_SETPIXELV:
+            shape = _emf_expansion_pixel(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+        elif record_type == _EMR_RECTANGLE:
+            shape = _emf_expansion_rectangle(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+        elif record_type in _EMR_BOUNDED_GRAPHICS:
+            shape = _emf_expansion_device_bounds(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+                if record_type in {96, 97}:
+                    source_rectangles.append((offset, shape.bounds))
+        elif record_type in _EMR_BOX_GRAPHICS:
+            shape = _emf_expansion_rectangle(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(replace(shape, enclosing=False))
+        elif record_type in _EMR_UNBOUNDED_GRAPHICS:
+            unresolved_shape = True
+        elif record_type == _EMR_GDICOMMENT and _emf_comment_has_unresolved_paint(record):
+            unresolved_shape = True
         elif record_type in {
             _EMR_SETWORLDTRANSFORM,
             _EMR_MODIFYWORLDTRANSFORM,
@@ -1250,7 +1378,7 @@ def _emf_unclipped_fit_contexts(
             _EMR_SETMAPMODE,
             _EMR_SCALEVIEWPORTEXTEX,
             _EMR_SCALEWINDOWEXTEX,
-            _EMR_SETGRAPHICSMODE,
+            _EMR_SETLAYOUT,
         }:
             state = replace(
                 state, coordinate=_emf_coordinate_after_record(state.coordinate, record_type, record)
@@ -1265,10 +1393,23 @@ def _emf_unclipped_fit_contexts(
                 None if state.selected_font_handle is None else font_records.get(state.selected_font_handle),
                 state.text_alignment, state.coordinate,
                 state.text_color, state.active_clip, state.clip_state_valid,
+                allow_clipped=True,
             )
             if candidate is not None:
-                candidates.append(candidate)
+                obstacle_candidates.append(candidate)
+                if not candidate.is_clipped:
+                    candidates.append(candidate)
+            elif bounds is None:
+                unresolved_text = True
         offset += record_size
+
+    for candidate in obstacle_candidates:
+        if candidate.bounds is None and candidate.text.strip():
+            bounds = _emf_candidate_device_bounds(candidate, measure_source_fonts)
+            if bounds is None:
+                unresolved_text = True
+            else:
+                source_rectangles.append((candidate.offset, bounds))
 
     result: dict[int, _EmfTextFitContext] = {}
     for candidate in candidates:
@@ -1291,6 +1432,12 @@ def _emf_unclipped_fit_contexts(
             trace_info["expansion_limits"] = None
             trace_info["expansion_outer_bounds"] = None
             trace_info["limiting_obstacles"] = None
+            if not candidate.clip_state_valid:
+                trace_info["expansion_status"] = "unresolved_clip"
+            elif unresolved_shape:
+                trace_info["expansion_status"] = "unresolved_graphics_geometry"
+            elif unresolved_text:
+                trace_info["expansion_status"] = "unresolved_text_geometry"
         expansion_bounds = outer_bounds
         if candidate.active_clip is not None:
             if not _emf_bounds_contain(candidate.active_clip, measured_bounds):
@@ -1306,6 +1453,9 @@ def _emf_unclipped_fit_contexts(
             and expansion_bounds is not None
             and candidate.bounds is not None
             and _emf_bounds_contain(expansion_bounds, candidate.bounds)
+            and not unresolved_shape
+            and not unresolved_text
+            and candidate.clip_state_valid
         ):
             expanded = _emf_expand_fitting_bounds(
                 measured_bounds,
@@ -1318,6 +1468,10 @@ def _emf_unclipped_fit_contexts(
                 lines,
                 expansion_bounds,
                 trace_info,
+                tuple(shapes),
+                candidate.offset,
+                {rectangle: other_offset for other_offset, rectangle in source_rectangles
+                 if other_offset != candidate.offset},
             )
             if expanded is not None:
                 fitting_bounds = expanded
@@ -1326,11 +1480,26 @@ def _emf_unclipped_fit_contexts(
         assert candidate.font is not None
         assert candidate.font_handle is not None
         assert candidate.font_record is not None
+        overlap_clip_bounds = None
+        if (
+            outer_bounds is not None
+            and candidate.coordinate == _EmfCoordinateState()
+            and candidate.clip_state_valid
+            and not unresolved_text
+        ):
+            other_text = tuple(
+                rectangle for other_offset, rectangle in source_rectangles
+                if other_offset != candidate.offset
+            )
+            overlap_clip_bounds = _emf_text_overlap_clip_bounds(
+                measured_bounds, candidate.text_alignment, other_text, outer_bounds
+            )
         result[candidate.offset] = _EmfTextFitContext(
             candidate.bounds or measured_bounds, fitting_bounds, candidate.font, candidate.font_handle,
             candidate.font_record, candidate.text, candidate.coordinate.allows_expansion,
             force_font_selection=candidate.uses_fallback_font,
             trace_info=trace_info,
+            overlap_clip_bounds=overlap_clip_bounds,
         )
     return result
 
@@ -1344,8 +1513,13 @@ def _emf_grouped_unclipped_fit_contexts(
     candidates: list[tuple[_EmfTextCandidate, bool]] = []
     source_rectangles: list[tuple[int, _EmfRectangle]] = []
     lines: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    shapes: list[_EmfExpansionShape] = []
+    unresolved_shape = False
+    unresolved_text = False
     fonts: dict[int, _EmfFont] = {}
     font_records: dict[int, bytes] = {}
+    pens: dict[int, tuple[bool, int] | None] = {}
+    brushes: dict[int, str | None] = {}
     state = _EmfDrawingState()
     saved_states: list[tuple[int, _EmfDrawingState]] = []
     next_save_identifier = 1
@@ -1357,7 +1531,7 @@ def _emf_grouped_unclipped_fit_contexts(
         _EMR_SETWINDOWEXTEX, _EMR_SETWINDOWORGEX,
         _EMR_SETVIEWPORTEXTEX, _EMR_SETVIEWPORTORGEX,
         _EMR_SETMAPMODE, _EMR_SCALEVIEWPORTEXTEX,
-        _EMR_SCALEWINDOWEXTEX, _EMR_SETGRAPHICSMODE,
+        _EMR_SCALEWINDOWEXTEX, _EMR_SETLAYOUT,
     }
     while offset < len(data):
         if offset + 8 > len(data):
@@ -1366,6 +1540,7 @@ def _emf_grouped_unclipped_fit_contexts(
         if record_size < 8 or offset + record_size > len(data):
             return {}, frozenset()
         record = data[offset : offset + record_size]
+        state = _emf_shape_state_after_record(state, record_type, record, pens, brushes)
         if record_type == _EMR_EXTCREATEFONTINDIRECTW:
             font = _emf_font(record)
             if font is not None:
@@ -1396,7 +1571,6 @@ def _emf_grouped_unclipped_fit_contexts(
         elif record_type in {
             _EMR_SETBKMODE,
             _EMR_SETBKCOLOR,
-            _EMR_SETTEXTCHAREXTRA,
             _EMR_SETTEXTJUSTIFICATION,
         }:
             # These alter text state but do not paint or move existing geometry.
@@ -1420,8 +1594,47 @@ def _emf_grouped_unclipped_fit_contexts(
         elif record_type == _EMR_LINETO and len(record) >= 16:
             end = struct.unpack_from("<ii", record, 8)
             if state.current_position is not None:
-                lines.append((state.current_position, end))
+                shape = _emf_expansion_line(state.current_position, end, state, offset)
+                if shape is None:
+                    unresolved_shape = True
+                else:
+                    shapes.append(shape)
+            else:
+                unresolved_shape = True
             state = replace(state, current_position=end)
+            barrier = True
+        elif record_type == _EMR_SETPIXELV:
+            shape = _emf_expansion_pixel(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+            barrier = True
+        elif record_type == _EMR_RECTANGLE:
+            shape = _emf_expansion_rectangle(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+            barrier = True
+        elif record_type in _EMR_BOUNDED_GRAPHICS:
+            shape = _emf_expansion_device_bounds(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(shape)
+                if record_type in {96, 97}:
+                    source_rectangles.append((offset, shape.bounds))
+            barrier = True
+        elif record_type in _EMR_BOX_GRAPHICS:
+            shape = _emf_expansion_rectangle(record, state, offset)
+            if shape is None:
+                unresolved_shape = True
+            else:
+                shapes.append(replace(shape, enclosing=False))
+            barrier = True
+        elif record_type in _EMR_UNBOUNDED_GRAPHICS:
+            unresolved_shape = True
             barrier = True
         elif record_type in coordinate_records:
             state = replace(
@@ -1435,8 +1648,15 @@ def _emf_grouped_unclipped_fit_contexts(
         elif record_type == _EMR_EXTSELECTCLIPRGN:
             state = _emf_drawing_state_after_extselectcliprgn(state, record)
             barrier = not state.clip_state_valid
+        elif record_type == _EMR_INTERSECTCLIPRECT:
+            state = _emf_drawing_state_after_intersectcliprect(state, record)
+            barrier = not state.clip_state_valid
+        elif record_type in {_EMR_OFFSETCLIPRGN, _EMR_SETMETARGN, _EMR_EXCLUDECLIPRECT, _EMR_SELECTCLIPPATH}:
+            state = replace(state, clip_state_valid=False)
+            barrier = True
         elif record_type == _EMR_GDICOMMENT:
             if not _emf_comment_is_non_painting(record):
+                unresolved_shape = unresolved_shape or _emf_comment_has_unresolved_paint(record)
                 barrier = True
         elif record_type in {_EMR_EXTTEXTOUTA, _EMR_EXTTEXTOUTW}:
             bounds = _emf_record_bounds(record)
@@ -1451,6 +1671,8 @@ def _emf_grouped_unclipped_fit_contexts(
             )
             if candidate is None:
                 barrier = True
+                if bounds is None:
+                    unresolved_text = True
             else:
                 candidates.append((candidate, not barrier))
                 if trace_candidates is not None:
@@ -1459,6 +1681,14 @@ def _emf_grouped_unclipped_fit_contexts(
         else:
             barrier = True
         offset += record_size
+
+    for candidate, _can_follow in candidates:
+        if candidate.bounds is None and candidate.text.strip():
+            bounds = _emf_candidate_device_bounds(candidate, measure_source_fonts)
+            if bounds is None:
+                unresolved_text = True
+            else:
+                source_rectangles.append((candidate.offset, bounds))
 
     measurement_traces: dict[int, dict[str, object]] = {
         candidate.offset: {} for candidate, _can_follow in candidates
@@ -1517,6 +1747,10 @@ def _emf_grouped_unclipped_fit_contexts(
              "expansion_limits": None, "expansion_outer_bounds": None, "limiting_obstacles": None}
             if trace_layout else None
         )
+        if trace_info is not None and unresolved_shape:
+            trace_info["expansion_status"] = "unresolved_graphics_geometry"
+        elif trace_info is not None and unresolved_text:
+            trace_info["expansion_status"] = "unresolved_text_geometry"
         active_clip = _emf_group_active_clip(group)
         expansion_bounds = outer_bounds
         if active_clip is not None:
@@ -1531,6 +1765,8 @@ def _emf_grouped_unclipped_fit_contexts(
         if (
             expansion_bounds is not None
             and _emf_bounds_contain(expansion_bounds, source_bounds)
+            and not unresolved_shape
+            and not unresolved_text
         ):
             expanded = _emf_expand_fitting_bounds(
                 source_bounds,
@@ -1542,6 +1778,10 @@ def _emf_grouped_unclipped_fit_contexts(
                 lines,
                 expansion_bounds,
                 trace_info,
+                tuple(shapes),
+                group[0].offset,
+                {rectangle: other_offset for other_offset, rectangle in source_rectangles
+                 if other_offset not in member_offsets},
             )
             if expanded is not None:
                 fitting_bounds = expanded
@@ -1554,6 +1794,19 @@ def _emf_grouped_unclipped_fit_contexts(
         output_font = _emf_group_output_font(group, dominant)
         assert anchor.font_handle is not None
         assert anchor.font is not None
+        overlap_clip_bounds = None
+        if (
+            outer_bounds is not None
+            and all(candidate.coordinate == _EmfCoordinateState() for candidate in group)
+            and not unresolved_text
+        ):
+            other_text = tuple(
+                rectangle for other_offset, rectangle in source_rectangles
+                if other_offset not in member_offsets
+            )
+            overlap_clip_bounds = _emf_text_overlap_clip_bounds(
+                source_bounds, 0, other_text, outer_bounds
+            )
         contexts[anchor.offset] = _EmfTextFitContext(
             source_bounds,
             fitting_bounds,
@@ -1569,6 +1822,7 @@ def _emf_grouped_unclipped_fit_contexts(
             remove_explicit_clip=True,
             group_offsets=tuple(candidate.offset for candidate in group),
             trace_info=trace_info,
+            overlap_clip_bounds=overlap_clip_bounds,
         )
         suppressed.update(member_offsets - {anchor.offset})
         index += len(group)
@@ -1591,6 +1845,7 @@ def _emf_coordinate_permits_grouping(coordinate: _EmfCoordinateState) -> bool:
     """Accept the axis-aligned map modes supported by transformed EMF fitting."""
     return (
         coordinate.valid
+        and not coordinate.layout & 1
         and coordinate.world.permits_axis_aligned_expansion
         and coordinate.window_extent[0] * coordinate.viewport_extent[0] > 0.0
         and coordinate.window_extent[1] * coordinate.viewport_extent[1] > 0.0
@@ -1832,9 +2087,8 @@ def _emf_coordinate_after_record(
         if record_type == _EMR_SETMAPMODE:
             mode = struct.unpack_from("<i", record, 8)[0]
             return replace(state, map_mode=mode, valid=mode in _SUPPORTED_MAP_MODES)
-        if record_type == _EMR_SETGRAPHICSMODE:
-            mode = struct.unpack_from("<I", record, 8)[0]
-            return replace(state, graphics_mode=mode, valid=mode in _SUPPORTED_GRAPHICS_MODES)
+        if record_type == _EMR_SETLAYOUT:
+            return replace(state, layout=struct.unpack_from("<I", record, 8)[0])
     except struct.error:
         return replace(state, valid=False)
     return state
@@ -1865,7 +2119,7 @@ def _emf_compose(first: _EmfAffine, second: _EmfAffine) -> _EmfAffine:
 
 
 def _emf_trace_effective_transform(state: _EmfCoordinateState | None) -> dict[str, object] | None:
-    if state is None or not state.valid or state.map_mode != _MM_TEXT:
+    if state is None or not state.valid or state.map_mode != _MM_TEXT or state.layout & 1:
         return None
     mapping = _EmfAffine(
         dx=state.viewport_origin[0] - state.window_origin[0],
@@ -1892,10 +2146,48 @@ def _emf_comment_is_non_painting(record: bytes) -> bool:
     return not record[12 : 12 + data_size].startswith(b"EMF+")
 
 
+def _emf_comment_has_unresolved_paint(record: bytes) -> bool:
+    if _emf_comment_is_non_painting(record):
+        return False
+    if not is_emfplus_comment(record) or len(record) < 16:
+        return True
+    data_size = struct.unpack_from("<I", record, 8)[0]
+    end = 12 + data_size
+    if end > len(record):
+        return True
+    offset = 16
+    while offset < end:
+        if offset + 12 > end:
+            return True
+        record_type, _flags, size, data_length = struct.unpack_from("<HHII", record, offset)
+        if size < 12 or offset + size > end or data_length > size - 12:
+            return True
+        if record_type not in {0x4001, 0x4002, 0x4004, 0x4008}:
+            return True
+        offset += size
+    return False
+
+
+def _emf_drawing_state_after_intersectcliprect(
+    state: _EmfDrawingState, record: bytes
+) -> _EmfDrawingState:
+    if len(record) < 24 or not state.clip_state_valid:
+        return replace(state, clip_state_valid=False)
+    logical = _EmfRectangle(*struct.unpack_from("<iiii", record, 8))
+    rendered = _emf_orthogonal_rectangle(logical, state.coordinate, inverse=False, inward=True)
+    if rendered is None:
+        return replace(state, clip_state_valid=False)
+    if state.active_clip is not None:
+        rendered = _emf_rectangle_intersection(rendered, state.active_clip) or _EmfRectangle(0, 0, 0, 0)
+    return replace(state, active_clip=rendered)
+
+
 def _emf_drawing_state_after_extselectcliprgn(
     state: _EmfDrawingState, record: bytes
 ) -> _EmfDrawingState:
     """Apply the safe rectangular subset of EMR_EXTSELECTCLIPRGN state."""
+    if not state.clip_state_valid:
+        return state
     rectangle, mode = _emf_extselectcliprgn_rectangle(record)
     if rectangle is None:
         return replace(state, clip_state_valid=False)
@@ -2211,11 +2503,17 @@ def _emf_measured_source_bounds(
             "measured_source_extent" if source_bounds is None else "measured_source_extent_clamped_to_source_bounds"
         )
     if source_bounds is None:
+        alignment = candidate.text_alignment & _TA_ALIGNMENT_MASK
+        left = (candidate.origin[0] - measured_width if alignment == _TA_RIGHT else
+            candidate.origin[0] - measured_width // 2 if alignment == _TA_CENTER else
+            candidate.origin[0])
+        vertical_alignment = candidate.text_alignment & 0x18
+        top = (candidate.origin[1] - measured_height if vertical_alignment in (8, 24)
+               else candidate.origin[1])
+        bottom = (candidate.origin[1] + measured_height if vertical_alignment in (0, 24)
+              else candidate.origin[1])
         return _EmfRectangle(
-            candidate.origin[0],
-            candidate.origin[1] - measured_height,
-            candidate.origin[0] + measured_width,
-            candidate.origin[1],
+            left, top, left + measured_width, bottom,
         )
     alignment = candidate.text_alignment & _TA_ALIGNMENT_MASK
     if alignment == _TA_RIGHT:
@@ -2235,6 +2533,36 @@ def _emf_measured_source_bounds(
         source_bounds.top,
         min(right, source_bounds.right),
         source_bounds.bottom,
+    )
+
+
+def _emf_candidate_device_bounds(
+    candidate: _EmfTextCandidate, measure_source_fonts: bool
+) -> _EmfRectangle | None:
+    bounds = _emf_candidate_source_area(candidate, measure_source_fonts)
+    coordinate = candidate.coordinate
+    if bounds is None or not coordinate.valid or coordinate.map_mode != _MM_TEXT or coordinate.layout & 1:
+        return None
+    world = coordinate.world
+    points = tuple(
+        (
+            world.m11 * horizontal + world.m21 * vertical + world.dx
+            + coordinate.viewport_origin[0] - coordinate.window_origin[0],
+            world.m12 * horizontal + world.m22 * vertical + world.dy
+            + coordinate.viewport_origin[1] - coordinate.window_origin[1],
+        )
+        for horizontal, vertical in (
+            (bounds.left, bounds.top), (bounds.right, bounds.top),
+            (bounds.left, bounds.bottom), (bounds.right, bounds.bottom),
+        )
+    )
+    if not all(math.isfinite(value) for point in points for value in point):
+        return None
+    return _EmfRectangle(
+        math.floor(min(point[0] for point in points)),
+        math.floor(min(point[1] for point in points)),
+        math.ceil(max(point[0] for point in points)),
+        math.ceil(max(point[1] for point in points)),
     )
 
 
@@ -2294,6 +2622,442 @@ def _emf_text_box(
     )
 
 
+def _emf_shape_state_after_record(
+    state: _EmfDrawingState,
+    record_type: int,
+    record: bytes,
+    pens: dict[int, tuple[bool, int] | None],
+    brushes: dict[int, str | None],
+) -> _EmfDrawingState:
+    if record_type == _EMR_CREATEPEN and len(record) >= 28:
+        handle, style, width = struct.unpack_from("<IIi", record, 8)
+        pens[handle] = (style & 0xF != 5, abs(width))
+    elif record_type == _EMR_EXTCREATEPEN and len(record) >= 12:
+        handle = struct.unpack_from("<I", record, 8)[0]
+        if len(record) >= 36:
+            style, width = struct.unpack_from("<II", record, 28)
+            pens[handle] = None if style & 0xF000 == 0x2000 else (style & 0xF != 5, width)
+        else:
+            pens[handle] = None
+    elif record_type == _EMR_CREATEBRUSHINDIRECT and len(record) >= 24:
+        handle, style = struct.unpack_from("<II", record, 8)
+        brushes[handle] = "solid" if style == 0 else "null" if style == 1 else "other"
+    elif record_type == _EMR_SELECTOBJECT and len(record) >= 12:
+        handle = struct.unpack_from("<I", record, 8)[0]
+        if handle in pens:
+            state = replace(state, pen=pens[handle])
+        elif handle in brushes:
+            state = replace(state, brush=brushes[handle])
+        elif handle & 0x80000000:
+            stock = handle & 0x7FFFFFFF
+            if stock <= 5:
+                state = replace(state, brush="null" if stock == 5 else "solid")
+            elif stock in (6, 7, 8):
+                state = replace(state, pen=(stock != 8, 0))
+            elif stock == 18:
+                state = replace(state, brush="solid")
+            elif stock == 19:
+                state = replace(state, pen=(True, 0))
+    elif record_type == _EMR_DELETEOBJECT and len(record) >= 12:
+        handle = struct.unpack_from("<I", record, 8)[0]
+        pens.pop(handle, None)
+        brushes.pop(handle, None)
+    return state
+
+
+def _emf_expansion_device_bounds(
+    record: bytes, state: _EmfDrawingState, offset: int
+) -> _EmfExpansionShape | None:
+    if not state.clip_state_valid:
+        return None
+    bounds = _emf_record_bounds(record)
+    if bounds is None:
+        return None
+    record_type = struct.unpack_from("<I", record, 0)[0]
+    if (
+        record_type in {3, 8, 86, 91}
+        and state.pen is not None and not state.pen[0]
+        and state.brush == "null"
+    ):
+        return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset)
+    if record_type in _EMR_STROKED_BOUNDED_GRAPHICS:
+        if (state.pen is None or not state.coordinate.valid or state.coordinate.map_mode != _MM_TEXT
+            or state.coordinate.layout & 1):
+            return None
+        pen_visible, pen_width = state.pen
+        if pen_visible:
+            world = state.coordinate.world
+            scale = (max(world.m11, world.m22) if world.permits_axis_aligned_expansion else
+                     math.sqrt(world.m11 ** 2 + world.m12 ** 2 + world.m21 ** 2 + world.m22 ** 2))
+            stroke_extent = math.ceil((pen_width * scale if pen_width else 1.0) / 2.0)
+            bounds = _EmfRectangle(
+                bounds.left - stroke_extent, bounds.top - stroke_extent,
+                bounds.right + stroke_extent, bounds.bottom + stroke_extent,
+            )
+    if state.active_clip is not None:
+        clipped = _emf_rectangle_intersection(bounds, state.active_clip)
+        if clipped is None:
+            return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset)
+        bounds = clipped
+    return _EmfExpansionShape(bounds, None, False, True, offset)
+
+
+def _emf_expansion_pixel(
+    record: bytes, state: _EmfDrawingState, offset: int
+) -> _EmfExpansionShape | None:
+    if (len(record) < 20 or not state.coordinate.valid or state.coordinate.map_mode != _MM_TEXT
+            or state.coordinate.layout & 1
+            or not state.clip_state_valid):
+        return None
+    horizontal, vertical = struct.unpack_from("<ii", record, 8)
+    coordinate = state.coordinate
+    world = coordinate.world
+    rendered_x = (world.m11 * horizontal + world.m21 * vertical + world.dx
+                  + coordinate.viewport_origin[0] - coordinate.window_origin[0])
+    rendered_y = (world.m12 * horizontal + world.m22 * vertical + world.dy
+                  + coordinate.viewport_origin[1] - coordinate.window_origin[1])
+    if not math.isfinite(rendered_x) or not math.isfinite(rendered_y):
+        return None
+    left, top = math.floor(rendered_x), math.floor(rendered_y)
+    bounds = _EmfRectangle(left, top, left + 1, top + 1)
+    if state.active_clip is not None:
+        bounds = _emf_rectangle_intersection(bounds, state.active_clip) or _EmfRectangle(0, 0, 0, 0)
+    return _EmfExpansionShape(bounds, None, False, True, offset, "pixel")
+
+
+def _emf_expansion_line(
+    start: tuple[int, int], end: tuple[int, int], state: _EmfDrawingState, offset: int
+) -> _EmfExpansionShape | None:
+    if (not state.coordinate.valid or state.coordinate.map_mode != _MM_TEXT or state.coordinate.layout & 1
+            or not state.clip_state_valid or state.pen is None):
+        return None
+    pen_visible, pen_width = state.pen
+    if not pen_visible:
+        return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset, "line")
+    coordinate = state.coordinate
+    world = coordinate.world
+    points = tuple(
+        (
+            world.m11 * horizontal + world.m21 * vertical + world.dx
+            + coordinate.viewport_origin[0] - coordinate.window_origin[0],
+            world.m12 * horizontal + world.m22 * vertical + world.dy
+            + coordinate.viewport_origin[1] - coordinate.window_origin[1],
+        )
+        for horizontal, vertical in (start, end)
+    )
+    if not all(math.isfinite(value) for point in points for value in point):
+        return None
+    scale = (max(world.m11, world.m22) if world.permits_axis_aligned_expansion else
+             math.sqrt(world.m11 ** 2 + world.m12 ** 2 + world.m21 ** 2 + world.m22 ** 2))
+    stroke_extent = math.ceil((pen_width * scale if pen_width else 1.0) / 2.0)
+    bounds = _EmfRectangle(
+        math.floor(min(point[0] for point in points)) - stroke_extent,
+        math.floor(min(point[1] for point in points)) - stroke_extent,
+        math.ceil(max(point[0] for point in points)) + stroke_extent,
+        math.ceil(max(point[1] for point in points)) + stroke_extent,
+    )
+    if state.active_clip is not None:
+        clipped = _emf_rectangle_intersection(bounds, state.active_clip)
+        if clipped is None:
+            return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset, "line")
+        bounds = clipped
+    return _EmfExpansionShape(bounds, None, False, False, offset, "line")
+
+
+def _emf_expansion_rectangle(
+    record: bytes, state: _EmfDrawingState, offset: int
+) -> _EmfExpansionShape | None:
+    if (len(record) < 24 or not state.coordinate.valid or not state.clip_state_valid
+            or state.pen is None or state.brush is None):
+        return None
+    coordinate = state.coordinate
+    if coordinate.map_mode != _MM_TEXT or coordinate.layout & 1:
+        return None
+    bounds = _EmfRectangle(*struct.unpack_from("<iiii", record, 8))
+    if bounds.width <= 0 or bounds.height <= 0:
+        return None
+    world = coordinate.world
+    pen_visible, pen_width = state.pen
+    filled = state.brush != "null"
+    if not pen_visible and not filled:
+        return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset)
+    points = tuple(
+        (
+            world.m11 * horizontal + world.m21 * vertical + world.dx
+            + coordinate.viewport_origin[0] - coordinate.window_origin[0],
+            world.m12 * horizontal + world.m22 * vertical + world.dy
+            + coordinate.viewport_origin[1] - coordinate.window_origin[1],
+        )
+        for horizontal, vertical in (
+            (bounds.left, bounds.top), (bounds.right, bounds.top),
+            (bounds.left, bounds.bottom), (bounds.right, bounds.bottom),
+        )
+    )
+    if not all(math.isfinite(value) for point in points for value in point):
+        return None
+    rendered = _EmfRectangle(
+        math.floor(min(point[0] for point in points)),
+        math.floor(min(point[1] for point in points)),
+        math.ceil(max(point[0] for point in points)),
+        math.ceil(max(point[1] for point in points)),
+    )
+    stroke_extent = 0
+    if pen_visible:
+        scale = (max(world.m11, world.m22) if world.permits_axis_aligned_expansion else
+                 math.sqrt(world.m11 ** 2 + world.m12 ** 2 + world.m21 ** 2 + world.m22 ** 2))
+        stroke_extent = math.ceil((pen_width * scale if pen_width else 1.0) / 2.0)
+    interior = _EmfRectangle(
+        rendered.left + stroke_extent, rendered.top + stroke_extent,
+        rendered.right - stroke_extent, rendered.bottom - stroke_extent,
+    )
+    usable_interior = interior if interior.width > 0 and interior.height > 0 else None
+    rendered = _EmfRectangle(
+        rendered.left - stroke_extent, rendered.top - stroke_extent,
+        rendered.right + stroke_extent, rendered.bottom + stroke_extent,
+    )
+    enclosing = world.permits_axis_aligned_expansion and state.brush in ("solid", "null")
+    if state.active_clip is not None:
+        clipped = _emf_rectangle_intersection(rendered, state.active_clip)
+        if clipped is None:
+            return _EmfExpansionShape(_EmfRectangle(0, 0, 0, 0), None, False, False, offset)
+        enclosing = enclosing and clipped == rendered
+        rendered = clipped
+    return _EmfExpansionShape(rendered, usable_interior, enclosing, filled, offset)
+
+
+def _emf_orthogonal_rectangle(
+    bounds: _EmfRectangle, coordinate: _EmfCoordinateState, *, inverse: bool, inward: bool = False
+) -> _EmfRectangle | None:
+    world = coordinate.world
+    determinant = world.m11 * world.m22 - world.m12 * world.m21
+    axis_aligned = math.isclose(world.m12, 0.0, abs_tol=1e-9) and math.isclose(world.m21, 0.0, abs_tol=1e-9)
+    quarter_turned = math.isclose(world.m11, 0.0, abs_tol=1e-9) and math.isclose(world.m22, 0.0, abs_tol=1e-9)
+    if (
+        not coordinate.valid or coordinate.map_mode != _MM_TEXT or coordinate.layout & 1
+        or not world.is_finite_and_invertible or determinant <= 0.0
+        or not (axis_aligned or quarter_turned)
+    ):
+        return None
+    translate_x = world.dx + coordinate.viewport_origin[0] - coordinate.window_origin[0]
+    translate_y = world.dy + coordinate.viewport_origin[1] - coordinate.window_origin[1]
+    points = []
+    for horizontal, vertical in (
+        (bounds.left, bounds.top), (bounds.right, bounds.top),
+        (bounds.left, bounds.bottom), (bounds.right, bounds.bottom),
+    ):
+        if inverse:
+            adjusted_x = horizontal - translate_x
+            adjusted_y = vertical - translate_y
+            points.append((
+                (world.m22 * adjusted_x - world.m21 * adjusted_y) / determinant,
+                (-world.m12 * adjusted_x + world.m11 * adjusted_y) / determinant,
+            ))
+        else:
+            points.append((
+                world.m11 * horizontal + world.m21 * vertical + translate_x,
+                world.m12 * horizontal + world.m22 * vertical + translate_y,
+            ))
+    if not all(math.isfinite(value) for point in points for value in point):
+        return None
+    lower = math.ceil if inward else math.floor
+    upper = math.floor if inward else math.ceil
+    return _EmfRectangle(
+        lower(min(point[0] for point in points)), lower(min(point[1] for point in points)),
+        upper(max(point[0] for point in points)), upper(max(point[1] for point in points)),
+    )
+
+
+def _emf_fitted_placement(
+    record_index: int,
+    record: bytes,
+    candidate: _EmfTextCandidate | None,
+    context: _EmfTextFitContext | None,
+    fitted_scale: float,
+    fit_trace: dict[str, object],
+    trace_item: dict[str, object] | None,
+    replacement: str,
+    measure_source_fonts: bool,
+) -> _EmfFittedPlacement | None:
+    width_at_minimum = fit_trace.get("minimum_font_width")
+    if (
+        candidate is None
+        or not candidate.clip_state_valid
+    ):
+        return None
+    source_bounds = candidate.bounds if context is None else context.source_bounds
+    if source_bounds is None:
+        source_bounds = _emf_candidate_device_bounds(candidate, measure_source_fonts)
+    if source_bounds is None:
+        return None
+    logical_source = _emf_orthogonal_rectangle(source_bounds, candidate.coordinate, inverse=True)
+    if logical_source is None:
+        return None
+    if context is not None and isinstance(width_at_minimum, (int, float)):
+        source_height = abs(struct.unpack_from("<i", context.font_record, 12)[0])
+        height = max(1, int(source_height * fitted_scale) - (1 if fitted_scale < 1.0 else 0))
+        width = math.ceil(width_at_minimum * height)
+    elif context is None and candidate.is_clipped:
+        measured = _emf_measured_source_bounds(
+            replace(candidate, text=replacement, bounds=None, clip_bounds=None, is_clipped=False),
+            measure_source_fonts,
+        )
+        if measured is None:
+            return None
+        record_scale = struct.unpack_from("<f", record, 28)[0]
+        width = math.ceil(measured.width * max(1.0, abs(record_scale)))
+    else:
+        return None
+    alignment = candidate.text_alignment & _TA_ALIGNMENT_MASK
+    origin = candidate.origin[0]
+    left = origin - width if alignment == _TA_RIGHT else origin - width // 2 if alignment == _TA_CENTER else origin
+    bounds = _EmfRectangle(left, logical_source.top, left + width, logical_source.bottom)
+    options = struct.unpack_from("<I", record, 52)[0]
+    if options & ETO_CLIPPED:
+        clip = _EmfRectangle(*struct.unpack_from("<iiii", record, 56))
+        clipped = _emf_rectangle_intersection(bounds, clip)
+        if clipped is None:
+            return None
+        bounds = clipped
+    rendered = _emf_orthogonal_rectangle(bounds, candidate.coordinate, inverse=False)
+    if rendered is None:
+        return None
+    bounds = rendered
+    if candidate.active_clip is not None:
+        clipped = _emf_rectangle_intersection(bounds, candidate.active_clip)
+        if clipped is None:
+            return None
+        bounds = clipped
+    return _EmfFittedPlacement(record_index, source_bounds, bounds, candidate.coordinate, trace_item)
+
+
+def _emf_clip_overlapping_fitted_placements(
+    records: list[bytes], placements: list[_EmfFittedPlacement], outer_bounds: _EmfRectangle,
+    fixed_text_bounds: tuple[_EmfRectangle, ...] = (),
+) -> None:
+    placements = placements + [
+        _EmfFittedPlacement(-1, bounds, bounds, _EmfCoordinateState(), None)
+        for bounds in fixed_text_bounds
+    ]
+    for index, first in enumerate(placements):
+        for second in placements[index + 1:]:
+            if first.record_index < 0 and second.record_index < 0:
+                continue
+            if not any(
+                _emf_rectangle_intersection(first_bounds, second_bounds) is not None
+                for first_bounds, second_bounds in (
+                    (first.replacement_bounds, second.replacement_bounds),
+                    (first.replacement_bounds, second.source_bounds),
+                    (first.source_bounds, second.replacement_bounds),
+                )
+            ):
+                continue
+            left, right = sorted((first, second), key=lambda placement: placement.source_bounds.left)
+            if left.source_bounds.right <= right.source_bounds.left:
+                boundary = (left.source_bounds.right + right.source_bounds.left) // 2
+                boundary = min(max(boundary, right.replacement_bounds.left), left.replacement_bounds.right)
+                boundary = max(left.source_bounds.right, min(boundary, right.source_bounds.left))
+                if left.record_index < 0:
+                    boundary = left.source_bounds.right
+                elif right.record_index < 0:
+                    boundary = right.source_bounds.left
+                horizontal = True
+                boundaries = (boundary, boundary)
+            else:
+                top, bottom = sorted((first, second), key=lambda placement: placement.source_bounds.top)
+                if top.source_bounds.bottom <= bottom.source_bounds.top:
+                    left, right = top, bottom
+                    boundary = (left.source_bounds.bottom + right.source_bounds.top) // 2
+                    boundary = min(max(boundary, right.replacement_bounds.top), left.replacement_bounds.bottom)
+                    boundary = max(left.source_bounds.bottom, min(boundary, right.source_bounds.top))
+                    if left.record_index < 0:
+                        boundary = left.source_bounds.bottom
+                    elif right.record_index < 0:
+                        boundary = right.source_bounds.top
+                    horizontal = False
+                    boundaries = (boundary, boundary)
+                elif abs(first.source_bounds.left - second.source_bounds.left) >= abs(
+                    first.source_bounds.top - second.source_bounds.top
+                ):
+                    horizontal = True
+                    boundaries = (right.source_bounds.left, left.source_bounds.right)
+                else:
+                    left, right = top, bottom
+                    horizontal = False
+                    boundaries = (right.source_bounds.top, left.source_bounds.bottom)
+            for placement, leading, boundary in (
+                (left, True, boundaries[0]), (right, False, boundaries[1])
+            ):
+                if placement.record_index < 0:
+                    continue
+                margin = max(1, placement.source_bounds.width, placement.source_bounds.height)
+                clip_left = min(outer_bounds.left, placement.replacement_bounds.left) - margin
+                clip_top = min(outer_bounds.top, placement.replacement_bounds.top) - margin
+                clip_right = max(outer_bounds.right, placement.replacement_bounds.right) + margin
+                clip_bottom = max(outer_bounds.bottom, placement.replacement_bounds.bottom) + margin
+                if horizontal:
+                    clip_right = boundary if leading else clip_right
+                    clip_left = clip_left if leading else boundary
+                else:
+                    clip_bottom = boundary if leading else clip_bottom
+                    clip_top = clip_top if leading else boundary
+                device_clip = _EmfRectangle(clip_left, clip_top, clip_right, clip_bottom)
+                clipped = _emf_rectangle_intersection(placement.replacement_bounds, device_clip)
+                if clipped == placement.replacement_bounds:
+                    continue
+                clip = _emf_orthogonal_rectangle(device_clip, placement.coordinate, inverse=True, inward=True)
+                if clip is None or clip.width <= 0 or clip.height <= 0:
+                    continue
+                record = bytearray(records[placement.record_index][len(placement.background_record):])
+                options = struct.unpack_from("<I", record, 52)[0]
+                if options & ETO_CLIPPED:
+                    previous_clip = _EmfRectangle(*struct.unpack_from("<iiii", record, 56))
+                    intersection = _emf_rectangle_intersection(clip, previous_clip)
+                    if intersection is None:
+                        clip = _EmfRectangle(clip.left, clip.top, clip.left, clip.top)
+                    else:
+                        clip = intersection
+                if options & ETO_OPAQUE:
+                    background = bytearray(record[:76])
+                    struct.pack_into("<I", background, 4, len(background))
+                    struct.pack_into("<III", background, 44, 0, len(background), options & ~ETO_CLIPPED)
+                    struct.pack_into("<I", background, 72, 0)
+                    placement.background_record = bytes(background)
+                    options &= ~ETO_OPAQUE
+                struct.pack_into("<I", record, 52, options | ETO_CLIPPED)
+                struct.pack_into("<iiii", record, 56, clip.left, clip.top, clip.right, clip.bottom)
+                records[placement.record_index] = placement.background_record + bytes(record)
+                placement.replacement_bounds = clipped or _EmfRectangle(0, 0, 0, 0)
+                if placement.trace_item is not None:
+                    placement.trace_item["overlap_protection_clipped"] = True
+
+
+def _emf_text_overlap_clip_bounds(
+    source: _EmfRectangle,
+    alignment: int,
+    text_obstacles: tuple[_EmfRectangle, ...],
+    outer_bounds: _EmfRectangle,
+) -> _EmfRectangle | None:
+    limits = _emf_expand_fitting_bounds(source, alignment, text_obstacles, [], outer_bounds)
+    if limits is None:
+        return None
+    left_obstacle = any(
+        _overlaps(source.top, source.bottom, obstacle.top, obstacle.bottom)
+        and obstacle.right == limits.left for obstacle in text_obstacles
+    )
+    right_obstacle = any(
+        _overlaps(source.top, source.bottom, obstacle.top, obstacle.bottom)
+        and obstacle.left == limits.right for obstacle in text_obstacles
+    )
+    if not left_obstacle and not right_obstacle:
+        return None
+    return _EmfRectangle(
+        limits.left if left_obstacle else outer_bounds.left - source.width,
+        outer_bounds.top - source.height,
+        limits.right if right_obstacle else outer_bounds.right + source.width,
+        outer_bounds.bottom + source.height,
+    )
+
+
 def _emf_expand_fitting_bounds(
     source: _EmfRectangle,
     text_alignment: int,
@@ -2301,6 +3065,9 @@ def _emf_expand_fitting_bounds(
     lines: list[tuple[tuple[int, int], tuple[int, int]]],
     outer_bounds: _EmfRectangle,
     trace_info: dict[str, object] | None = None,
+    shapes: tuple[_EmfExpansionShape, ...] = (),
+    text_offset: int = 0,
+    text_obstacle_offsets: dict[_EmfRectangle, int] | None = None,
 ) -> _EmfRectangle | None:
     """Expand a one-line EMF source rectangle only until a known obstacle."""
     if trace_info is not None:
@@ -2311,6 +3078,26 @@ def _emf_expand_fitting_bounds(
         return source
     left_stops: list[int] = [outer_bounds.left]
     right_stops: list[int] = [outer_bounds.right]
+    for shape in shapes:
+        obstacle = shape.bounds
+        if (shape.enclosing and shape.interior is not None
+                and (shape.offset < text_offset or not shape.filled)
+                and _emf_bounds_contain(shape.interior, source)):
+            left_stops.append(shape.interior.left)
+            right_stops.append(shape.interior.right)
+        elif _overlaps(source.top, source.bottom, obstacle.top, obstacle.bottom):
+            if obstacle.right <= source.left:
+                left_stops.append(obstacle.right)
+            elif obstacle.left >= source.right:
+                right_stops.append(obstacle.left)
+            else:
+                if trace_info is not None:
+                    trace_info["expansion_status"] = "overlapping_obstacle"
+                    trace_info["limiting_obstacles"] = [{
+                        "kind": shape.kind, "bounds": _emf_trace_rectangle(obstacle),
+                        "record_offset": shape.offset, "coordinate_space": "EMF device units",
+                    }]
+                return None
     for obstacle in text_obstacles:
         if not _overlaps(source.top, source.bottom, obstacle.top, obstacle.bottom):
             continue
@@ -2321,7 +3108,11 @@ def _emf_expand_fitting_bounds(
         else:
             if trace_info is not None:
                 trace_info["expansion_status"] = "overlapping_obstacle"
-                trace_info["limiting_obstacles"] = [{"kind": "text", "bounds": _emf_trace_rectangle(obstacle)}]
+                trace_info["limiting_obstacles"] = [{
+                    "kind": "text", "bounds": _emf_trace_rectangle(obstacle),
+                    "record_offset": None if text_obstacle_offsets is None else text_obstacle_offsets.get(obstacle),
+                    "coordinate_space": "EMF device units",
+                }]
             return None
     for start, end in lines:
         if start[0] == end[0]:
@@ -2347,7 +3138,9 @@ def _emf_expand_fitting_bounds(
         trace_info["expansion_limits"] = {"left": left_limit, "right": right_limit}
         trace_info["expansion_outer_bounds"] = _emf_trace_rectangle(outer_bounds)
         trace_info["limiting_obstacles"] = [
-            {"kind": "text", "bounds": _emf_trace_rectangle(obstacle)}
+            {"kind": "text", "bounds": _emf_trace_rectangle(obstacle),
+             "record_offset": None if text_obstacle_offsets is None else text_obstacle_offsets.get(obstacle),
+             "coordinate_space": "EMF device units"}
             for obstacle in text_obstacles
             if _overlaps(source.top, source.bottom, obstacle.top, obstacle.bottom)
             and (obstacle.right == left_limit or obstacle.left == right_limit)
@@ -2356,6 +3149,14 @@ def _emf_expand_fitting_bounds(
             for start, end in lines
             if start[0] == end[0] and start[0] in (left_limit, right_limit)
             and _overlaps(source.top, source.bottom, min(start[1], end[1]), max(start[1], end[1]))
+        ] + [
+            {"kind": shape.kind, "bounds": _emf_trace_rectangle(shape.bounds), "record_offset": shape.offset,
+             "coordinate_space": "EMF device units"}
+            for shape in shapes
+            if _overlaps(source.top, source.bottom, shape.bounds.top, shape.bounds.bottom)
+              and (shape.bounds.right in (left_limit, right_limit) or shape.bounds.left in (left_limit, right_limit)
+                  or (shape.interior is not None and (shape.interior.left in (left_limit, right_limit)
+                                               or shape.interior.right in (left_limit, right_limit))))
         ]
     alignment = text_alignment & _TA_ALIGNMENT_MASK
     if alignment == _TA_RIGHT:
@@ -2544,7 +3345,23 @@ def _replace_emf_exttext_record(
     if remove_explicit_clip:
         struct.pack_into("<I", updated, emr_text_offset + 16, options & ~ETO_CLIPPED)
     elif bounds_override is not None and options & ETO_CLIPPED:
-        struct.pack_into("<iiii", updated, 56, *bounds)
+        struct.pack_into("<iiii", updated, 56, bounds_override.left, bounds_override.top,
+                         bounds_override.right, bounds_override.bottom)
+    minimum_font_width = None if fit_trace is None else fit_trace.get("minimum_font_width")
+    if (
+        used_fitted_layout
+        and unclipped_fit_context is not None
+        and unclipped_fit_context.overlap_clip_bounds is not None
+        and not options & (ETO_CLIPPED | ETO_OPAQUE)
+        and fitted_scale < 1.0 / abs(struct.unpack_from("<i", unclipped_fit_context.font_record, 12)[0])
+        and isinstance(minimum_font_width, (int, float))
+        and minimum_font_width > unclipped_fit_context.overlap_clip_bounds.width
+    ):
+        clip = unclipped_fit_context.overlap_clip_bounds
+        struct.pack_into("<I", updated, emr_text_offset + 16, options | ETO_CLIPPED)
+        struct.pack_into("<iiii", updated, 56, clip.left, clip.top, clip.right, clip.bottom)
+        if fit_trace is not None:
+            fit_trace["overlap_protection_clipped"] = True
     if fitted_scale != 1.0 and unclipped_fit_context is None:
         for scale_offset in (28, 32):
             scale = struct.unpack_from("<f", record, scale_offset)[0]
@@ -2659,4 +3476,6 @@ def _fit_unclipped_emf_text(
         return None
     if fit_trace is not None:
         fit_trace["replacement_layout_face"] = fitted.layout_face
+        source_height = abs(struct.unpack_from("<i", context.font_record, 12)[0])
+        fit_trace["minimum_font_width"] = fitted.layout_width / source_height
     return fitted.text, fitted.scale

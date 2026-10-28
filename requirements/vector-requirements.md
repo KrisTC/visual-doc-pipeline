@@ -319,7 +319,8 @@ The initial eligible geometry is ordinary, axis-aligned horizontal text and
 axis-aligned `EMR_MOVETOEX`/`EMR_LINETO` line segments in a safely resolved EMF
 coordinate system.  The adapter shall not infer table cells, paragraph blocks,
 or obstacles from arbitrary paths, fills, images, rotations, shears,
-unresolved transforms, or ambiguous graphics state.  An unsupported or
+unresolved transforms, or ambiguous graphics state, except for the
+shape-aware obstacle rules in FR-2026-10-28-05.  An unsupported or
 ambiguous record shall retain the existing `preserve-source-formatting`
 fallback rather than risk crossing a line or other text.
 
@@ -400,7 +401,8 @@ transformed replacement glyph bounds shall remain inside that source bound.
 This source-bound-only fitting rule applies to rotated, reflected, sheared,
 and otherwise non-axis-aligned transforms. It shall not expand the bound,
 infer free space, or attempt neighbour or line-obstacle avoidance for those
-transforms.
+transforms, except for overlap-prevention clipping as specified by
+FR-2026-10-28-05.
 
 For an orientation-preserving, axis-aligned transform consisting only of
 translation and positive horizontal and vertical scale, the adapter shall
@@ -422,7 +424,8 @@ result.  It shall not rasterize the EMF, convert text to outlines, reorder
 painting operations, alter unrelated graphics state, or replace a text record
 more than once.  A replacement that cannot fit at the one-pixel minimum shall
 remain visible as overflow according to the shared fitted-layout rule, rather
-than silently clipping or retaining source-language text.
+than silently clipping or retaining source-language text, subject to the
+overlap-prevention exception in FR-2026-10-28-05.
 
 The adapter shall retain the direct `preserve-source-formatting` replacement
 fallback for a singular or non-finite matrix, an unresolvable map or graphics
@@ -485,10 +488,10 @@ rather than independently translating and fitting each member.
 `preserve-source-formatting` shall retain its existing direct per-record
 replacement behaviour.
 
-The fit region for an eligible run shall be the union of its source text
-fragments' measured areas. It shall not infer or expand to a surrounding table
-cell, shape, or other semantic container. The complete replacement shall be
-one coherent text block within that original union region. The adapter shall
+The fit region for an eligible run shall begin as the union of its source text
+fragments' measured areas and may expand into verified clear space as described
+below and in FR-2026-10-28-05. It shall not infer a semantic container. The
+complete replacement shall be one coherent text block. The adapter shall
 select the largest uniform output size that fits, but shall never increase
 above the largest source-fragment font size. If it cannot reliably determine
 that maximum size, it shall use the existing source-region fitting result
@@ -559,9 +562,10 @@ one-line replacement to that record, and make every later member non-painting
 by replacing its text with an empty string. It shall retain source record order,
 the anchor's position and effective transform, and all non-text EMF records.
 The source union and any expanded bound are fitting and measurement bounds, not
-a new rendering clip. The adapter shall remove `ETO_CLIPPED` from the rewritten
-anchor, including when the source anchor was clipped, and write the resulting
-bound as the anchor record bounds. A later clipped fragment that is made
+a new rendering clip, except where overlap protection is required by
+FR-2026-10-28-05. Otherwise, the adapter shall remove `ETO_CLIPPED` from the
+rewritten anchor, including when the source anchor was clipped, and write the
+resulting bound as the anchor record bounds. A later clipped fragment that is made
 non-painting need not retain its former clip rectangle.
 It may add and select one cloned GDI font based on the dominant typography only
 to apply the run's one uniform fitted scale. It shall clear any explicit
@@ -968,5 +972,143 @@ and missing geometry, nested-object attribution, font-record placement, and
 preservation of existing issue entries. They shall verify that debug-disabled
 runs omit the trace, that debug mode makes no additional provider calls, and
 that enabling the trace does not change the generated graphic.
+
+---
+
+## FR-2026-10-28-05
+
+| Property | Value |
+|----------|-------|
+| Title | Bound EMF text expansion by visible shapes |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request following EMF layout review |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-30-05, FR-2026-09-04-01, FR-2026-09-05-01, FR-2026-09-05-02, FR-2026-09-06-01, FR-2026-10-22-11, FR-2026-10-22-14, FR-2026-10-28-04 |
+
+### Description
+
+In both fitted layouts, the EMF adapter shall continue to allow eligible
+individual GDI text records and grouped visual lines to expand horizontally
+beyond their source text bounds into verified clear space. It shall limit the
+expanded fitting region by other visible text and graphics, active clips, and
+the EMF bounds. This requirement extends the obstacle rules of
+FR-2026-09-04-01, FR-2026-09-05-01, and FR-2026-09-05-02; it does not change
+their existing text eligibility, alignment, or grouping rules. It changes
+transform rules only for the overlap-prevention exception described below.
+As in the PDF widening rule, expansion shall not enlarge replacement text
+above its source font size; for a group, the existing maximum-source-fragment
+size limit applies.
+
+The adapter shall consider visible shape boundaries as well as recognised
+line segments. It shall account for their effective transforms, clipping,
+stroke extent, and paint order when comparing them in a common rendered
+coordinate space. A reliably recognised enclosing filled or outlined shape
+may provide a boundary for expansion when the source text area is inside its
+interior. Its background fill shall not itself prevent expansion inside that
+interior, but the fitting region shall not cross its boundary. Other visible
+text, rules, shapes, images, and clipping boundaries remain blockers, including
+content inside the same enclosing shape. The adapter shall not infer a table
+cell or other semantic container from insufficient geometry.
+
+For geometry that cannot be interpreted exactly, a reliable conservative
+rendered bound may be used as a blocker. Geometry proved disjoint from the
+candidate expansion corridor shall not prevent expansion. If relevant
+geometry, containment, clipping, or coordinate state cannot be resolved
+reliably, the adapter shall not expand through the uncertain area; when no
+safe expansion bound can be established, it shall fit to the original source
+text area or group union. It shall not use OCR, rasterization, or guessed
+shape boundaries to establish a clear corridor.
+
+For successfully fitted text with a reliably resolved rotation in 90-degree
+increments, including rotations combined with translation and positive scale,
+the adapter shall apply the overlap-prevention rule below when the geometry
+and clipping can be resolved reliably. Such rotated text remains fitted to
+its source bound and shall not expand. This supersedes the prohibition on
+neighbour avoidance in FR-2026-09-05-01 for overlap-prevention clipping only.
+Other rotations, reflection, and shear may retain the existing source-bound-only
+behaviour and may overlap if reliable overlap protection is disproportionately
+complex; they shall not be treated as direct-replacement fallbacks solely
+because overlap protection is unavailable.
+
+When a replacement cannot fit at the minimum permitted font size, it may
+remain visible beyond the fitting region and cross a shape boundary, but it
+shall not overlap other text, subject to the transform and direct-replacement
+exceptions. Regardless of the selected font size, the adapter shall clip the
+replacement when necessary to prevent overlap with other source or replacement
+text, preserving as much visible replacement as possible and respecting
+existing clipping. The complete replacement shall
+remain in the output text record even when part is clipped. This is an
+EMF-specific exception to FR-2026-10-22-11's visible-overflow rule and, for
+grouped text, to FR-2026-09-05-02's rule that the rewritten anchor has no new
+rendering clip. Text that does not need overlap protection shall not acquire
+an additional clip for this purpose.
+
+The no-overlap guarantee does not apply to a record replaced through the
+existing direct-replacement fallback, or to overlap involving such a record.
+That fallback remains unchanged and may overlap other text. When debug is
+enabled, it shall be reported in the diagnostic sidecar under
+FR-2026-09-06-01 and in the layout trace under FR-2026-10-28-04, so individual
+cases can be reviewed. Ordinary `preserve-source-formatting` replacement is
+unchanged.
+
+The same rules shall apply to standalone EMFs and nested EMFs through their
+existing handlers. They shall not alter source non-text drawing operations.
+Debug-enabled layout traces under
+FR-2026-10-28-04 shall identify the available limiting shape or other blocker,
+its coordinate space and location when known, why expansion was withheld, and
+whether replacement text was clipped to prevent text overlap.
+Tracing shall not change output or invoke providers again.
+
+### Rationale
+
+A text record's occupied bounds can be narrower than the available area.
+Expansion improves readability, but a corridor limited only by other text
+and selected line records can cross a visible enclosing shape or another
+graphic. Shape-aware limits retain useful expansion without assuming that
+unresolved geometry is empty.
+
+### Notes
+
+The PDF widening requirement FR-2026-08-30-05 provides the related clear
+corridor, conservative vector-bound, and enclosing filled-container rules.
+Its PDF-specific one-sided widening, 80% threshold, background evidence,
+and reflow rules do not automatically apply to EMF.
+
+Missing record bounds alone do not require direct replacement: the existing
+fitted path can measure the source text using the source font or Noto fallback.
+Uncertain shape geometry can also restrict expansion to the source area
+without necessarily preventing fitting. Direct replacement may still be used
+when fitting itself cannot be applied, for example after an invalid coordinate
+transform or an unsupported graphics-state restoration.
+
+Open implementation issue: overlap protection does not currently account for
+unchanged text records whose rendered bounds cannot be resolved, such as an
+`EMR_SMALLTEXTOUT` record without a bounding rectangle. A synthetic regression
+for this case is expected to fail. Clarification is needed on the required
+behaviour when the other text's location cannot be established reliably:
+whether to preserve the no-overlap guarantee with additional conservative
+clipping, permit overlap, or use a reported fallback.
+
+### Verification
+
+Automated tests shall use synthetic EMFs and providers only. They shall cover
+individual and grouped text; expansion inside filled and outlined enclosing
+shapes; adjacent shapes, lines, text, and images; stroke width, transforms,
+clips, and paint order; disjoint and intersecting conservatively bounded
+geometry; and unresolved geometry that prevents unsafe expansion. They shall
+verify that expansion does not enlarge source text; that minimum-size overflow
+may cross a shape but is clipped where needed to prevent overlap with source
+or replacement text; that overlap protection also applies at other font sizes;
+that the complete replacement remains in the output; and that text which does
+not need overlap protection does not acquire an additional clip. Tests
+shall cover nested EMF handling, structurally valid output, unchanged non-text
+operations, and debug trace attribution without additional provider calls.
+They shall verify that direct-replacement fallbacks are reported in debug
+sidecars and may overlap without changing their existing replacement path.
+They shall verify overlap protection for quarter turns with neighbouring
+text and existing clips, without expanding the rotated fitting region.
+On Windows, synthetic examples shall be rendered through GDI and normal GDI+
+playback to check fitted shape boundaries, overflow clipping, and quarter turns.
 
 ---
