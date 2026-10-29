@@ -80,6 +80,7 @@ def analyse_vector_text(
     target_language: str,
     *,
     document_text_layout: str = "preserve-source-formatting",
+    trace_emf_layout: bool = False,
 ) -> VectorDocument:
     """Parse a vector graphic and list its texts and images; replace nothing yet."""
     extension = vector_format(data, extension)
@@ -101,5 +102,6 @@ def analyse_vector_text(
         return analyse_emf(
             data, source_language=source_language,
             document_text_layout=document_text_layout, target_language=target_language,
+            trace_layout=trace_emf_layout,
         )
     raise ValueError(f"Unsupported vector graphic extension: {extension}")

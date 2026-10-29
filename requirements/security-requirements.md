@@ -463,3 +463,47 @@ Automated tests shall use synthetic configuration and a mocked Google client. Th
 The relevant Google documentation is the [Cloud Vision API Data Usage FAQ](https://docs.cloud.google.com/vision/docs/data-usage), [Cloud Vision OCR and regional endpoint documentation](https://docs.cloud.google.com/vision/docs/ocr), and [Cloud Vision authentication guide](https://docs.cloud.google.com/vision/docs/authentication). The location setting is shared with Translation, but Vision's API location identifier is the EU multi-region `eu`; Translation's regional location value is mapped to that EU endpoint.
 
 ---
+
+## SR-2026-10-28-01
+
+| Property | Value |
+|----------|-------|
+| Title | Support operator-provided trust for TLS interception |
+| Owner | KrisTC |
+| Status | Proposed |
+| Source | User request following container bootstrap TLS investigation |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-27-04, FR-2026-09-07-01, SR-2026-08-24-01, SR-2026-09-07-01, TR-2026-10-28-01 |
+
+### Description
+
+Provide a way for an operator to authorize an organisation-specific CA for
+container TLS connections when an organisation uses HTTPS interception. The
+CA shall be explicitly supplied or selected by the operator; the application
+shall not automatically trust a certificate presented by the network.
+Certificate chain and hostname verification shall remain enabled.
+
+The connection scope and configuration mechanism are not yet decided. The
+owner shall decide whether this applies only to runtime-asset bootstrap or also
+to other outbound TLS connections, including translation providers, before
+implementation begins. The owner shall also decide how the CA is supplied
+and how it interacts with the public trust store and the TLS clients in scope.
+This optional capability shall not be required for ordinary public-CA
+connections under TR-2026-10-28-01.
+
+### Rationale
+
+An intercepting proxy presents certificates issued by an organisation's CA,
+which is not necessarily in a public trust store. Trusting that CA permits the
+proxy to inspect traffic within the selected scope; if translation traffic is
+included, this can include document text. The operator must understand and
+authorize that trust boundary.
+
+### Verification
+
+Once the scope is agreed, automated tests shall use synthetic certificates
+and verify that an operator-authorized CA is accepted and an unauthorized CA
+is rejected for the TLS clients in scope. Tests shall not disable certificate
+or hostname verification or use customer certificates or credentials.
+
+---

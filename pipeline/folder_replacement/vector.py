@@ -82,6 +82,7 @@ def plan_vector(
     document = analyse_vector_text(
         data, extension, source_language, target_language,
         document_text_layout=document_text_layout,
+        trace_emf_layout=diagnostics is not None,
     )
     images: list[BitmapPlan | None] = []
     for index, image in enumerate(document.images()):
@@ -162,6 +163,7 @@ def append_vector_diagnostics(
     diagnostics: list[dict[str, object]],
     vector_result: VectorReplacementResult,
     package_part: str | None,
+    layout_trace: list[dict[str, object]] | None = None,
 ) -> None:
     """Attach vector-local diagnostic locations to their source-document report."""
     for entry in vector_result.diagnostics:
@@ -177,6 +179,10 @@ def append_vector_diagnostics(
         if location:
             diagnostic["location"] = location
         diagnostics.append(diagnostic)
+    if layout_trace is not None:
+        layout_trace.extend(
+            {**entry, "package_part": package_part} for entry in vector_result.emf_layout_trace
+        )
 
 
 def replace_vector_bytes(

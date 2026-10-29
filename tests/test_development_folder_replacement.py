@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -52,7 +53,11 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                 )
 
             self.assertEqual(0, result)
-            self.assertEqual(4, len(recorded_commands))
+            scenario_commands = [
+                command for command in recorded_commands
+                if command[1] == str(development.FOLDER_REPLACEMENT_SCRIPT)
+            ]
+            self.assertEqual(4, len(scenario_commands))
             revision_root = (
                 root
                 / "outputs/evaluations/dirdev/case/en-en/v1"
@@ -91,7 +96,7 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                     for result in manifest["results"]
                 )
             )
-            for command in recorded_commands:
+            for command in scenario_commands:
                 with self.subTest(command=command):
                     self.assertEqual(
                         str(development.FOLDER_REPLACEMENT_SCRIPT), command[1]
@@ -142,7 +147,8 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
                     ),
                 )
 
-            self.assertEqual(provider_count + 1, run_mock.call_count)
+            preview_calls = 2 if sys.platform == "win32" else 0
+            self.assertEqual(provider_count + 1 + preview_calls, run_mock.call_count)
             output_root = root / "outputs/evaluations/dirdev/case/en-en"
             self.assertTrue((output_root / "v1" / "manifest.json").is_file())
             self.assertTrue((output_root / "v2" / "manifest.json").is_file())
@@ -168,6 +174,48 @@ class DevelopmentFolderReplacementTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "first-ocr-second-psf"):
             development._validate_unique_scenario_output_names((first, second))
+
+    # Verifies FR-2026-10-28-02.
+    def test_preview_runs_once_on_windows_without_changing_replacement_status(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "sample-data" / "case" / "en").mkdir(parents=True)
+            commands: list[list[str]] = []
+
+            def invoke(command: list[str], **_: object) -> SimpleNamespace:
+                commands.append(command)
+                return SimpleNamespace(
+                    returncode=1 if command[1] == str(development.EMF_PREVIEW_SCRIPT) else 0
+                )
+
+            with (
+                patch.object(development, "PROJECT_ROOT", root),
+                patch("sys.platform", "win32"),
+                patch.object(development, "run", side_effect=invoke),
+            ):
+                result = development.main([
+                    "case/en", "--text-replacement", "identity", "--ocr", "no_ocr",
+                ])
+            self.assertEqual(0, result)
+            self.assertEqual(2, len(commands))
+            self.assertEqual(str(development.EMF_PREVIEW_SCRIPT), commands[-1][1])
+            self.assertEqual(root / "outputs/evaluations/dirdev/case/en-en/v1", Path(commands[-1][2]))
+
+    # Verifies FR-2026-10-28-02.
+    def test_preview_is_not_invoked_on_non_windows(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "sample-data" / "case" / "en").mkdir(parents=True)
+            with (
+                patch.object(development, "PROJECT_ROOT", root),
+                patch("sys.platform", "linux"),
+                patch.object(development, "run", return_value=SimpleNamespace(returncode=0)) as invoke,
+            ):
+                result = development.main([
+                    "case/en", "--text-replacement", "identity", "--ocr", "no_ocr",
+                ])
+            self.assertEqual(0, result)
+            self.assertEqual(1, invoke.call_count)
 
 
 if __name__ == "__main__":

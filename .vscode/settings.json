@@ -1,3 +1,10 @@
 {
-    "python.analysis.typeCheckingMode": "standard"
+    "python.analysis.typeCheckingMode": "standard",
+    "chat.tools.terminal.autoApprove": {
+        ".\\scripts\\run-tests.ps1": true,
+        "/^\\.\\\\run\\.ps1 scripts\\\\typecheck-python\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
 }

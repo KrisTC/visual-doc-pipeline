@@ -7,12 +7,17 @@ from io import BytesIO
 import os
 import struct
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 from pipeline.folder_replacement.planning import NESTED_DOCUMENT_MAX_DEPTH, plan_and_apply
 from pipeline.folder_replacement.vector import apply_vector, plan_vector
-from pipeline.text_replacement import TextUnit, TranslationEngine
+from pipeline.bounded_text_layout import noto_typefaces
+from pipeline.text_replacement import (
+    TextReplacementItem, TextReplacementRequest, TextReplacementResult, TextUnit,
+    TranslationEngine, replace_each,
+)
 from pipeline.vector_text import analyse_vector_text
 from pipeline.vector_text.common import VectorReplacementResult
 from pipeline.vector_text.emfplus import parse_comment
@@ -33,11 +38,16 @@ from test_vector_emfplus import (
     _emf_from_records,
     _emf_records,
     _plus_draw_string,
+    _plus_driver_string,
     _plus_font,
     _plus_header,
     _plus_records,
+    _plus_string_format,
 )
-from test_vector_text_replacer import _emf_is_structurally_valid, _wmf_with_text
+from test_vector_text_replacer import (
+    _emf_is_structurally_valid, _emf_move_to_record, _emf_text_clips, _emf_text_options,
+    _emf_texts, _emf_with_unclipped_text, _wmf_with_text,
+)
 
 _VERSION = 0xDBC01002
 _IMAGE_FLAGS = 5 << 8
@@ -287,6 +297,97 @@ class EmfPlusMetafileObjectTests(unittest.TestCase):
 
 
 class EmfPlusImagePlanTests(unittest.TestCase):
+    # Verifies FR-2026-10-29-01 and -02 for mixed text in a nested EMF+ metafile.
+    def test_nested_mixed_colour_line_uses_complete_plan(self) -> None:
+        inner = bytearray(_emf_from_records(_comment(
+            _plus_header() + _plus_font(0) + _plus_string_format(1)
+            + _plus_driver_string(0, "A", positions=((10.0, 28.0),), color=0xFF0000FF)
+            + _plus_draw_string(0, "B", x=20.0, y=10.0, width=20.0, color=0xFFFF0000, format_id=1)
+        )))
+        inner[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(inner)), object_id=3)
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout):
+                with (
+                    patch("pipeline.vector_text.emf.source_line_ascent", return_value=18.0),
+                    patch("pipeline.vector_text.emf.source_line_typeface", return_value=noto_typefaces()["sans-serif"]),
+                ):
+                    plan = plan_vector(
+                        source, ".emf", _EmptyOcrProvider(), "en", "en", document_text_layout=layout,
+                    )
+                engine = TranslationEngine(_RecordingProvider(), "en", "en")
+                with patch("pipeline.vector_text.emf.source_line_typeface", return_value=noto_typefaces()["sans-serif"]):
+                    result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+                self.assertEqual(0, engine.plan_misses)
+                self.assertEqual(2, result.replaced_text_items)
+                [obj] = _image_objects(result.data)
+                draws = [(flags, body) for kind, flags, body in _plus_records(obj.payload)
+                         if kind == _PLUS_DRAW_STRING]
+                self.assertEqual(["T:A ", "T:B"], [_draw_string_text(body) for _, body in draws])
+                self.assertEqual([0xFF0000FF, 0xFFFF0000], [struct.unpack_from("<I", body)[0] for _, body in draws])
+                self.assertTrue(_emf_is_structurally_valid(obj.payload))
+                self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05: nested EMFs keep shapes and add no overlap clip.
+    def test_nested_emf_preserves_shape_without_overlap_clip(self) -> None:
+        class _Provider(_RecordingProvider):
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                self.requests.append(request)
+                return replace_each(
+                    request,
+                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
+                )
+
+        rectangle = struct.pack("<IIiiii", 43, 24, -10, -10, 55, 30)
+        inner = bytearray(_emf_with_unclipped_text(
+            adjacent_text_left=60, transform_records=(rectangle,),
+            adjacent_preamble=(_emf_move_to_record(-100, -100),),
+        ))
+        inner[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(inner)), object_id=3)
+        diagnostics: list[dict[str, object]] = []
+        plan = plan_vector(
+            source, ".emf", _EmptyOcrProvider(), "en", "en",
+            document_text_layout="preserve-basic-layout", diagnostics=diagnostics,
+        )
+        provider = _Provider()
+        engine = TranslationEngine(provider, "en", "en")
+        result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+        [inner_object] = _image_objects(result.data)
+        self.assertEqual(["W" * 500, "i"], _emf_texts(inner_object.payload))
+        self.assertFalse(_emf_text_options(inner_object.payload)[0] & 4)
+        self.assertIn(rectangle, _emf_records(inner_object.payload))
+        self.assertTrue(_emf_is_structurally_valid(inner_object.payload))
+        self.assertEqual([3], result.emf_layout_trace[0]["nested_object_path"])
+        self.assertEqual(0, engine.plan_misses)
+
+    # Verifies FR-2026-10-28-03 and FR-2026-10-28-04.
+    def test_nested_emf_trace_preserves_object_path_and_local_offsets(self) -> None:
+        inner = bytearray(_emf_with_unclipped_text())
+        inner[40:44] = b" EMF"
+        middle = bytearray(_emf_with_image(_metafile_data(bytes(inner)), object_id=9))
+        middle[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(middle)), object_id=3)
+        diagnostics: list[dict[str, object]] = []
+        plan = plan_vector(
+            source, ".emf", _EmptyOcrProvider(), "en", "en",
+            document_text_layout="preserve-basic-layout", diagnostics=diagnostics,
+        )
+        engine = TranslationEngine(_RecordingProvider(), "en", "en")
+        result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+        [trace] = result.emf_layout_trace
+        self.assertEqual([3, 9], trace["nested_object_path"])
+        self.assertEqual("individual_fit", trace["outcome"])
+        [middle_object] = _image_objects(result.data)
+        [inner_object] = _image_objects(middle_object.payload)
+        font = trace["generated_font"]
+        self.assertIsInstance(font, dict)
+        assert isinstance(font, dict)
+        self.assertEqual(82, struct.unpack_from("<I", inner_object.payload, font["creation_record_offset"])[0])
+        self.assertEqual(37, struct.unpack_from("<I", inner_object.payload, font["selection_record_offset"])[0])
+        self.assertTrue(_emf_is_structurally_valid(inner_object.payload))
+        self.assertEqual(0, engine.plan_misses)
+
     # Verifies FR-2026-10-22-14: nested graphics get path-style units after the parent's.
     def test_nested_graphics_are_planned_as_child_units(self) -> None:
         source = _emf_with_image(_metafile_data(_nested_emf("inner")))

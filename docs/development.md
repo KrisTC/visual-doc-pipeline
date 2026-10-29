@@ -111,6 +111,42 @@ provider credentials, and verifies that PaddlePaddle can see a CUDA device.
 
 Evaluation artifacts are local and ignored by Git.
 
+### Windows EMF previews
+
+Debug-enabled fitted-layout processing records `emf_layout_trace` separately
+from issue entries in the per-document diagnostic sidecar. The trace can
+contain source and replacement text and must be treated as sensitive local
+output. Geometry with an unresolved coordinate space or transform is marked
+accordingly; the trace describes processing decisions, not viewer rendering.
+
+On Windows, the development folder-replacement runner automatically invokes
+`scripts/emf_preview.py` after completing its scenarios. It can also be run
+independently on a revision, a scenario directory, or one processed EMF:
+
+```powershell
+.\run.ps1 scripts\emf_preview.py PATH
+.\run.ps1 scripts\emf_preview.py PATH --dpi 200
+```
+
+The default resolution is 400 DPI. For a processed `file.emf` whose original
+is identified by its diagnostic sidecar, `file.emf.diff.png` shows the original
+and output side by side using GDI+ playback; `file.emf.diff.gdi.png` does the
+same using GDI. Without a matched original, `file.emf.preview.png` and
+`file.emf.preview.gdi.png` show only the processed file. EMF+ Only files have no
+GDI comparison. Existing generated sidecars are overwritten on rerun; an
+opposite-kind or unavailable sidecar left from an earlier run is reported as
+potentially stale. A Rich progress display shows overall and per-file progress.
+
+The script deliberately rejects graphics it cannot verify as self-contained,
+including external-resource records, unsupported comments (`MULTIFORMATS`,
+`WINDOWS_METAFILE`), nested WMF or deeply nested metafiles, texture brushes and
+unsupported pen options. A rejection is reported rather
+than rendering with a weakened external-resource boundary. Previews are local
+diagnostic aids, not guaranteed pixel-identical to Office. The safety limits
+are 128 MiB per input EMF and 25 million pixels for a two-panel comparison.
+Confidential-derived outputs and supporting artifacts must remain under
+`outputs/evaluations/`.
+
 Prepare OCR inputs from `sample-data/`:
 
 ```sh

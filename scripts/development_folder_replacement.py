@@ -34,6 +34,7 @@ from scripts.folder_replacement import (
 
 DEVELOPMENT_OUTPUT_ROOT = Path("outputs/evaluations/dirdev")
 FOLDER_REPLACEMENT_SCRIPT = PROJECT_ROOT / "scripts" / "folder_replacement.py"
+EMF_PREVIEW_SCRIPT = PROJECT_ROOT / "scripts" / "emf_preview.py"
 LANGUAGE_TAG_PATTERN = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 DOCUMENT_TEXT_LAYOUT_SHORT_NAMES = {
     "preserve-source-formatting": "psf",
@@ -178,6 +179,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_manifest(manifest_path, manifest)
         has_failure = has_failure or completed_process.returncode != 0
     if sys.platform == "win32":
+        try:
+            preview = run(
+                [sys.executable, str(EMF_PREVIEW_SCRIPT), str(revision_root)],
+                check=False,
+                cwd=PROJECT_ROOT,
+            )
+            if preview.returncode != 0:
+                print("Warning: EMF preview generation failed.", file=sys.stderr)
+        except OSError:
+            print("Warning: could not start EMF preview generation.", file=sys.stderr)
         review_path = revision_root.relative_to(PROJECT_ROOT).as_posix()
         print(f"Review translated output: .\\scripts\\office_review.ps1 -RevisionPath \"{review_path}\"")
     return 1 if has_failure else 0

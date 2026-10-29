@@ -92,6 +92,122 @@ from folder_replacement_test_support import (
 )
 
 class FolderReplacementVectorTests(FolderReplacementTestCase):
+    # Verifies FR-2026-09-06-01 and FR-2026-10-28-05.
+    def test_debug_emf_direct_fallback_reports_state_and_transform(self) -> None:
+        invalid_state = bytearray(_unclipped_emf_with_vertical_rule())
+        line_record = struct.pack("<IIii", 54, 16, 60, 30)
+        position = invalid_state.index(line_record) + len(line_record)
+        invalid_state[position:position] = struct.pack("<IIi", 34, 12, -1)
+        struct.pack_into("<I", invalid_state, 48, len(invalid_state))
+        struct.pack_into("<I", invalid_state, 52, struct.unpack_from("<I", invalid_state, 52)[0] + 1)
+        sources = {
+            "state": (bytes(invalid_state), "emf_fitted_layout_coordinate_state_unresolved"),
+            "transform": (_emf_with_transformed_degenerate_bounds(0.0, 0.0, 0.0, 1.0),
+                          "emf_fitted_layout_transform_invalid"),
+        }
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            for name, (source, _) in sources.items():
+                (input_root / f"{name}.emf").write_bytes(source)
+            providers = [_RecordingReplacementProvider(), _RecordingReplacementProvider()]
+            for enabled, provider in zip((False, True), providers):
+                result = self._run(
+                    input_root, root / ("debug" if enabled else "normal"),
+                    _EmptyOcrProvider(), provider,
+                    document_text_layout="preserve-basic-layout", diagnostics_enabled=enabled,
+                )
+                self.assertEqual([], result.failures)
+            self.assertEqual(providers[0].requests, providers[1].requests)
+            for name, (_, reason) in sources.items():
+                with self.subTest(case=name):
+                    self.assertEqual((root / "normal" / f"{name}.emf").read_bytes(),
+                                     (root / "debug" / f"{name}.emf").read_bytes())
+                    self.assertFalse((root / "normal" / f"{name}.emf.diagnostics.json").exists())
+                    report = json.loads((root / "debug" / f"{name}.emf.diagnostics.json").read_text("utf-8"))
+                    [entry] = report["entries"]
+                    self.assertEqual("layout_fallback", entry["kind"])
+                    self.assertEqual(reason, entry["reason_code"])
+                    self.assertEqual("Old", entry["source_text"])
+                    self.assertEqual("###", entry["replacement_text"])
+                    self.assertEqual(1, entry["location"]["record_index"])
+                    [trace] = report["emf_layout_trace"]
+                    self.assertEqual("fallback", trace["outcome"])
+                    self.assertEqual(reason, trace["fallback_reason"])
+
+    # Verifies FR-2026-10-28-04.
+    def test_debug_emf_trace_is_separate_and_does_not_change_processing(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            (input_root / "graphic.emf").write_bytes(_unclipped_emf_with_vertical_rule())
+            providers = [
+                _RecordingReplacementProvider(replacement_text="A considerably longer heading"),
+                _RecordingReplacementProvider(replacement_text="A considerably longer heading"),
+            ]
+            for enabled, provider in zip((False, True), providers):
+                result = self._run(
+                    input_root, root / ("debug" if enabled else "normal"),
+                    _EmptyOcrProvider(), provider,
+                    document_text_layout="preserve-basic-layout", diagnostics_enabled=enabled,
+                )
+                self.assertEqual([], result.failures)
+            self.assertEqual((root / "normal" / "graphic.emf").read_bytes(),
+                             (root / "debug" / "graphic.emf").read_bytes())
+            self.assertEqual(providers[0].requests, providers[1].requests)
+            self.assertFalse((root / "normal" / "graphic.emf.diagnostics.json").exists())
+            report = json.loads((root / "debug" / "graphic.emf.diagnostics.json").read_text("utf-8"))
+            self.assertEqual([], report["entries"])
+            [trace] = report["emf_layout_trace"]
+            self.assertEqual("individual_fit", trace["outcome"])
+            self.assertEqual("Old", trace["source_text"])
+            self.assertEqual([], trace["nested_object_path"])
+            grouping = trace["grouping"]
+            self.assertEqual("evaluated", grouping["status"])
+            self.assertTrue(grouping["clip_state_known"])
+            self.assertTrue(grouping["meta_clip_known"])
+            self.assertIsNone(grouping["previous_record_offset"])
+            self.assertIsNone(grouping["intervening_barrier"])
+            self.assertEqual(2, grouping["background_mode"])
+            self.assertEqual(0xFFFFFF, grouping["background_color"])
+            self.assertEqual([0, 0], grouping["text_justification"])
+            self.assertIsNone(grouping["text_paint_state_matches_previous"])
+            self.assertIsNone(grouping["emfplus_dc_state_matches_previous"])
+            self.assertNotIn("overlap_protection", trace)
+
+    # Verifies FR-2026-10-28-04: text paint state and its barrier survive sidecar serialization.
+    def test_debug_emf_trace_serializes_text_paint_boundary(self) -> None:
+        source = bytearray(_unclipped_emf_with_vertical_rule())
+        change = struct.pack("<III", 18, 12, 1)
+        second = _emf_exttextout_record("New", 40, 0, 60, 20)
+        source[-20:-20] = change + second
+        struct.pack_into("<I", source, 48, len(source))
+        struct.pack_into("<I", source, 52, struct.unpack_from("<I", source, 52)[0] + 2)
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            (input_root / "graphic.emf").write_bytes(source)
+            result = self._run(
+                input_root, root / "debug", _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="A longer replacement"),
+                document_text_layout="preserve-basic-layout", diagnostics_enabled=True,
+            )
+            self.assertEqual([], result.failures)
+            report = json.loads((root / "debug" / "graphic.emf.diagnostics.json").read_text("utf-8"))
+            first, second_trace = report["emf_layout_trace"]
+            self.assertEqual(2, first["grouping"]["background_mode"])
+            grouping = second_trace["grouping"]
+            self.assertEqual(1, grouping["background_mode"])
+            self.assertFalse(grouping["text_paint_state_matches_previous"])
+            self.assertIn("text_paint_state_mismatch", grouping["previous_boundary_reasons"])
+            self.assertEqual(
+                {"record_type": 18, "record_offset": source.index(change)},
+                grouping["intervening_barrier"],
+            )
+
     # Verifies FR-2026-08-03-05.
     def test_replaces_editable_svg_vector_text_without_ocr(self) -> None:
         with TemporaryDirectory() as temporary_directory:
@@ -203,7 +319,7 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
                 emf_data = archive.read("ppt/media/vector.emf")
             self.assertEqual((0.0, 0.0), _emf_text_scales(emf_data)[0])
             font_heights = _emf_font_heights(emf_data)
-            self.assertLess(abs(font_heights[0]), abs(font_heights[1]))
+            self.assertLess(abs(font_heights[1]), abs(font_heights[0]))
 
     # Verifies FR-2026-09-06-01.
     def test_pptx_emf_fallbacks_write_local_record_diagnostics(self) -> None:
@@ -261,6 +377,10 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
                 "ppt/media/sheared.emf",
                 fallbacks["emf_fitted_layout_sheared_transform_unavailable"]["location"]["package_part"],
             )
+            traces = {item["package_part"]: item for item in sidecar["emf_layout_trace"]}
+            self.assertEqual(set(traces), {"ppt/media/rotated.emf", "ppt/media/sheared.emf"})
+            self.assertEqual("fallback", traces["ppt/media/rotated.emf"]["outcome"])
+            self.assertEqual(rotated["reason_code"], traces["ppt/media/rotated.emf"]["fallback_reason"])
 
 class _LongReplacementProvider:
     def replace(self, request: TextReplacementRequest) -> TextReplacementResult:

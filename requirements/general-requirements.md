@@ -2162,3 +2162,170 @@ Owner decisions: no synchronous scrolling and no page or sheet navigation sync; 
 Verification is limited to a compile check (PowerShell parse of the script). The owner performs interactive testing.
 
 ---
+
+## FR-2026-10-28-02
+
+| Property | Value |
+|----------|-------|
+| Title | Generate Windows EMF comparison previews for development scenarios |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-28 |
+| Related Requirements | FR-2026-08-22-01, FR-2026-09-02-04, FR-2026-08-27-06, FR-2026-10-22-10, SR-2026-08-03-02 |
+
+### Description
+
+The project shall provide a separate Windows-only development script named
+`scripts/emf_preview.py` that renders standalone EMF files for local review.
+The script shall be runnable manually with a development revision directory,
+one scenario directory, or one processed EMF file. A directory input shall
+discover standalone EMF files recursively. It shall not extract or process
+graphics embedded in Office files or nested metafiles.
+
+After all scenarios in a `scripts/development_folder_replacement.py` run have
+finished, the development runner shall invoke the preview script once for the
+revision on Windows. The runner shall not invoke it on other platforms. Preview
+problems shall be reported as warnings and shall not change the replacement
+run's exit status. Existing scenario execution, manifest and Office-review
+behaviour shall remain unchanged.
+
+The preview script shall attempt to pair each processed EMF with its original
+using reliable source information, including the processed file's existing
+`.diagnostics.json` sidecar when present. Translated or collision-renamed
+filenames shall not be assumed to match their original filenames. If a valid
+original cannot be identified and read, the script shall render the processed
+EMF by itself rather than guessing a pair.
+
+The script shall use separate Windows-native playback paths for traditional
+GDI and for normal GDI+ metafile playback. For a successfully paired file
+`file.emf`, it shall write these PNG sidecars beside the processed file. Each
+sidecar name keeps the full EMF filename including its extension, as the
+diagnostics sidecar does (`file.emf.diagnostics.json`), and the GDI variants
+follow their GDI+ counterparts when sorted:
+
+- `file.emf.diff.png`: original on the left and processed on the right, using
+  GDI+ playback for both.
+- `file.emf.diff.gdi.png`: original on the left and processed on the right,
+  using GDI playback for both.
+
+For an unpaired processed file, it shall instead write `file.emf.preview.png`
+for GDI+ playback and `file.emf.preview.gdi.png` for GDI playback. Each contains only
+the processed rendering. A paired comparison shall have no gap or label
+occupying additional pixels: each half shall use the same canvas size and the
+PNG shall be exactly twice that width and the same height. It is a visual
+side-by-side comparison, not a pixel-difference image.
+
+The default resolution shall be 400 DPI. The manual command shall accept a
+positive DPI override and document it in its help. A paired comparison shall
+derive its canvas dimensions from the original's frame at the selected DPI and
+render both files against the same canvas, scale and background. An unpaired
+preview shall derive its dimensions from the processed file. Invalid dimensions
+or a render that cannot be allocated safely shall be reported as a failure,
+not presented as a successful blank preview.
+
+GDI+ normal playback shall be used for ordinary EMF, EMF+ Dual and EMF+ Only
+files; it is not asserted to be an isolated rendering of only EMF+ records.
+GDI playback shall be used for ordinary EMF and the GDI fallback in EMF+ Dual.
+Where a file has no complete GDI representation, including EMF+ Only, the
+script shall report the GDI comparison or preview as unavailable rather than
+write a misleading blank GDI image. This expected unavailability is not a
+rendering failure. A failure in one playback path shall be reported and shall
+not prevent the other path or later files from being attempted.
+
+The script shall show Rich progress, using the shared live display used by the
+other command-line tools: an overall bar counting EMF files and a current-file
+bar showing the file name and its two playback paths. Warnings shall be shown
+without corrupting the display, and the final summary line is unchanged.
+The script shall overwrite existing sidecars at the names it generates on a
+rerun, without modifying either EMF or its diagnostics. If a sidecar from a
+different pairing state or unavailable playback path remains from an earlier
+run, the script shall warn that it may be stale rather than silently presenting
+it as a current result. The standalone command shall return a nonzero status
+for invalid arguments or actual rendering failures; an unmatched source or an
+expected unavailable GDI path alone shall not be a failure. A manual
+invocation on a non-Windows platform shall fail with a clear message.
+
+The tool shall operate locally and shall not send graphics to an external
+service or dereference external resources referenced by a graphic, as required
+by SR-2026-08-03-02. Before native playback, it shall check the complete
+metafile, including contained objects, and reject it with a clear warning when
+it cannot establish that playback is self-contained. It shall not play a
+partially verified file or omit unsafe records to produce a success-shaped
+preview. It shall not write source text or image content to its messages.
+Confidential-derived previews and any temporary or supporting artifacts shall
+remain under the gitignored `outputs/evaluations/` tree and shall follow the
+repository's confidential-sample rule.
+
+The check shall classify rather than reject every non-`EMF+` comment record
+(`EMR_COMMENT`). In addition to `EMF+` comments, it shall accept, when well
+formed with a size consistent with the declared data size: a public comment
+(identifier `GDIC`) of type begin-group (`0x00000002`) or end-group
+(`0x00000003`), and a private comment with any other identifier. It shall
+reject every other public comment type, including `EMR_COMMENT_MULTIFORMATS` and
+`EMR_COMMENT_WINDOWS_METAFILE`, any unrecognised public type and any malformed
+comment. An `EMF+` image object that is a nested EMF (including EMF+ Dual and
+EMF+ Only) shall be accepted only if the nested metafile passes the same
+complete check, to a nesting depth of 4; a nested WMF, a deeper nesting or any
+image object that cannot be parsed shall be rejected. An `EMF+` pen with custom
+start or end line caps shall be accepted when the size-prefixed cap data lies
+within the pen object. A rejection warning shall
+say which rule applied, without including comment data, a description string or
+other graphic content.
+
+### Rationale
+
+EMF viewing and comparison are slow and vary across applications. A
+side-by-side preview next to each development output makes it quicker to
+inspect the replacement, while separate GDI and GDI+ playback exposes
+differences between a dual metafile's viewing paths. A separate command also
+allows existing development outputs to be reviewed without rerunning
+replacement.
+
+### Notes
+
+The previews are a diagnostic aid and are not guaranteed to match Office
+pixel-for-pixel. Fonts, DPI and Windows rendering behaviour can affect the
+result. The owner can export an Office-embedded EMF as a standalone file for
+manual review; direct Office-package extraction is outside this requirement.
+
+Native metafile playback can encounter records that reference external
+resources, such as a colour profile filename. Rejecting files that cannot be
+verified as self-contained may exclude some legitimate files, but preserves
+SR-2026-08-03-02 without requiring an isolated playback environment.
+
+`EMR_COMMENT` is a generic container for non-drawing data, not itself a way to
+reference an external resource; risk depends on what playback does with it.
+`EMF+` comments are interpreted by GDI+, so they are parsed in depth. A group
+marker names no resource, and playback ignores a private comment with an
+unrecognised identifier. `MULTIFORMATS` and `WINDOWS_METAFILE` hold alternate
+copies of a picture (possibly EPS) that screen playback is not expected to draw;
+they stay rejected as unverifiable until shown to be harmless. Classification
+uses only the 4-byte identifier and, for `GDIC`, the 4-byte type. The assumption
+that playback ignores unknown private comments should be confirmed on Windows.
+Office-produced EMF+ files commonly embed a nested EMF as an image object, so
+nested EMFs are verified recursively rather than rejected outright.
+
+### Verification
+
+Automated tests shall use synthetic graphics and temporary directories only.
+They shall verify manual file, scenario and revision selection; original
+pairing through diagnostic metadata, including a renamed output; unpaired
+fallback names and single-image output; 400 DPI default and the manual DPI override;
+exact comparison dimensions and left/right ordering; both playback paths;
+explicit GDI unavailability for EMF+ Only; per-path failure isolation; sidecar
+overwrite and stale-sidecar warnings; non-Windows behaviour; and Windows-only
+runner invocation without changing replacement exit status. They shall verify
+that a metafile with an external-resource reference or an object whose safety
+cannot be established is rejected before native playback. Tests shall also verify
+that group and private comments are accepted and rendered; that
+`MULTIFORMATS`, `WINDOWS_METAFILE`, an unrecognised public type and an
+inconsistent-size comment are rejected with a warning that omits comment
+content; and that a nested EMF image object is accepted when its content
+passes the check and rejected when it holds an unsafe record, is a WMF or
+exceeds the nesting limit. Windows rendering
+tests shall use synthetic ordinary EMF, EMF+ Dual with distinguishable GDI and
+GDI+ content, and EMF+ Only fixtures to verify the actual playback paths, not
+only mocked calls. The owner may separately verify prepared local examples.
+
+---

@@ -68,6 +68,7 @@ from pipeline.text_replacement import (
     TextReplacementItem,
     TextReplacementProvider,
     TextUnit,
+    needs_english_span_space,
     replace_text,
 )
 
@@ -4921,7 +4922,7 @@ def _pdf_replace_paint_spans(
         for run, span in zip(runs, replacement_spans, strict=True)
     ]
     for span_index in range(1, len(replacement_spans)):
-        if _pdf_needs_english_span_space(
+        if needs_english_span_space(
             replacement_spans[span_index - 1].text,
             replacement_spans[span_index].text,
             target_language,
@@ -4967,21 +4968,6 @@ def _pdf_apply_paint_span_bullet_overrides(
         if prefix != replacement_span.text:
             mapped_spans[span_index] = replace(replacement_span, text=prefix)
     return mapped_spans
-
-
-def _pdf_needs_english_span_space(
-    previous: str, current: str, target_language: str
-) -> bool:
-    """Keep independently translated English words from running together."""
-    return bool(
-        target_language.split("-", 1)[0].casefold() == "en"
-        and previous
-        and current
-        and not previous[-1].isspace()
-        and not current[0].isspace()
-        and previous[-1].isalnum()
-        and current[0].isalnum()
-    )
 
 
 def _pdf_fitted_paint_lines(
