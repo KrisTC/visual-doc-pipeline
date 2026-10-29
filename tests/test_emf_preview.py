@@ -21,7 +21,9 @@ from pipeline.vector_text import replace_vector_text
 from pipeline.vector_text.common import ETO_CLIPPED
 from pipeline.vector_text.emf import analyse_emf
 from pipeline.vector_text.emfplus import PlusRecord
+from pipeline.vector_text.emfplus import parse_driver_string
 from scripts import emf_preview as preview
+from test_vector_emfplus import _font_objects, _plus_records
 from test_vector_text_replacer import _emf_text_clips, _emf_text_options
 
 
@@ -30,9 +32,15 @@ class RectF(ctypes.Structure):
                 ("width", ctypes.c_float), ("height", ctypes.c_float)]
 
 
+class PointF(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_float), ("y", ctypes.c_float)]
+
+
 def _record_metafile(
     kind: int, *, blue_fallback: bool = False, blue_plus: bool = False, draw_pen: bool = False,
-    gdi_text: bool = False,
+    gdi_text: bool = False, plus_text: bool = False, plus_draw_text: bool = False,
+    simple_plus_format: bool = False, mixed_plus_order: str = "", plus_clip: bool = False,
+    vertical_separator: bool = False,
 ) -> bytes:
     gdi = ctypes.WinDLL("gdi32")
     user = ctypes.WinDLL("user32")
@@ -56,6 +64,35 @@ def _record_metafile(
         ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
     ]
     plus.GdipDeleteBrush.argtypes = [ctypes.c_void_p]
+    plus.GdipCreateFontFamilyFromName.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    plus.GdipCreateFont.argtypes = [
+        ctypes.c_void_p, ctypes.c_float, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    plus.GdipGetCellAscent.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_ushort),
+    ]
+    plus.GdipGetEmHeight.argtypes = [
+        ctypes.c_void_p, ctypes.c_int, ctypes.POINTER(ctypes.c_ushort),
+    ]
+    plus.GdipDrawDriverString.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+        ctypes.POINTER(PointF), ctypes.c_int, ctypes.c_void_p,
+    ]
+    plus.GdipSetClipRect.argtypes = [
+        ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_int,
+    ]
+    plus.GdipCreateStringFormat.argtypes = [
+        ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+    ]
+    plus.GdipDrawString.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int, ctypes.c_void_p,
+        ctypes.POINTER(RectF), ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    plus.GdipDeleteStringFormat.argtypes = [ctypes.c_void_p]
+    plus.GdipDeleteFont.argtypes = [ctypes.c_void_p]
+    plus.GdipDeleteFontFamily.argtypes = [ctypes.c_void_p]
     plus.GdipDeleteGraphics.argtypes = [ctypes.c_void_p]
     plus.GdipCreatePen1.argtypes = [
         wintypes.DWORD, ctypes.c_float, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
@@ -92,11 +129,55 @@ def _record_metafile(
         check(plus.GdipRecordMetafile(dc, kind, ctypes.byref(rect), 6, None, ctypes.byref(metafile)))
         check(plus.GdipGetImageGraphicsContext(metafile, ctypes.byref(graphics)))
         check(plus.GdipCreateSolidFill(0xFFFF0000, ctypes.byref(brush)))
-        check(plus.GdipFillRectangleI(graphics, brush, 0, 0, 80, 80))
-        if draw_pen:
+        if not plus_text and not plus_draw_text and not mixed_plus_order:
+            check(plus.GdipFillRectangleI(graphics, brush, 0, 0, 80, 80))
+        if plus_text or plus_draw_text or mixed_plus_order:
+            if plus_clip:
+                check(plus.GdipSetClipRect(graphics, 0, 0, 50, 50, 0))
+            family = ctypes.c_void_p()
+            font = ctypes.c_void_p()
+            blue_brush = ctypes.c_void_p()
+            check(plus.GdipCreateFontFamilyFromName("Arial", None, ctypes.byref(family)))
+            check(plus.GdipCreateFont(family, 20, 0, 2, ctypes.byref(font)))
+            check(plus.GdipCreateSolidFill(0xFF0000FF, ctypes.byref(blue_brush)))
+            if plus_draw_text or mixed_plus_order:
+                string_format = ctypes.c_void_p()
+                check(plus.GdipCreateStringFormat(0, 0, ctypes.byref(string_format)))
+                first_rect = RectF(10, 10, 20, 30)
+                second_rect = RectF(30, 10, 20, 30)
+                if mixed_plus_order:
+                    ascent, em_height = ctypes.c_ushort(), ctypes.c_ushort()
+                    check(plus.GdipGetCellAscent(family, 0, ctypes.byref(ascent)))
+                    check(plus.GdipGetEmHeight(family, 0, ctypes.byref(em_height)))
+                    baseline = 10 + 20 * ascent.value / em_height.value
+                    if mixed_plus_order == "draw-first":
+                        check(plus.GdipDrawString(graphics, "A", 1, font, ctypes.byref(first_rect), string_format, blue_brush))
+                        point = PointF(30, baseline)
+                        check(plus.GdipDrawDriverString(graphics, "B", 1, font, brush, ctypes.byref(point), 1, None))
+                    else:
+                        point = PointF(10, baseline)
+                        check(plus.GdipDrawDriverString(graphics, "A", 1, font, blue_brush, ctypes.byref(point), 1, None))
+                        second_rect.x = 20
+                        check(plus.GdipDrawString(graphics, "B", 1, font, ctypes.byref(second_rect), string_format, brush))
+                else:
+                    check(plus.GdipDrawString(graphics, "A", 1, font, ctypes.byref(first_rect), string_format, blue_brush))
+                    check(plus.GdipDrawString(graphics, "B", 1, font, ctypes.byref(second_rect), string_format, brush))
+                check(plus.GdipDeleteStringFormat(string_format))
+            else:
+                first = PointF(10, 30)
+                second = PointF(20, 30)
+                check(plus.GdipDrawDriverString(graphics, "A", 1, font, blue_brush, ctypes.byref(first), 1, None))
+                check(plus.GdipDrawDriverString(graphics, "B", 1, font, brush, ctypes.byref(second), 1, None))
+            check(plus.GdipDeleteBrush(blue_brush))
+            check(plus.GdipDeleteFont(font))
+            check(plus.GdipDeleteFontFamily(family))
+        if draw_pen or vertical_separator:
             pen = ctypes.c_void_p()
             check(plus.GdipCreatePen1(0xFF000000, 2.0, 2, ctypes.byref(pen)))
-            check(plus.GdipDrawLineI(graphics, pen, 0, 70, 80, 70))
+            if vertical_separator:
+                check(plus.GdipDrawLineI(graphics, pen, 18, 0, 18, 50))
+            else:
+                check(plus.GdipDrawLineI(graphics, pen, 0, 70, 80, 70))
             check(plus.GdipDeletePen(pen))
         if gdi_text:
             text_dc = ctypes.c_void_p()
@@ -119,18 +200,20 @@ def _record_metafile(
             raise RuntimeError("Could not read synthetic metafile.")
         data = bytearray(result.raw)
         struct.pack_into("<iiii", data, 24, 0, 0, 2540, 2540)
-        if blue_fallback or blue_plus:
+        if blue_fallback or blue_plus or simple_plus_format:
             offset = 0
             while offset < len(data):
                 record_type, size = struct.unpack_from("<II", data, offset)
                 if blue_fallback and record_type == 39:
                     struct.pack_into("<I", data, offset + 16, 0x00FF0000)
-                if blue_plus and record_type == 70 and data[offset + 12 : offset + 16] == b"EMF+":
+                if record_type == 70 and data[offset + 12 : offset + 16] == b"EMF+":
                     position = offset + 16
                     while position < offset + size:
                         plus_type, flags, plus_size, _ = struct.unpack_from("<HHII", data, position)
-                        if plus_type == 0x400A and flags & 0x8000:
+                        if blue_plus and plus_type == 0x400A and flags & 0x8000:
                             struct.pack_into("<I", data, position + 12, 0xFF0000FF)
+                        if simple_plus_format and plus_type == 0x4008 and (flags >> 8) & 0x7F == 7:
+                            struct.pack_into("<fffI", data, position + 12 + 36, 0.0, 0.0, 1.0, 0)
                         position += plus_size
                 offset += size
         return bytes(data)
@@ -143,7 +226,10 @@ def _record_metafile(
         plus.GdiplusShutdown(token)
 
 
-def _record_gdi_overlap_metafile(*, rotated: bool, opaque: bool = False, angle: int = 90) -> bytes:
+def _record_gdi_overlap_metafile(
+    *, rotated: bool, opaque: bool = False, angle: int = 90, grouped_colours: bool = False,
+    meta_clip: bool = False, temporary_paint_state: bool = False, translated_group: bool = False,
+) -> bytes:
     class _Transform(ctypes.Structure):
         _fields_ = [(name, ctypes.c_float) for name in ("m11", "m12", "m21", "m22", "dx", "dy")]
 
@@ -176,6 +262,9 @@ def _record_gdi_overlap_metafile(*, rotated: bool, opaque: bool = False, angle: 
     gdi.SetWorldTransform.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Transform)]
     gdi.SaveDC.argtypes = [ctypes.c_void_p]
     gdi.RestoreDC.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi.IntersectClipRect.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+    gdi.SetMetaRgn.argtypes = [ctypes.c_void_p]
+    gdi.SelectClipRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     gdi.GetEnhMetaFileBits.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
     gdi.DeleteEnhMetaFile.argtypes = [ctypes.c_void_p]
     gdi.DeleteObject.argtypes = [ctypes.c_void_p]
@@ -187,7 +276,26 @@ def _record_gdi_overlap_metafile(*, rotated: bool, opaque: bool = False, angle: 
         raise RuntimeError("Could not create synthetic GDI metafile.")
     old_font = gdi.SelectObject(dc, font)
     gdi.SetBkMode(dc, 1)
-    if rotated:
+    if meta_clip:
+        if not gdi.IntersectClipRect(dc, 0, 0, 48, 50) or not gdi.SetMetaRgn(dc) or not gdi.SelectClipRgn(dc, None):
+            raise RuntimeError("Could not set a synthetic GDI metaregion.")
+    if grouped_colours:
+        if translated_group:
+            matrix = _Transform(1, 0, 0, 1, 12, 0)
+            if not gdi.SetGraphicsMode(dc, 2) or not gdi.SetWorldTransform(dc, ctypes.byref(matrix)):
+                raise RuntimeError("Could not transform synthetic GDI text.")
+        gdi.SetTextColor(dc, 0x00FF0000)
+        if not gdi.TextOutW(dc, 10, 15, "A", 1):
+            raise RuntimeError("Could not draw synthetic first colour span.")
+        if temporary_paint_state:
+            if not gdi.SaveDC(dc) or not gdi.SetBkMode(dc, 2) or not gdi.RestoreDC(dc, -1):
+                raise RuntimeError("Could not restore synthetic GDI paint state.")
+        if translated_group:
+            matrix = _Transform(1, 0, 0, 1, 22, 0)
+            if not gdi.SetWorldTransform(dc, ctypes.byref(matrix)):
+                raise RuntimeError("Could not reposition synthetic GDI text.")
+        neighbour = (10 if translated_group else 20, 15)
+    elif rotated:
         gdi.SaveDC(dc)
         gdi.SetGraphicsMode(dc, 2)
         transforms = {
@@ -213,13 +321,72 @@ def _record_gdi_overlap_metafile(*, rotated: bool, opaque: bool = False, angle: 
         if not gdi.TextOutW(dc, 10, 15, "Old", 3):
             raise RuntimeError("Could not draw synthetic text.")
         neighbour = (80, 15)
-    gdi.MoveToEx(dc, -100, -100, None)
+    if not grouped_colours:
+        gdi.MoveToEx(dc, -100, -100, None)
     gdi.SetTextColor(dc, 0x000000FF)
-    if not gdi.TextOutW(dc, *neighbour, "Value", 5):
+    if not gdi.TextOutW(
+        dc, *neighbour, "B" if grouped_colours else "Value", 1 if grouped_colours else 5
+    ):
         raise RuntimeError("Could not draw synthetic neighbouring text.")
     gdi.SelectObject(dc, old_font)
     handle = gdi.CloseEnhMetaFile(dc)
     gdi.DeleteObject(font)
+    user.ReleaseDC(None, screen)
+    if not handle:
+        raise RuntimeError("Could not close synthetic GDI metafile.")
+    try:
+        size = gdi.GetEnhMetaFileBits(handle, 0, None)
+        buffer = ctypes.create_string_buffer(size)
+        if gdi.GetEnhMetaFileBits(handle, size, buffer) != size:
+            raise RuntimeError("Could not read synthetic GDI metafile.")
+        return buffer.raw
+    finally:
+        gdi.DeleteEnhMetaFile(handle)
+
+
+def _record_gdi_mixed_size_metafile() -> bytes:
+    """Record a red 20-pixel span followed by a blue 15-pixel span on one baseline."""
+    gdi = ctypes.WinDLL("gdi32")
+    user = ctypes.WinDLL("user32")
+    user.GetDC.argtypes = [ctypes.c_void_p]
+    user.GetDC.restype = ctypes.c_void_p
+    user.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.CreateEnhMetaFileW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.POINTER(wintypes.RECT), ctypes.c_wchar_p]
+    gdi.CreateEnhMetaFileW.restype = ctypes.c_void_p
+    gdi.CloseEnhMetaFile.argtypes = [ctypes.c_void_p]
+    gdi.CloseEnhMetaFile.restype = ctypes.c_void_p
+    gdi.CreateFontW.argtypes = [ctypes.c_int] * 5 + [wintypes.DWORD] * 8 + [wintypes.LPCWSTR]
+    gdi.CreateFontW.restype = ctypes.c_void_p
+    gdi.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    gdi.SelectObject.restype = ctypes.c_void_p
+    gdi.TextOutW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, wintypes.LPCWSTR, ctypes.c_int]
+    gdi.SetBkMode.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    gdi.SetTextAlign.argtypes = [ctypes.c_void_p, wintypes.UINT]
+    gdi.SetTextColor.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    gdi.GetEnhMetaFileBits.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
+    gdi.DeleteEnhMetaFile.argtypes = [ctypes.c_void_p]
+    gdi.DeleteObject.argtypes = [ctypes.c_void_p]
+    screen = user.GetDC(None)
+    frame = wintypes.RECT(0, 0, 2540, 2540)
+    dc = gdi.CreateEnhMetaFileW(screen, None, ctypes.byref(frame), None)
+    large = gdi.CreateFontW(-20, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Arial")
+    small = gdi.CreateFontW(-15, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0, "Arial")
+    if not dc or not large or not small:
+        raise RuntimeError("Could not create synthetic GDI metafile.")
+    old_font = gdi.SelectObject(dc, large)
+    gdi.SetBkMode(dc, 1)
+    gdi.SetTextAlign(dc, 24)
+    gdi.SetTextColor(dc, 0x000000FF)
+    if not gdi.TextOutW(dc, 5, 40, "A", 1):
+        raise RuntimeError("Could not draw synthetic large span.")
+    gdi.SelectObject(dc, small)
+    gdi.SetTextColor(dc, 0x00FF0000)
+    if not gdi.TextOutW(dc, 22, 40, "B", 1):
+        raise RuntimeError("Could not draw synthetic small span.")
+    gdi.SelectObject(dc, old_font)
+    handle = gdi.CloseEnhMetaFile(dc)
+    gdi.DeleteObject(large)
+    gdi.DeleteObject(small)
     user.ReleaseDC(None, screen)
     if not handle:
         raise RuntimeError("Could not close synthetic GDI metafile.")
@@ -256,6 +423,475 @@ def _with_comments(metafile: bytes, comments: list[bytes]) -> bytes:
 
 @unittest.skipUnless(sys.platform == "win32", "Requires Windows GDI+.")
 class EmfPreviewTests(unittest.TestCase):
+    # Verifies FR-2026-10-29-01 for a natively drawn column separator.
+    def test_native_emfplus_separator_splits_text_lines(self) -> None:
+        source = _record_metafile(4, plus_text=True, vertical_separator=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        )
+        self.assertEqual(("A", "B"), document.texts())
+        self.assertTrue(any(kind == 0x400D for kind, _, _ in _plus_records(source)))
+
+    # Verifies FR-2026-10-29-01 and -02 with a natively recorded rectangular clip.
+    def test_grouped_emfplus_line_retains_native_clip(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_metafile(4, plus_text=True, plus_clip=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        )
+        self.assertEqual(("A", "B", "A", "B"), document.texts())
+        result = document.apply(lambda text: text, _Provider())
+        self.assertEqual(
+            [record for record in _plus_records(source) if record[0] == 0x4032],
+            [record for record in _plus_records(result.data) if record[0] == 0x4032],
+        )
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                image = renderer.render(metafile, (metafile.width, metafile.height), "gdiplus")
+                assert image is not None
+                raw = image.convert("RGB").tobytes()
+                pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+                self.assertFalse(any(
+                    (r > g + 40 and r > b + 40) or (b > g + 40 and b > r + 40)
+                    for i, (r, g, b) in enumerate(pixels) if i % image.width > 68
+                ))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-29-01 and -02 for mixed natively recorded EMF+ text.
+    def test_mixed_emfplus_records_render_as_one_line(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        for order in ("draw-first", "driver-first"):
+            with self.subTest(order=order):
+                source = _record_metafile(4, mixed_plus_order=order)
+                document = analyse_emf(
+                    source, source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout",
+                )
+                self.assertEqual(("A", "B", "A", "B"), document.texts())
+                result = document.apply(lambda text: text, _Provider())
+                records = _plus_records(result.data)
+                draws = [(flags, body) for kind, flags, body in records if kind == 0x401C]
+                self.assertEqual(2, len(draws))
+                self.assertEqual(draws[0][0] & 0xFF, draws[1][0] & 0xFF)
+                self.assertFalse(any(kind == 0x4036 for kind, _, _ in records))
+                with TemporaryDirectory() as temporary:
+                    original_path = Path(temporary) / "original.emf"
+                    original_path.write_bytes(source)
+                    path = Path(temporary) / "synthetic.emf"
+                    path.write_bytes(result.data)
+                    original = preview._checked_metafile(original_path, 192)
+                    metafile = preview._checked_metafile(path, 192)
+                    renderer = preview.WindowsRenderer()
+                    try:
+                        before = renderer.render(original, (original.width, original.height), "gdiplus")
+                        image = renderer.render(metafile, (metafile.width, metafile.height), "gdiplus")
+                        assert before is not None and image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        blue = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                                if b > g + 40 and b > r + 40]
+                        red = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                               if r > g + 40 and r > b + 40]
+                        self.assertTrue(blue)
+                        self.assertTrue(red)
+                        self.assertLess(max(x for x, _ in blue), min(x for x, _ in red))
+                        self.assertLessEqual(abs(max(y for _, y in blue) - max(y for _, y in red)), 2)
+                        original_raw = before.convert("RGB").tobytes()
+                        original_pixels = zip(original_raw[0::3], original_raw[1::3], original_raw[2::3], strict=True)
+                        source_bottom = max(
+                            i // before.width for i, (r, g, b) in enumerate(original_pixels)
+                            if b > g + 40 and b > r + 40
+                        )
+                        self.assertLessEqual(abs(source_bottom - max(y for _, y in blue)), 2)
+                    finally:
+                        renderer.close()
+
+    # Verifies FR-2026-10-29-01 and FR-2026-10-22-11 in native overflow playback.
+    def test_grouped_emfplus_minimum_size_overflow_respects_active_clip(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "M" * 60, "B": "M" * 8}[text], 1.0)
+                )
+
+        for clipped in (False, True):
+            with self.subTest(clipped=clipped):
+                source = _record_metafile(4, plus_draw_text=True, plus_clip=clipped)
+                document = analyse_emf(
+                    source, source_language="en", target_language="en",
+                    document_text_layout="preserve-basic-layout",
+                )
+                result = document.apply(lambda text: text, _Provider())
+                draws = [(flags, body) for kind, flags, body in _plus_records(result.data) if kind == 0x401C]
+                self.assertEqual(2, len(draws))
+                self.assertAlmostEqual(1.0, _font_objects(result.data)[draws[0][0] & 0xFF][0], places=5)
+                self.assertFalse(any(item["reason_code"] == "emfplus_group_fit_unsuccessful"
+                                     for item in result.diagnostics))
+                with TemporaryDirectory() as temporary:
+                    path = Path(temporary) / "synthetic.emf"
+                    path.write_bytes(result.data)
+                    metafile = preview._checked_metafile(path, 192)
+                    renderer = preview.WindowsRenderer()
+                    try:
+                        image = renderer.render(metafile, (384, 384), "gdiplus")
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        blue = [i % image.width for i, (r, g, b) in enumerate(pixels)
+                                if b > g + 40 and b > r + 40]
+                        red = [i % image.width for i, (r, g, b) in enumerate(pixels)
+                               if r > g + 40 and r > b + 40]
+                        self.assertTrue(blue)
+                        if clipped:
+                            self.assertFalse(red)
+                        else:
+                            self.assertTrue(red)
+                            self.assertLess(max(blue), min(red))
+                            self.assertGreater(struct.unpack_from("<f", draws[1][1], 12)[0], 50.0)
+                    finally:
+                        renderer.close()
+
+    # Verifies FR-2026-10-29-02 with natively recorded DrawString records.
+    def test_grouped_emfplus_draw_string_colours_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_metafile(4, plus_draw_text=True, simple_plus_format=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        )
+        self.assertEqual(("A", "B", "A", "B"), document.texts())
+        result = document.apply(lambda text: text, _Provider())
+        draws = [(flags, body) for kind, flags, body in _plus_records(result.data) if kind == 0x401C]
+        self.assertEqual(2, len(draws))
+        self.assertEqual(draws[0][0] & 0xFF, draws[1][0] & 0xFF)
+        fitted_size = _font_objects(result.data)[draws[0][0] & 0xFF][0]
+        self.assertGreater(fitted_size, 6.0)
+        self.assertLessEqual(fitted_size, 20.0)
+        self.assertLess(struct.unpack_from("<f", draws[0][1], 12)[0], struct.unpack_from("<f", draws[1][1], 12)[0])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                image = renderer.render(metafile, (metafile.width, metafile.height), "gdiplus")
+                assert image is not None
+                raw = image.convert("RGB").tobytes()
+                pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+                blue = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                        if b > g + 40 and b > r + 40]
+                red = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                       if r > g + 40 and r > b + 40]
+                self.assertLess(max(x for x, _ in blue), min(x for x, _ in red))
+                self.assertLessEqual(abs(max(y for _, y in blue) - max(y for _, y in red)), 2)
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-29-01 and -02 with the native default margins and tracking.
+    def test_native_default_draw_string_format_is_grouped(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_metafile(4, plus_draw_text=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        )
+        self.assertEqual(("A", "B", "A", "B"), document.texts())
+        result = document.apply(lambda text: text, _Provider())
+        draws = [(flags, body) for kind, flags, body in _plus_records(result.data) if kind == 0x401C]
+        self.assertEqual(2, len(draws))
+        self.assertEqual(draws[0][0] & 0xFF, draws[1][0] & 0xFF)
+        fitted_size = _font_objects(result.data)[draws[0][0] & 0xFF][0]
+        self.assertGreater(fitted_size, 6.0)
+        self.assertLessEqual(fitted_size, 20.0)
+        with TemporaryDirectory() as temporary:
+            original_path = Path(temporary) / "original.emf"
+            original_path.write_bytes(source)
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            original = preview._checked_metafile(original_path, 192)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                before = renderer.render(original, (original.width, original.height), "gdiplus")
+                image = renderer.render(metafile, (metafile.width, metafile.height), "gdiplus")
+                assert before is not None and image is not None
+                raw = image.convert("RGB").tobytes()
+                pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+                blue = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                        if b > g + 40 and b > r + 40]
+                red = [(i % image.width, i // image.width) for i, (r, g, b) in enumerate(pixels)
+                       if r > g + 40 and r > b + 40]
+                self.assertLess(max(x for x, _ in blue), min(x for x, _ in red))
+                self.assertLessEqual(abs(max(y for _, y in blue) - max(y for _, y in red)), 2)
+                original_raw = before.convert("RGB").tobytes()
+                original_pixels = zip(original_raw[0::3], original_raw[1::3], original_raw[2::3], strict=True)
+                source_blue_bottom = max(
+                    i // before.width for i, (r, g, b) in enumerate(original_pixels)
+                    if b > g + 40 and b > r + 40
+                )
+                self.assertLessEqual(abs(source_blue_bottom - max(y for _, y in blue)), 2)
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-29-02 using a natively recorded EMF+ driver string.
+    def test_grouped_emfplus_colours_are_visible_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_metafile(4, plus_text=True)
+        source_driver = next(body for kind, _flags, body in _plus_records(source) if kind == 0x4036)
+        parsed_driver = parse_driver_string(source_driver)
+        assert parsed_driver is not None
+        self.assertEqual(((10.0, 30.0),), parsed_driver.positions)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout",
+        )
+        self.assertEqual(("A", "B", "A", "B"), document.texts())
+        result = document.apply(lambda text: text, _Provider())
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                image = renderer.render(metafile, (metafile.width, metafile.height), "gdiplus")
+                assert image is not None
+                raw = image.convert("RGB").tobytes()
+                pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-29-02 using normal Windows GDI and GDI+ playback.
+    def test_grouped_gdi_colours_are_visible_in_both_playback_paths(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_gdi_overlap_metafile(rotated=False, grouped_colours=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        )
+        self.assertIn("A", document.texts())
+        self.assertIn("B", document.texts())
+        result = document.apply(lambda text: text, _Provider())
+        self.assertEqual("group_anchor", result.emf_layout_trace[0]["outcome"])
+        self.assertEqual("suppressed_group_member", result.emf_layout_trace[1]["outcome"])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        image = renderer.render(metafile, (metafile.width, metafile.height), mode)
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                        self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-09-05-02 and FR-2026-10-29-02 through native playback.
+    def test_grouped_gdi_restored_paint_state_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0)
+                )
+
+        source = _record_gdi_overlap_metafile(
+            rotated=False, grouped_colours=True, temporary_paint_state=True,
+        )
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(lambda text: text, _Provider())
+        first, second = result.emf_layout_trace
+        self.assertEqual("group_anchor", first["outcome"])
+        self.assertEqual("suppressed_group_member", second["outcome"])
+        grouping = second["grouping"]
+        assert isinstance(grouping, dict)
+        self.assertTrue(grouping["text_paint_state_matches_previous"])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        image = renderer.render(metafile, (metafile.width, metafile.height), mode)
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                        self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-09-05-01 and FR-2026-10-29-02 through native playback.
+    def test_grouped_translated_gdi_text_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(
+                    request, lambda text: TextReplacementItem(
+                        "Blue" if text.strip() == "A" else "Red", 1.0,
+                    ),
+                )
+
+        source = _record_gdi_overlap_metafile(
+            rotated=False, grouped_colours=True, translated_group=True,
+        )
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(lambda text: text, _Provider())
+        first, second = result.emf_layout_trace
+        self.assertEqual("group_anchor", first["outcome"])
+        self.assertEqual("suppressed_group_member", second["outcome"])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        image = renderer.render(metafile, (metafile.width, metafile.height), mode)
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        self.assertTrue(any(r > g + 40 and r > b + 40 for r, g, b in pixels))
+                        self.assertTrue(any(b > g + 40 and b > r + 40 for r, g, b in pixels))
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-10-29-03 through native playback: mixed-size spans stay on one
+    # baseline, with the smaller span still visibly smaller.
+    def test_mixed_size_gdi_spans_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem("HH", 1.0))
+
+        source = _record_gdi_mixed_size_metafile()
+        result = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        ).apply(lambda text: text, _Provider())
+        first, second = result.emf_layout_trace
+        self.assertEqual("group_anchor", first["outcome"])
+        self.assertEqual("suppressed_group_member", second["outcome"])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        image = renderer.render(metafile, (metafile.width, metafile.height), mode)
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        red = [i // image.width for i, (r, g, b) in enumerate(pixels)
+                               if r > g + 40 and r > b + 40]
+                        blue = [i // image.width for i, (r, g, b) in enumerate(pixels)
+                                if b > g + 40 and b > r + 40]
+                        self.assertTrue(red)
+                        self.assertTrue(blue)
+                        self.assertLess(max(blue) - min(blue), max(red) - min(red))
+                        self.assertLessEqual(abs(max(blue) - max(red)), 2)
+            finally:
+                renderer.close()
+
+    # Verifies FR-2026-09-05-02 and FR-2026-10-28-05 with a native GDI metaregion.
+    def test_grouped_gdi_metaregion_is_preserved_in_native_playback(self) -> None:
+        class _Provider:
+            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
+                return replace_each(request, lambda text: TextReplacementItem({"A": "Blue", "B": "Red"}[text], 1.0))
+
+        source = _record_gdi_overlap_metafile(rotated=False, grouped_colours=True, meta_clip=True)
+        document = analyse_emf(
+            source, source_language="en", target_language="en",
+            document_text_layout="preserve-basic-layout", trace_layout=True,
+        )
+        result = document.apply(lambda text: text, _Provider())
+        first, second = result.emf_layout_trace
+        self.assertEqual("group_anchor", first["outcome"])
+        self.assertEqual("suppressed_group_member", second["outcome"])
+        grouping = first["grouping"]
+        assert isinstance(grouping, dict)
+        self.assertTrue(grouping["meta_clip_known"])
+        self.assertEqual([0, 0, 48, 50], grouping["meta_clip_bounds"])
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "synthetic.emf"
+            path.write_bytes(result.data)
+            metafile = preview._checked_metafile(path, 192)
+            device_width, _, millimetres_width, _ = struct.unpack_from("<iiii", source, 72)
+            frame_left, _, frame_right, _ = struct.unpack_from("<iiii", source, 24)
+            clip_x = metafile.width * millimetres_width * 100 * 48 / (device_width * (frame_right - frame_left))
+            renderer = preview.WindowsRenderer()
+            try:
+                for mode in ("gdi", "gdiplus"):
+                    with self.subTest(mode=mode):
+                        image = renderer.render(metafile, (metafile.width, metafile.height), mode)
+                        assert image is not None
+                        raw = image.convert("RGB").tobytes()
+                        pixels = list(zip(raw[0::3], raw[1::3], raw[2::3], strict=True))
+                        blue = [i % image.width for i, (r, g, b) in enumerate(pixels)
+                                if b > g + 40 and b > r + 40]
+                        red = [i % image.width for i, (r, g, b) in enumerate(pixels)
+                               if r > g + 40 and r > b + 40]
+                        self.assertTrue(blue)
+                        self.assertTrue(red)
+                        self.assertLessEqual(max(blue + red), clip_x + 1)
+            finally:
+                renderer.close()
+
     # Verifies FR-2026-10-28-05.
     def test_fitted_text_stays_inside_shape_in_both_playback_paths(self) -> None:
         class _Provider:
@@ -304,8 +940,8 @@ class EmfPreviewTests(unittest.TestCase):
             finally:
                 renderer.close()
 
-    # Verifies FR-2026-10-28-05.
-    def test_opaque_background_survives_overlap_clip_in_both_playback_paths(self) -> None:
+    # Verifies FR-2026-10-28-05: opaque text keeps its background and gains no overlap clip.
+    def test_opaque_background_is_preserved_in_both_playback_paths(self) -> None:
         class _Provider:
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
                 return replace_each(
@@ -320,7 +956,7 @@ class EmfPreviewTests(unittest.TestCase):
         ).apply(lambda text: text, _Provider())
         options = _emf_text_options(result.data)
         self.assertTrue(options[0] & 2)
-        self.assertTrue(options[1] & ETO_CLIPPED)
+        self.assertFalse(options[0] & ETO_CLIPPED)
         self.assertEqual((5, 5, 75, 50), _emf_text_clips(result.data)[0])
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "synthetic.emf"
@@ -344,69 +980,6 @@ class EmfPreviewTests(unittest.TestCase):
                         self.assertEqual(before.getpixel(sample), after.getpixel(sample))
             finally:
                 renderer.close()
-
-    # Verifies FR-2026-10-28-05.
-    def test_overlap_clips_render_in_both_windows_playback_paths(self) -> None:
-        class _Provider:
-            def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
-                return replace_each(
-                    request,
-                    lambda text: TextReplacementItem("W" * 500 if text == "Old" else "i", 1.0),
-                )
-
-        for angle in (0, 90, 180, 270):
-            with self.subTest(angle=angle), TemporaryDirectory() as temporary:
-                source = _record_gdi_overlap_metafile(rotated=bool(angle), angle=angle or 90)
-                result = analyse_emf(
-                    source, source_language="en", target_language="en",
-                    document_text_layout="preserve-basic-layout", trace_layout=True,
-                ).apply(lambda text: text, _Provider())
-                self.assertTrue(_emf_text_options(result.data)[0] & ETO_CLIPPED)
-                self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
-                clip = _emf_text_clips(result.data)[0]
-                if not angle:
-                    decisions = result.emf_layout_trace[0]["fit_decisions"]
-                    assert isinstance(decisions, dict)
-                    self.assertLessEqual(decisions["expansion_limits"]["right"], 70)
-                modified = bytearray(result.data)
-                offset = 0
-                while offset < len(modified):
-                    kind, size = struct.unpack_from("<II", modified, offset)
-                    if kind == 84:
-                        options = struct.unpack_from("<I", modified, offset + 52)[0]
-                        struct.pack_into("<I", modified, offset + 52, options & ~ETO_CLIPPED)
-                        break
-                    offset += size
-                path = Path(temporary) / "synthetic.emf"
-                path.write_bytes(result.data)
-                metafile = preview._checked_metafile(path, 192)
-                device_width, device_height, millimetres_width, millimetres_height = struct.unpack_from("<iiii", source, 72)
-                frame_left, frame_top, frame_right, frame_bottom = struct.unpack_from("<iiii", source, 24)
-                scale_x = metafile.width * millimetres_width * 100 / (device_width * (frame_right - frame_left))
-                scale_y = metafile.height * millimetres_height * 100 / (device_height * (frame_bottom - frame_top))
-                unclipped = preview.Metafile(bytes(modified), metafile.width, metafile.height)
-                renderer = preview.WindowsRenderer()
-                try:
-                    for mode in ("gdi", "gdiplus"):
-                        with self.subTest(mode=mode):
-                            size = (metafile.width, metafile.height)
-                            protected = renderer.render(metafile, size, mode)
-                            overflowing = renderer.render(unclipped, size, mode)
-                            assert protected is not None and overflowing is not None
-                            difference = ImageChops.difference(protected, overflowing)
-                            bounds = difference.getbbox()
-                            self.assertIsNotNone(bounds)
-                            assert bounds is not None
-                            if angle == 90:
-                                self.assertGreaterEqual(bounds[1], (clip[2] + 10) * scale_y - 3, (clip, bounds))
-                            elif angle == 180:
-                                self.assertLessEqual(bounds[2], (95 - clip[2]) * scale_x + 3, (clip, bounds))
-                            elif angle == 270:
-                                self.assertLessEqual(bounds[3], (95 - clip[2]) * scale_y + 3, (clip, bounds))
-                            else:
-                                self.assertGreaterEqual(bounds[0], clip[2] * scale_x - 3, (clip, bounds))
-                finally:
-                    renderer.close()
 
     # Verifies FR-2026-10-28-03.
     def test_fitted_gdi_font_is_used_by_both_windows_playback_paths(self) -> None:
@@ -747,4 +1320,3 @@ class EmfPreviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

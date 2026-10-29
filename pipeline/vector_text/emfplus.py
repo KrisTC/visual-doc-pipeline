@@ -27,6 +27,7 @@ FONT_STYLE_BOLD = 1
 FONT_STYLE_ITALIC = 2
 _CMAP_LOOKUP = 1
 _VERTICAL = 2
+_REALIZED_ADVANCE = 4
 _RECORD_HEADER_SIZE = 12
 _DRAW_STRING_FIXED_SIZE = 28
 _DRIVER_STRING_FIXED_SIZE = 16
@@ -195,21 +196,23 @@ def parse_driver_string(data: bytes) -> DriverString | None:
     if len(data) < _DRIVER_STRING_FIXED_SIZE:
         return None
     _brush, options, has_matrix, glyph_count = struct.unpack_from("<IIII", data, 0)
-    glyphs_end = _DRIVER_STRING_FIXED_SIZE + (-(-2 * glyph_count // 4) * 4)
+    if has_matrix not in (0, 1):
+        return None
+    glyphs_end = _DRIVER_STRING_FIXED_SIZE + 2 * glyph_count
     matrix_size = _MATRIX_SIZE if has_matrix == 1 else 0
     positions_size = len(data) - glyphs_end - matrix_size
-    if positions_size < 0 or (glyph_count == 0 and positions_size):
-        return None
-    if positions_size >= 8 * glyph_count:
-        position_count, single_position = glyph_count, False
-    elif positions_size == 8:
+    if 8 * glyph_count <= positions_size <= 8 * glyph_count + 3:
+        position_count = glyph_count
+        single_position = glyph_count == 1 and bool(options & _REALIZED_ADVANCE)
+    elif glyph_count and 8 <= positions_size <= 11:
         position_count, single_position = 1, True
     else:
         return None
     positions = tuple(
         struct.unpack_from("<ff", data, glyphs_end + (8 * index)) for index in range(position_count)
     )
-    matrix = data[len(data) - matrix_size :] if matrix_size else b""
+    matrix_start = glyphs_end + 8 * position_count
+    matrix = data[matrix_start : matrix_start + matrix_size] if matrix_size else b""
     return DriverString(data[:8], options, glyph_count, positions, single_position, matrix)
 
 
@@ -237,7 +240,7 @@ def driver_string_with_text(driver: DriverString, text: str, advances: list[floa
             x += advance
     body = bytearray(driver.head)
     body += struct.pack("<II", 1 if driver.matrix else 0, count)
-    body += _pad4(encoded)
+    body += encoded
     for x, y in positions:
         body += struct.pack("<ff", x, y)
     body += driver.matrix

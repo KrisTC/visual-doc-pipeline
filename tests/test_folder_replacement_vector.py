@@ -164,6 +164,49 @@ class FolderReplacementVectorTests(FolderReplacementTestCase):
             self.assertEqual("individual_fit", trace["outcome"])
             self.assertEqual("Old", trace["source_text"])
             self.assertEqual([], trace["nested_object_path"])
+            grouping = trace["grouping"]
+            self.assertEqual("evaluated", grouping["status"])
+            self.assertTrue(grouping["clip_state_known"])
+            self.assertTrue(grouping["meta_clip_known"])
+            self.assertIsNone(grouping["previous_record_offset"])
+            self.assertIsNone(grouping["intervening_barrier"])
+            self.assertEqual(2, grouping["background_mode"])
+            self.assertEqual(0xFFFFFF, grouping["background_color"])
+            self.assertEqual([0, 0], grouping["text_justification"])
+            self.assertIsNone(grouping["text_paint_state_matches_previous"])
+            self.assertIsNone(grouping["emfplus_dc_state_matches_previous"])
+            self.assertNotIn("overlap_protection", trace)
+
+    # Verifies FR-2026-10-28-04: text paint state and its barrier survive sidecar serialization.
+    def test_debug_emf_trace_serializes_text_paint_boundary(self) -> None:
+        source = bytearray(_unclipped_emf_with_vertical_rule())
+        change = struct.pack("<III", 18, 12, 1)
+        second = _emf_exttextout_record("New", 40, 0, 60, 20)
+        source[-20:-20] = change + second
+        struct.pack_into("<I", source, 48, len(source))
+        struct.pack_into("<I", source, 52, struct.unpack_from("<I", source, 52)[0] + 2)
+        with TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            input_root = root / "input"
+            input_root.mkdir()
+            (input_root / "graphic.emf").write_bytes(source)
+            result = self._run(
+                input_root, root / "debug", _EmptyOcrProvider(),
+                _RecordingReplacementProvider(replacement_text="A longer replacement"),
+                document_text_layout="preserve-basic-layout", diagnostics_enabled=True,
+            )
+            self.assertEqual([], result.failures)
+            report = json.loads((root / "debug" / "graphic.emf.diagnostics.json").read_text("utf-8"))
+            first, second_trace = report["emf_layout_trace"]
+            self.assertEqual(2, first["grouping"]["background_mode"])
+            grouping = second_trace["grouping"]
+            self.assertEqual(1, grouping["background_mode"])
+            self.assertFalse(grouping["text_paint_state_matches_previous"])
+            self.assertIn("text_paint_state_mismatch", grouping["previous_boundary_reasons"])
+            self.assertEqual(
+                {"record_type": 18, "record_offset": source.index(change)},
+                grouping["intervening_barrier"],
+            )
 
     # Verifies FR-2026-08-03-05.
     def test_replaces_editable_svg_vector_text_without_ocr(self) -> None:

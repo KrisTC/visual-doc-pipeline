@@ -401,8 +401,7 @@ transformed replacement glyph bounds shall remain inside that source bound.
 This source-bound-only fitting rule applies to rotated, reflected, sheared,
 and otherwise non-axis-aligned transforms. It shall not expand the bound,
 infer free space, or attempt neighbour or line-obstacle avoidance for those
-transforms, except for overlap-prevention clipping as specified by
-FR-2026-10-28-05.
+transforms.
 
 For an orientation-preserving, axis-aligned transform consisting only of
 translation and positive horizontal and vertical scale, the adapter shall
@@ -424,8 +423,7 @@ result.  It shall not rasterize the EMF, convert text to outlines, reorder
 painting operations, alter unrelated graphics state, or replace a text record
 more than once.  A replacement that cannot fit at the one-pixel minimum shall
 remain visible as overflow according to the shared fitted-layout rule, rather
-than silently clipping or retaining source-language text, subject to the
-overlap-prevention exception in FR-2026-10-28-05.
+than silently clipping or retaining source-language text.
 
 The adapter shall retain the direct `preserve-source-formatting` replacement
 fallback for a singular or non-finite matrix, an unresolvable map or graphics
@@ -521,8 +519,8 @@ evidence is present:
 - the leftmost member, which will be the output anchor, is left-aligned;
 - the rendered source baselines match within one rendered logical unit, the
   member rectangles are in strictly increasing left-to-right order, and each
-  adjacent pair touches, overlaps, or has a horizontal gap no greater than four
-  rendered source-line heights; and
+  adjacent pair touches, overlaps, or has a horizontal gap within the limit
+  of FR-2026-10-29-01 (originally four rendered source-line heights); and
 - the source rectangle of every member can be derived as FR-2026-09-04-01 and
   FR-2026-09-05-01 define. Source-glyph measurement is
   required only when the record has neither an explicit clip nor a
@@ -562,8 +560,7 @@ one-line replacement to that record, and make every later member non-painting
 by replacing its text with an empty string. It shall retain source record order,
 the anchor's position and effective transform, and all non-text EMF records.
 The source union and any expanded bound are fitting and measurement bounds, not
-a new rendering clip, except where overlap protection is required by
-FR-2026-10-28-05. Otherwise, the adapter shall remove `ETO_CLIPPED` from the
+a new rendering clip. The adapter shall remove `ETO_CLIPPED` from the
 rewritten anchor, including when the source anchor was clipped, and write the
 resulting bound as the anchor record bounds. A later clipped fragment that is made
 non-painting need not retain its former clip rectangle.
@@ -625,6 +622,11 @@ tracking, save/restore, and expansion caps. Tests shall verify that individual a
 run expansion stop at valid EMF header bounds and do not expand when those
 bounds are invalid or unreconcilable. Tests shall verify valid generated EMFs and unchanged
 `preserve-source-formatting` output.
+
+When implemented, FR-2026-10-29-01 supersedes the different-font and
+different-size grouping and same-encoding verification above, and
+FR-2026-10-29-02 supersedes the one-request, dominant-colour, and single-anchor
+output expectations for multi-colour groups.
 
 When an otherwise eligible member selects a stock or otherwise unresolved GDI
 font rather than a directly-created `LOGFONTW` record, both fitted modes shall
@@ -951,6 +953,19 @@ it shall include the existing stable reason when available. The trace shall
 describe processing decisions and emitted records, not claim that a viewer
 actually rendered a particular font or that the glyphs fit.
 
+For GDI grouping, the trace shall identify member and anchor eligibility,
+whether the selected clipping region and metaregion are known, their bounds
+when known, the reason and originating record offset for unresolved clipping,
+the source font weight and inline style, the source visual bounds in device
+coordinates when known, and the preceding candidate and
+applicable boundary reasons. It shall report the effective background mode,
+background colour, and text justification at each candidate and whether those
+values match the preceding candidate, and whether the EMF+ graphics state
+applicable to an `EmfPlusGetDC` interval is compatible with the preceding
+candidate. For a barrier introduced by an intervening record,
+the trace shall identify the first such record by type and byte offset. When
+grouping was not evaluated, the trace shall give the available reason.
+
 The trace shall be generated only when debug diagnostics are enabled, shall
 not invoke an OCR or replacement provider again, and shall not change the
 processed graphic or translation results. It shall follow the local sidecar
@@ -969,7 +984,9 @@ subsequent reviews without a separate investigation script.
 Automated tests shall use synthetic graphics and providers only. They shall
 verify individual fits, grouped and suppressed records, fallbacks, explicit
 and missing geometry, nested-object attribution, font-record placement, and
-preservation of existing issue entries. They shall verify that debug-disabled
+rationale for GDI grouping boundaries and clipping state, the originating
+intervening record for a barrier, and preservation of existing issue entries.
+They shall verify that debug-disabled
 runs omit the trace, that debug mode makes no additional provider calls, and
 that enabling the trace does not change the generated graphic.
 
@@ -994,8 +1011,7 @@ beyond their source text bounds into verified clear space. It shall limit the
 expanded fitting region by other visible text and graphics, active clips, and
 the EMF bounds. This requirement extends the obstacle rules of
 FR-2026-09-04-01, FR-2026-09-05-01, and FR-2026-09-05-02; it does not change
-their existing text eligibility, alignment, or grouping rules. It changes
-transform rules only for the overlap-prevention exception described below.
+their existing text eligibility, alignment, or grouping rules.
 As in the PDF widening rule, expansion shall not enlarge replacement text
 above its source font size; for a group, the existing maximum-source-fragment
 size limit applies.
@@ -1020,44 +1036,30 @@ safe expansion bound can be established, it shall fit to the original source
 text area or group union. It shall not use OCR, rasterization, or guessed
 shape boundaries to establish a clear corridor.
 
-For successfully fitted text with a reliably resolved rotation in 90-degree
-increments, including rotations combined with translation and positive scale,
-the adapter shall apply the overlap-prevention rule below when the geometry
-and clipping can be resolved reliably. Such rotated text remains fitted to
-its source bound and shall not expand. This supersedes the prohibition on
-neighbour avoidance in FR-2026-09-05-01 for overlap-prevention clipping only.
-Other rotations, reflection, and shear may retain the existing source-bound-only
-behaviour and may overlap if reliable overlap protection is disproportionately
-complex; they shall not be treated as direct-replacement fallbacks solely
-because overlap protection is unavailable.
+The adapter shall rely on fitting, not clipping, to keep replacement text
+readable. It shall not add or narrow a rendering clip to prevent replacement
+text from overlapping other source or replacement text, for any transform or
+font size. Text with a rotation, reflection, or shear remains fitted to its
+source bound and shall not expand. When a replacement cannot fit at the
+minimum permitted font size, it shall remain visible beyond the fitting region
+according to FR-2026-10-22-11 and may cross a shape boundary or overlap other
+text. Existing source clipping and the clipping rules of FR-2026-09-05-02 and
+FR-2026-10-22-11 are unchanged.
 
-When a replacement cannot fit at the minimum permitted font size, it may
-remain visible beyond the fitting region and cross a shape boundary, but it
-shall not overlap other text, subject to the transform and direct-replacement
-exceptions. Regardless of the selected font size, the adapter shall clip the
-replacement when necessary to prevent overlap with other source or replacement
-text, preserving as much visible replacement as possible and respecting
-existing clipping. The complete replacement shall
-remain in the output text record even when part is clipped. This is an
-EMF-specific exception to FR-2026-10-22-11's visible-overflow rule and, for
-grouped text, to FR-2026-09-05-02's rule that the rewritten anchor has no new
-rendering clip. Text that does not need overlap protection shall not acquire
-an additional clip for this purpose.
-
-The no-overlap guarantee does not apply to a record replaced through the
-existing direct-replacement fallback, or to overlap involving such a record.
-That fallback remains unchanged and may overlap other text. When debug is
-enabled, it shall be reported in the diagnostic sidecar under
-FR-2026-09-06-01 and in the layout trace under FR-2026-10-28-04, so individual
-cases can be reviewed. Ordinary `preserve-source-formatting` replacement is
+Another visible text record whose rendered location cannot be established
+reliably shall prevent expansion through the uncertain area, but shall not by
+itself prevent fitting or grouping or cause a direct-replacement fallback.
+The existing direct-replacement fallback remains unchanged for its other
+causes, may overlap other text, and when debug is enabled shall be reported
+in the diagnostic sidecar under FR-2026-09-06-01 and in the layout trace under
+FR-2026-10-28-04. Ordinary `preserve-source-formatting` replacement is
 unchanged.
 
 The same rules shall apply to standalone EMFs and nested EMFs through their
 existing handlers. They shall not alter source non-text drawing operations.
 Debug-enabled layout traces under
 FR-2026-10-28-04 shall identify the available limiting shape or other blocker,
-its coordinate space and location when known, why expansion was withheld, and
-whether replacement text was clipped to prevent text overlap.
+its coordinate space and location when known, and why expansion was withheld.
 Tracing shall not change output or invoke providers again.
 
 ### Rationale
@@ -1082,13 +1084,9 @@ without necessarily preventing fitting. Direct replacement may still be used
 when fitting itself cannot be applied, for example after an invalid coordinate
 transform or an unsupported graphics-state restoration.
 
-Open implementation issue: overlap protection does not currently account for
-unchanged text records whose rendered bounds cannot be resolved, such as an
-`EMR_SMALLTEXTOUT` record without a bounding rectangle. A synthetic regression
-for this case is expected to fail. Clarification is needed on the required
-behaviour when the other text's location cannot be established reliably:
-whether to preserve the no-overlap guarantee with additional conservative
-clipping, permit overlap, or use a reported fallback.
+An unchanged text record may have no reliably resolvable rendered bounds, for
+example an `EMR_SMALLTEXTOUT` record without a bounding rectangle. That
+uncertainty limits expansion but does not prevent fitting.
 
 ### Verification
 
@@ -1098,17 +1096,320 @@ shapes; adjacent shapes, lines, text, and images; stroke width, transforms,
 clips, and paint order; disjoint and intersecting conservatively bounded
 geometry; and unresolved geometry that prevents unsafe expansion. They shall
 verify that expansion does not enlarge source text; that minimum-size overflow
-may cross a shape but is clipped where needed to prevent overlap with source
-or replacement text; that overlap protection also applies at other font sizes;
-that the complete replacement remains in the output; and that text which does
-not need overlap protection does not acquire an additional clip. Tests
+remains visible; and that fitted text near or overlapping other text acquires
+no clip for overlap prevention. Tests
 shall cover nested EMF handling, structurally valid output, unchanged non-text
 operations, and debug trace attribution without additional provider calls.
 They shall verify that direct-replacement fallbacks are reported in debug
 sidecars and may overlap without changing their existing replacement path.
-They shall verify overlap protection for quarter turns with neighbouring
-text and existing clips, without expanding the rotated fitting region.
+They shall verify that text whose neighbour cannot be located reliably is
+still fitted, and grouped where eligible, without expanding into the
+uncertain area. They shall verify that quarter-turned text is fitted to its
+source bound without expanding.
 On Windows, synthetic examples shall be rendered through GDI and normal GDI+
-playback to check fitted shape boundaries, overflow clipping, and quarter turns.
+playback to check fitted shape boundaries, overflow, and quarter turns.
+
+---
+
+## FR-2026-10-29-01
+
+| Property | Value |
+|----------|-------|
+| Title | Fit same-font and same-size EMF and EMF+ fragments as visual lines |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF translation-layout review |
+| Date Added | 2026-10-29 |
+| Related Requirements | FR-2026-08-03-05, FR-2026-08-27-02, FR-2026-08-29-03, FR-2026-09-05-02, FR-2026-10-22-04, FR-2026-10-22-05, FR-2026-10-22-10, FR-2026-10-28-03, FR-2026-10-28-05, FR-2026-10-29-02 |
+
+### Description
+
+In `preserve-basic-layout` and `preserve-basic-layout-source-font`, the EMF
+handler shall identify eligible adjacent text fragments that form one
+horizontal visual line before replacement texts are planned. It shall fit the
+complete replacement line as one unit, rather than fitting each fragment to
+its own source area. This applies to eligible GDI `EMR_EXTTEXTOUTA` and
+`EMR_EXTTEXTOUTW` records and to eligible EMF+ `EmfPlusDrawString` and
+character-based horizontal `EmfPlusDrawDriverString` records. The existing
+`preserve-source-formatting` behaviour is unchanged.
+
+Members of a line shall have the same reliably resolved source font face and
+style and the same effective font size in a common rendered coordinate space,
+except that FR-2026-10-29-03 permits moderate size differences.
+Equivalent fonts shall not be treated as different merely because they use
+different object identifiers. A font or size that cannot be resolved or
+matched reliably shall be a grouping boundary, except that GDI records with
+unresolved stock or other fonts shall continue to use the derived fallback
+font and grouping rule in FR-2026-09-05-02. Their derived fonts and sizes
+shall match before they are grouped.
+
+The kind or encoding of a supported text record shall not by itself prevent
+grouping when its text, placement, and graphics state can be resolved and
+the combined replacement can be written safely. This includes mixed
+`EMR_EXTTEXTOUTA` and `EMR_EXTTEXTOUTW` records within a GDI stream and mixed
+`EmfPlusDrawString` and `EmfPlusDrawDriverString` records within an EMF+
+stream. The GDI and EMF+ streams of a dual EMF shall still be processed
+separately because they can represent alternate playback of the same drawing.
+
+For GDI these rules supersede FR-2026-09-05-02's permission to group different
+source faces, sizes, weights, or italic states and its same-encoding condition.
+Its other eligibility, fitting, expansion, and safety rules remain in force
+except where FR-2026-10-29-02 explicitly changes colour handling and output.
+Records on opposite sides of a font or size boundary may form separate eligible
+groups, or use the existing individual-record behaviour.
+
+For EMF+, an eligible line shall comprise at least two supported, non-empty,
+single-line records. The handler shall resolve their source text, fonts, font
+sizes, text placement, effective transforms, clipping and paint state. The
+records shall form one left-to-right visual line in
+source paint order, with a left-aligned anchor, matching rendered baselines,
+strictly increasing horizontal placement, and source areas that touch, overlap,
+or have a gap no greater than 1.5 rendered source-line heights. Baselines
+shall match within one rendered logical unit. Their effective
+transforms shall be orientation-preserving and axis-aligned with the same
+linear scale components; translation between members is permitted. The
+handler shall use finite source areas derived from the EMF+ layout rectangles
+or source glyph positions as appropriate for the record kind.
+
+For both GDI and EMF+ lines, a gap between adjacent members shall not exceed
+1.5 rendered source-line heights, superseding the four-line-height limit of
+FR-2026-09-05-02. Adjacent members whose source text, ignoring surrounding
+whitespace, each consists only of a standalone number shall be a grouping
+boundary when the gap between them exceeds 0.25 rendered source-line heights;
+such members are treated as separate labels, axis ticks, or table cells. A
+standalone number contains ASCII or full-width digits with optional plus or
+minus signs, decimal or thousands separators (`.`, `,`, and their full-width
+forms), and percent signs, and contains at least one digit. Numeric pieces
+that touch, overlap, or are separated by no more than that limit may still
+join. The debug trace shall report these boundaries as
+`gap_exceeds_limit` and `standalone_numbers_separated` respectively.
+
+Non-painting state changes may occur between members only when their effects
+are reliably resolved and compatible. Intervening painting operations,
+incompatible clips or non-colour paint state, unsupported records or graphics
+state, ambiguous placement, and evidence of separate labels, cells, or
+columns shall be grouping boundaries. An unknown font, size, transform,
+clip, or source area shall not be guessed. Existing EMF+ unsupported and
+individual-record fallback behaviour remains applicable when a safe group
+cannot be formed or written.
+
+In the GDI stream, an `EMR_COMMENT` carrying only EMF+ header, end-of-file,
+comment, `EmfPlusGetDC`, object, rendering-hint, save and restore, world or
+page transform, and clipping records does not paint and shall not by itself be
+a GDI grouping boundary or unresolved drawing geometry. Because such state can
+apply to GDI records played within an `EmfPlusGetDC` interval, grouped GDI
+members shall have the same resolved EMF+ page transform, clip, and rendering
+hints, and an EMF+ world transform that either equals the member's own GDI
+world transform or is unchanged from the preceding member. EMF+ containers,
+an unresolved EMF+ restore, and any EMF+ record that paints or is not
+recognised shall remain boundaries.
+
+The initial fitting area for an EMF+ group shall be the union of the members'
+source areas, including the intervening space. It shall not infer a semantic
+container or expand beyond that union. The replacement shall remain on one
+line at the anchor's position and baseline. The handler shall select one
+uniform fitted font size for the whole line, no larger than the common source
+size, using the existing fitted-layout font-selection and overflow rules.
+It shall preserve the source text order and relevant graphics state and shall
+not rasterize, reorder unrelated drawing operations, or change non-text
+content. EMF+ font objects, record sizes, comments, header counts, and
+character positions shall remain valid under FR-2026-10-22-10.
+
+The handler shall apply these rules through the same plan and apply entry
+points for standalone and nested EMFs. In a dual EMF, it shall process the
+GDI and EMF+ streams so that each playback path displays its replacement.
+Matching planned texts shall use the existing shared translation-engine
+deduplication. If the two streams have different fragment or colour
+boundaries, they may need different planned texts; this is an exception to
+FR-2026-10-22-10's statement that both streams request the same source text,
+not permission to leave either stream untranslated or to guess a mapping.
+
+### Rationale
+
+Independently fitting fragments of one visual line gives translated fragments
+different sizes and leaves gaps from the original placement. Fitting the
+whole line shares the original line's available width. EMF+ playback matters
+independently of the GDI stream because viewers may display only that stream.
+
+### Verification
+
+Automated tests shall use synthetic EMFs and providers only. They shall verify
+two- and multi-record lines in each supported stream and both fitted modes,
+one uniform size fitted against the whole source line, no increase above the
+source size, and unchanged `preserve-source-formatting` behaviour. They shall
+verify that differing fonts or effective font sizes split GDI and EMF+ groups,
+that unresolved fonts split EMF+ groups, and that equivalent fonts using
+different object identifiers can group. They shall verify the GDI fallback
+font exception and compatible translation transforms and positive scales
+resolved in a common coordinate space. They shall verify grouping mixed
+supported record kinds and encodings within each stream.
+
+Tests shall cover source rectangles and glyph positions, state changes,
+baseline and gap limits, standalone numbers separated by more than and no
+more than 0.25 line heights, clip and paint incompatibilities, intervening drawing,
+separate labels, unsupported and unresolved state, and safe individual-record
+fallback. They shall verify standalone, nested, and dual EMFs, including
+different stream segmentation, valid output structure, unchanged non-text
+content, and zero plan misses. On Windows, synthetic output shall be rendered
+through normal GDI+ playback and, for the GDI stream, GDI playback to verify
+the fitted line is visible with a uniform size.
+
+---
+
+## FR-2026-10-29-02
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve colour-emphasis spans in fitted EMF visual lines |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF translation-layout review |
+| Date Added | 2026-10-29 |
+| Related Requirements | FR-2026-09-01-01, FR-2026-09-05-02, FR-2026-10-22-04, FR-2026-10-22-10, FR-2026-10-28-04, FR-2026-10-29-01 |
+
+### Description
+
+For an eligible GDI or EMF+ visual line under FR-2026-10-29-01, a change
+only in effective text colour shall not by itself split the line. Other
+grouping and graphics-state safety rules remain decisive. This requirement
+supersedes FR-2026-09-05-02's one-translation and one-output-colour treatment,
+and its single-anchor-record output rule, only for eligible multi-colour
+lines. The matching-font requirement of FR-2026-10-29-01 remains applicable;
+this requirement does not promise to preserve independent source underline
+or other inline typography.
+
+The handler shall assemble source fragments in visual order using the existing
+EMF boundary rule: a touching or overlapping boundary adds no character and a
+positive gap adds one space. It shall divide the assembled sequence into
+maximal contiguous spans of the same effective text colour. A colour change
+shall not remove a source whitespace boundary. An inferred boundary space
+shall use the preceding span's colour. The handler shall independently plan
+each non-empty colour span for translation with the existing language
+settings, and concatenate the returned strings in the same order. No
+word-level correspondence between source and translated text is required.
+
+When the target language's primary subtag is `en`, if independently
+translated adjacent spans touch with a letter or number on each side and
+there is no whitespace at their boundary, the handler shall insert one
+U+0020 space in the preceding span's colour. It shall not insert that space
+for another target language or beside punctuation. This is the boundary rule
+of the related PDF requirement FR-2026-09-01-01.
+
+The handler shall measure and fit the complete concatenated, colour-styled
+replacement as one line with one uniform fitted size. It shall emit the
+replacement spans in visual order at positions derived from their fitted
+advances, each in its source effective text colour, and suppress the original
+text painting exactly once. It shall retain compatible clipping and restore
+any graphics state changed for output. It shall not fit spans separately or
+retain their original gaps after fitting. A one-colour line shall retain the
+existing single-translation behaviour.
+
+Colour is eligible only when it can be resolved and safely reproduced
+without changing other paint properties. Incompatible opacity or other paint
+state, or an unresolved or unsupported brush, shall remain a grouping
+boundary. If the replacement cannot be safely encoded, positioned, fitted, or
+written as a group, the handler shall use the applicable existing
+individual-record fallback without partially applying the group. Planning
+shall include the texts needed by any such fallback, so apply does not create
+unplanned translation requests. Translation-engine batching and deduplication
+continue to follow FR-2026-10-22-04.
+
+### Rationale
+
+Colour often emphasises a phrase rather than marking an independent label.
+Translating colour spans separately follows the PDF policy and preserves their
+colour without guessing which translated words correspond to source words.
+Fitting the combined result avoids fragment-by-fragment size changes and
+excessive gaps.
+
+### Verification
+
+Automated tests shall use synthetic EMFs and providers only. For both GDI and
+EMF+ they shall verify a same-colour multi-record span, multiple colours
+including a return to an earlier colour, source gaps, touching fragments,
+English letter and number boundaries, punctuation, and a non-English target.
+They shall assert the exact planned translation texts, the order and colours
+of the emitted replacements, one uniform fitted size, no residual source
+painting, and zero plan misses, including a group that needs fallback.
+
+---
+
+## FR-2026-10-29-03
+
+| Property | Value |
+|----------|-------|
+| Title | Join EMF visual-line fragments whose font sizes differ moderately |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request following EMF translation-layout review |
+| Date Added | 2026-10-29 |
+| Related Requirements | FR-2026-09-05-02, FR-2026-10-22-04, FR-2026-10-28-04, FR-2026-10-29-01, FR-2026-10-29-02 |
+
+### Description
+
+For an eligible GDI or EMF+ visual line under FR-2026-10-29-01, a difference only in
+effective rendered font size shall not by itself split the line when every
+member's size is at least 70% of the largest member size in that line. The
+comparison shall use effective sizes resolved in the common rendered
+coordinate space. Members outside that tolerance, and members whose size
+cannot be resolved reliably, remain grouping boundaries. All other
+FR-2026-10-29-01 rules remain decisive, including matching source face and
+style, matching rendered baselines, increasing placement, and clip and paint
+compatibility. The gap limit shall be measured in the largest member's
+rendered source-line height. This requirement supersedes only the
+matching-size condition of FR-2026-10-29-01. The GDI and EMF+ streams of a
+dual EMF remain separate as required there.
+
+The handler shall divide the assembled line into maximal contiguous spans of
+the same effective font size and text colour, extending the span rule of
+FR-2026-10-29-02 to size. Each non-empty span shall be planned for translation
+independently, with the boundary-space and English adjacent-span rules of
+FR-2026-10-29-02. A one-size line shall retain the existing behaviour.
+
+The handler shall measure the complete concatenated replacement with each
+span at its own source size, and select one uniform fitted scale for the whole
+line, no greater than 1.0. Each span shall be emitted in visual order at the
+anchor's baseline, at its own source size multiplied by that scale, at
+positions derived from the fitted advances, in its source colour. Relative
+span sizes shall therefore be preserved and no span shall exceed its source
+size. The original text painting shall be suppressed exactly once and any
+graphics state changed for output shall be restored.
+
+If the line cannot be safely planned, measured, encoded, or written, the
+handler shall use the existing individual-record fallback without partially
+applying the group, and planning shall include the texts that fallback needs.
+
+When debug is enabled, the FR-2026-10-28-04 trace shall report, for each
+grouped member, its effective size relative to the line's largest size, and
+shall report a size-tolerance boundary distinctly from other size mismatches.
+
+### Rationale
+
+Presentation text often sets bracketed or annotated phrases slightly smaller
+on the same baseline. Splitting those lines leaves the translated fragments
+fitted independently, with uneven sizes and large gaps. A 70% bound joins the
+common three-to-four size relationship while keeping clearly separate
+captions and labels apart.
+
+### Verification
+
+Automated tests shall use synthetic EMFs and providers only. For both GDI and
+EMF+ they shall verify lines whose smaller text precedes, follows, and sits
+between larger text;
+members at and just below the 70% bound; a chain of gradual size steps that
+would exceed the bound relative to the largest member; differing face, style,
+or baseline still splitting; exact planned span texts; preserved relative
+span sizes with one uniform scale no greater than 1.0; combined size and
+colour spans; fallback without partial application; trace fields; and zero
+plan misses. On Windows, synthetic output shall be rendered through GDI and
+normal GDI+ playback to verify both span sizes are visible on one baseline.
+
+Tests shall verify that colour alone does not split a safe line, while
+different sizes, incompatible opacity, clips, unsupported brushes, and
+separators do. They shall cover structurally valid standalone, nested, and
+dual EMFs and verify that unrelated drawing and subsequent graphics state are
+preserved. On Windows, normal GDI+ and GDI playback shall show the intended
+span colours and fitted positions for their respective streams. Debug
+tracing shall not change output or invoke additional providers.
 
 ---

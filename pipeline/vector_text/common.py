@@ -18,6 +18,7 @@ from pipeline.bounded_text_layout import (
     fitted_text_lines,
     noto_typefaces,
     replace_and_fit_text_box,
+    source_font_measurement,
 )
 from pipeline.text_replacement import TextReplacementProvider
 
@@ -108,6 +109,7 @@ class FittedLine:
     run: BoundedTextRun
     layout_face: str | None = None
     layout_width: float = 0.0
+    layout_typeface: skia.Typeface | None = None
 
 
 def _line_box(text: str, font: SourceLineFont, width_pixels: float, height_pixels: float) -> BoundedTextBox:
@@ -146,6 +148,37 @@ def measure_source_line(
         return None
     width, height = lines[0].width_pixels, lines[0].height_pixels
     return (width, height) if width > 0 and height > 0 else None
+
+
+def source_line_typeface(font: SourceLineFont, text: str) -> skia.Typeface | None:
+    """Return the exact source face when it supports every segment of the text."""
+    measurement = source_font_measurement(_line_box(text, font, 100, 100))
+    if not measurement.selections or any(item.fallback_reason is not None for item in measurement.selections):
+        return None
+    runs = measurement.text_box.paragraphs[0].runs
+    faces = [measurement.typefaces.get(run.font_classification) for run in runs]
+    if not faces or any(face is None for face in faces):
+        return None
+    first = faces[0]
+    assert first is not None
+    if any(face is None or face.uniqueID() != first.uniqueID() for face in faces):
+        return None
+    return first
+
+
+def source_line_ascent(font: SourceLineFont) -> float | None:
+    """Return the exact source face's ascent, or None if that face cannot be resolved."""
+    face = source_line_typeface(font, " ")
+    if face is None:
+        return None
+    ascent = -skia.Font(face, font.size_points * (4.0 / 3.0)).getMetrics().fAscent
+    return float(ascent) if ascent > 0 else None
+
+
+def source_line_height(face: skia.Typeface, size_pixels: float) -> float:
+    """Return the source face's line height at the requested size."""
+    metrics = skia.Font(face, size_pixels).getMetrics()
+    return float(metrics.fDescent - metrics.fAscent + metrics.fLeading)
 
 
 def translate_and_fit_line(
@@ -214,5 +247,6 @@ def translate_and_fit_line(
     if scale <= 0.0:
         return None
     return FittedLine(
-        replacement, scale, run, layout_typefaces[run.font_classification].getFamilyName(), calibrated_width
+        replacement, scale, run, layout_typefaces[run.font_classification].getFamilyName(),
+        calibrated_width, layout_typefaces[run.font_classification],
     )

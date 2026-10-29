@@ -47,6 +47,19 @@ def replace_each(
     return TextReplacementResult(tuple(function(text) for text in request.texts))
 
 
+def needs_english_span_space(previous: str, current: str, target_language: str) -> bool:
+    """Keep independently translated English words from running together."""
+    return bool(
+        target_language.split("-", 1)[0].casefold() == "en"
+        and previous
+        and current
+        and not previous[-1].isspace()
+        and not current[0].isspace()
+        and previous[-1].isalnum()
+        and current[0].isalnum()
+    )
+
+
 def check_result_length(request_text_count: int, result: TextReplacementResult) -> TextReplacementResult:
     """Return the result, or raise a text-free provider error for a wrong item count."""
     if len(result.items) != request_text_count:

@@ -7,11 +7,13 @@ from io import BytesIO
 import os
 import struct
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
 from pipeline.folder_replacement.planning import NESTED_DOCUMENT_MAX_DEPTH, plan_and_apply
 from pipeline.folder_replacement.vector import apply_vector, plan_vector
+from pipeline.bounded_text_layout import noto_typefaces
 from pipeline.text_replacement import (
     TextReplacementItem, TextReplacementRequest, TextReplacementResult, TextUnit,
     TranslationEngine, replace_each,
@@ -36,9 +38,11 @@ from test_vector_emfplus import (
     _emf_from_records,
     _emf_records,
     _plus_draw_string,
+    _plus_driver_string,
     _plus_font,
     _plus_header,
     _plus_records,
+    _plus_string_format,
 )
 from test_vector_text_replacer import (
     _emf_is_structurally_valid, _emf_move_to_record, _emf_text_clips, _emf_text_options,
@@ -293,8 +297,39 @@ class EmfPlusMetafileObjectTests(unittest.TestCase):
 
 
 class EmfPlusImagePlanTests(unittest.TestCase):
-    # Verifies FR-2026-10-28-05.
-    def test_nested_emf_preserves_shape_and_overlap_protection(self) -> None:
+    # Verifies FR-2026-10-29-01 and -02 for mixed text in a nested EMF+ metafile.
+    def test_nested_mixed_colour_line_uses_complete_plan(self) -> None:
+        inner = bytearray(_emf_from_records(_comment(
+            _plus_header() + _plus_font(0) + _plus_string_format(1)
+            + _plus_driver_string(0, "A", positions=((10.0, 28.0),), color=0xFF0000FF)
+            + _plus_draw_string(0, "B", x=20.0, y=10.0, width=20.0, color=0xFFFF0000, format_id=1)
+        )))
+        inner[40:44] = b" EMF"
+        source = _emf_with_image(_metafile_data(bytes(inner)), object_id=3)
+        for layout in ("preserve-basic-layout", "preserve-basic-layout-source-font"):
+            with self.subTest(layout=layout):
+                with (
+                    patch("pipeline.vector_text.emf.source_line_ascent", return_value=18.0),
+                    patch("pipeline.vector_text.emf.source_line_typeface", return_value=noto_typefaces()["sans-serif"]),
+                ):
+                    plan = plan_vector(
+                        source, ".emf", _EmptyOcrProvider(), "en", "en", document_text_layout=layout,
+                    )
+                engine = TranslationEngine(_RecordingProvider(), "en", "en")
+                with patch("pipeline.vector_text.emf.source_line_typeface", return_value=noto_typefaces()["sans-serif"]):
+                    result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
+                self.assertEqual(0, engine.plan_misses)
+                self.assertEqual(2, result.replaced_text_items)
+                [obj] = _image_objects(result.data)
+                draws = [(flags, body) for kind, flags, body in _plus_records(obj.payload)
+                         if kind == _PLUS_DRAW_STRING]
+                self.assertEqual(["T:A ", "T:B"], [_draw_string_text(body) for _, body in draws])
+                self.assertEqual([0xFF0000FF, 0xFFFF0000], [struct.unpack_from("<I", body)[0] for _, body in draws])
+                self.assertTrue(_emf_is_structurally_valid(obj.payload))
+                self.assertTrue(_emf_is_structurally_valid(result.data))
+
+    # Verifies FR-2026-10-28-05: nested EMFs keep shapes and add no overlap clip.
+    def test_nested_emf_preserves_shape_without_overlap_clip(self) -> None:
         class _Provider(_RecordingProvider):
             def replace(self, request: TextReplacementRequest) -> TextReplacementResult:
                 self.requests.append(request)
@@ -320,12 +355,10 @@ class EmfPlusImagePlanTests(unittest.TestCase):
         result = plan_and_apply(plan, engine, lambda translate: apply_vector(plan, translate, _typeface()))
         [inner_object] = _image_objects(result.data)
         self.assertEqual(["W" * 500, "i"], _emf_texts(inner_object.payload))
-        self.assertTrue(_emf_text_options(inner_object.payload)[0] & 4)
-        self.assertLessEqual(_emf_text_clips(inner_object.payload)[0][2], 60)
+        self.assertFalse(_emf_text_options(inner_object.payload)[0] & 4)
         self.assertIn(rectangle, _emf_records(inner_object.payload))
         self.assertTrue(_emf_is_structurally_valid(inner_object.payload))
         self.assertEqual([3], result.emf_layout_trace[0]["nested_object_path"])
-        self.assertTrue(result.emf_layout_trace[0]["overlap_protection_clipped"])
         self.assertEqual(0, engine.plan_misses)
 
     # Verifies FR-2026-10-28-03 and FR-2026-10-28-04.
