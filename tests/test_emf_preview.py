@@ -42,9 +42,9 @@ def _record_metafile(
     simple_plus_format: bool = False, mixed_plus_order: str = "", plus_clip: bool = False,
     vertical_separator: bool = False,
 ) -> bytes:
-    gdi = ctypes.WinDLL("gdi32")
-    user = ctypes.WinDLL("user32")
-    plus = ctypes.WinDLL("gdiplus")
+    gdi = getattr(ctypes, "WinDLL")("gdi32")
+    user = getattr(ctypes, "WinDLL")("user32")
+    plus = getattr(ctypes, "WinDLL")("gdiplus")
     user.GetDC.argtypes = [ctypes.c_void_p]
     user.GetDC.restype = ctypes.c_void_p
     user.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -233,8 +233,8 @@ def _record_gdi_overlap_metafile(
     class _Transform(ctypes.Structure):
         _fields_ = [(name, ctypes.c_float) for name in ("m11", "m12", "m21", "m22", "dx", "dy")]
 
-    gdi = ctypes.WinDLL("gdi32")
-    user = ctypes.WinDLL("user32")
+    gdi = getattr(ctypes, "WinDLL")("gdi32")
+    user = getattr(ctypes, "WinDLL")("user32")
     user.GetDC.argtypes = [ctypes.c_void_p]
     user.GetDC.restype = ctypes.c_void_p
     user.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -346,8 +346,8 @@ def _record_gdi_overlap_metafile(
 
 def _record_gdi_mixed_size_metafile() -> bytes:
     """Record a red 20-pixel span followed by a blue 15-pixel span on one baseline."""
-    gdi = ctypes.WinDLL("gdi32")
-    user = ctypes.WinDLL("user32")
+    gdi = getattr(ctypes, "WinDLL")("gdi32")
+    user = getattr(ctypes, "WinDLL")("user32")
     user.GetDC.argtypes = [ctypes.c_void_p]
     user.GetDC.restype = ctypes.c_void_p
     user.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -1311,11 +1311,14 @@ class EmfPreviewTests(unittest.TestCase):
             self.assertEqual(1, preview.main([str(path), "--dpi", "1000000"]))
             self.assertFalse(path.with_name("image.emf.preview.png").exists())
 
+class NonWindowsPreviewTests(unittest.TestCase):
     # Verifies FR-2026-10-28-02.
     def test_non_windows_fails_explicitly(self) -> None:
-        with patch("sys.platform", "linux"), self.assertRaises(SystemExit) as result:
+        messages = StringIO()
+        with patch("sys.platform", "linux"), redirect_stderr(messages), self.assertRaises(SystemExit) as result:
             preview.main(["example.emf"])
         self.assertNotEqual(0, result.exception.code)
+        self.assertIn("available only on Windows", messages.getvalue())
 
 
 if __name__ == "__main__":

@@ -248,8 +248,11 @@ class StartupInput(ctypes.Structure):
 
 class WindowsRenderer:
     def __init__(self) -> None:
-        self.gdi = ctypes.WinDLL("gdi32", use_last_error=True)
-        self.plus = ctypes.WinDLL("gdiplus", use_last_error=True)
+        win_dll = getattr(ctypes, "WinDLL", None)
+        if win_dll is None:
+            raise PreviewError("EMF preview is available only on Windows.")
+        self.gdi = win_dll("gdi32", use_last_error=True)
+        self.plus = win_dll("gdiplus", use_last_error=True)
         self._configure()
         self.token = ctypes.c_size_t()
         startup = StartupInput(1, None, False, True)
@@ -465,6 +468,10 @@ def _save_png(image: Image.Image, destination: Path, dpi: float) -> None:
                 raise PreviewError("Cannot remove the temporary PNG sidecar.") from error
 
 
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Revision, scenario directory, or processed EMF.")
@@ -472,7 +479,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if not math.isfinite(args.dpi) or args.dpi <= 0:
         parser.error("--dpi must be a positive finite number.")
-    if sys.platform != "win32":
+    if not _is_windows():
         parser.error("EMF preview is available only on Windows.")
     if args.path.is_file() and args.path.suffix.lower() == ".emf":
         files = [args.path]
