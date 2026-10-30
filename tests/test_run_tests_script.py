@@ -6,7 +6,6 @@ import io
 import os
 import sys
 import unittest
-from contextlib import redirect_stderr
 from unittest.mock import MagicMock, patch
 
 from scripts import run_tests
@@ -28,27 +27,28 @@ class BuildCommandTests(unittest.TestCase):
     def test_runs_pytest_in_parallel_by_default(self) -> None:
         command, environment = run_tests.build_command([], available_cores=8)
 
-        self.assertEqual([sys.executable, "-m", "pytest", "-n", "6"], command)
+        self.assertEqual([sys.executable, "-m", "pytest", "-n", "6", "--dist=worksteal"], command)
         self.assertEqual({FAST: None}, environment)
 
     # Verifies TR-2026-10-27-02.
     def test_one_worker_runs_in_the_main_process(self) -> None:
         command, _ = run_tests.build_command([], available_cores=2)
 
-        self.assertEqual(["-n", "0"], command[3:])
+        self.assertEqual(["-n", "0", "--dist=worksteal"], command[3:])
 
-    # Verifies TR-2026-10-27-02.
-    def test_worker_count_can_be_overridden(self) -> None:
-        command, _ = run_tests.build_command(["--workers", "3"], available_cores=64)
+    # Verifies TR-2026-10-30-01.
+    def test_selected_items_limit_workers(self) -> None:
+        for count, expected in ((0, 0), (1, 0), (2, 0), (3, 2), (8, 4), (99, 6)):
+            with self.subTest(count=count):
+                command, _ = run_tests.build_command([], available_cores=8, selected_items=count)
+                self.assertEqual(["-n", str(expected), "--dist=worksteal"], command[3:])
 
-        self.assertEqual(["-n", "3"], command[3:])
-
-    # Verifies TR-2026-10-27-02.
-    def test_rejects_a_worker_count_below_one(self) -> None:
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
-            run_tests.build_command(["--workers", "0"], available_cores=8)
-
-        self.assertEqual(2, raised.exception.code)
+    # Verifies TR-2026-10-30-01.
+    def test_selectors_trigger_collection_but_general_options_do_not(self) -> None:
+        for args in (["-k", "name"], ["-m", "slow"], ["tests/test_pdf_plan.py::test_x"], ["tests"]):
+            with self.subTest(args=args):
+                self.assertTrue(run_tests._has_selection(args))
+        self.assertFalse(run_tests._has_selection(["--durations", "20", "-v"]))
 
     # Verifies TR-2026-10-27-02.
     def test_serial_mode_uses_unittest_discovery_of_the_tests_directory(self) -> None:
@@ -75,7 +75,7 @@ class BuildCommandTests(unittest.TestCase):
         parallel, _ = run_tests.build_command(arguments, available_cores=8)
         serial, _ = run_tests.build_command(["--serial", *arguments], available_cores=8)
 
-        self.assertEqual(arguments, parallel[5:])
+        self.assertEqual(arguments, parallel[6:])
         self.assertEqual(arguments, serial[-len(arguments) :])
 
     # Verifies TR-2026-10-27-03.
@@ -91,6 +91,25 @@ class BuildCommandTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    # Verifies TR-2026-10-30-01.
+    def test_focused_run_sizes_workers_from_collection(self) -> None:
+        collection = MagicMock(returncode=0, stdout="collected\n3\n", stderr="")
+        completed = MagicMock(returncode=0)
+        with patch("scripts.run_tests._available_cores", return_value=8), patch(
+            "scripts.run_tests.subprocess.run", side_effect=[collection, completed]
+        ) as run:
+            self.assertEqual(0, run_tests.main(["-k", "example"]))
+        self.assertEqual(["-n", "2", "--dist=worksteal", "-k", "example"], run.call_args.args[0][3:])
+
+    # Verifies TR-2026-10-30-01.
+    def test_collection_failure_is_returned_without_running_tests(self) -> None:
+        collection = MagicMock(returncode=4, stdout="collection failed\n", stderr="")
+        with patch("scripts.run_tests.subprocess.run", return_value=collection) as run, patch(
+            "sys.stdout", new_callable=io.StringIO
+        ):
+            self.assertEqual(4, run_tests.main(["tests/missing.py"]))
+        self.assertEqual(1, run.call_count)
+
     # Verifies TR-2026-10-27-03.
     def test_a_plain_run_clears_an_inherited_fast_setting_and_returns_the_exit_code(self) -> None:
         completed = MagicMock(returncode=7)

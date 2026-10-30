@@ -776,7 +776,7 @@ The runners shall also provide a `--serial` option that runs the suite in one pr
 Parallel mode shall:
 
 - discover the same set of tests as serial mode
-- distribute tests across worker processes, defaulting to `max(1, N - 2)` workers where `N` is the number of available CPU cores, so two cores remain free for the developer's other work, and accept an override for the worker count; when the result is one worker, run the tests in the main process without starting a worker
+- distribute tests across worker processes, defaulting to `max(1, N - 2)` workers where `N` is the number of available CPU cores, so two cores remain free for the developer's other work; when the result is one worker, run the tests in the main process without starting a worker (TR-2026-10-30-01 specifies focused-run sizing)
 - report a failure or error in any test or subtest, including a failure inside a `subTest`, as a non-zero exit code
 - keep skipped tests and subtests visible with their skip reason, including provider-declared skips required by FR-2026-08-01-02
 The CI workflow of TR-2026-09-10-01 shall run the complete suite with `--serial`. CI is the authoritative check and its hosted runners have few cores, so parallel execution would add little speed; running the reference mode there keeps its result independent of worker scheduling. Local parallel runs still reveal any test-order or shared-state dependence.
@@ -825,6 +825,52 @@ The runners currently cannot pass `--durations`, `-k`, or similar options, so a 
 ### Notes
 
 Today no test-specific environment variable exists; the runners only pass the optional `.env.local` file through `run.ps1` or `run.sh`. This requirement adds one, set by the runner for the test process when `--fast` is given and read only by the slow-test decorator. Its name will be chosen at implementation. Because `unittest` and `pytest` accept different options, `docs/development.md` lists the options for each runner. `--fast` combines with both parallel and `--serial` modes.
+
+---
+
+## TR-2026-10-30-01
+
+| Property | Value |
+|----------|-------|
+| Title | Automatic worker count for selected tests |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request to reduce focused test-run startup time |
+| Date Added | 2026-10-30 |
+| Related Requirements | TR-2026-10-27-02, TR-2026-10-27-03 |
+
+### Description
+
+The runners shall no longer define a `--workers` option. They shall retain the existing default worker count for a full run.
+
+For a pytest run selecting tests using `-k`, `-m`, or explicit test paths or node IDs, the runners shall determine the number of selected top-level test items and use `min(default workers, max(1, ceiling(selected items / 2)))` workers. A count of one shall run pytest in the main process without starting a worker. Subtests do not count as separate test items. `--fast` alone does not trigger this sizing. Selection and other pytest arguments shall retain their existing behaviour, and collection failures shall be reported as failures rather than silently ignored. Serial mode remains unchanged.
+
+The development guidance shall document the sizing rule and the supported selectors. The existing forwarding contract still applies to pytest's own options.
+
+### Rationale
+
+Focused runs benefit from avoiding worker startup when only a few test items are selected, while the existing full-suite default remains appropriate for larger runs.
+
+---
+
+## TR-2026-10-30-02
+
+| Property | Value |
+|----------|-------|
+| Title | Distribute OCR provider contract tests |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request to reduce the long tail of full test runs |
+| Date Added | 2026-10-30 |
+| Related Requirements | FR-2026-08-01-02, TR-2026-10-27-02, TR-2026-10-27-03 |
+
+### Description
+
+The synthetic OCR contract test of FR-2026-08-01-02 shall automatically discover registered providers and expose independently schedulable top-level tests grouped by provider, synthetic language, and font face. Each group shall retain its angle and colour cases as subtests. Both pytest and unittest discovery shall run the groups, and the same provider eligibility, language support, coverage, assertions, and individually reported skip reasons shall apply as before. A full run shall still fail if no eligible contract cases execute. The groups shall remain marked slow for `--fast`.
+
+### Rationale
+
+One top-level test currently runs the entire OCR matrix on a single worker. Grouping it allows parallel scheduling while keeping individual case reporting and automatic plugin discovery. Concurrent workers may load multiple OCR models and increase memory or GPU use; the benefit and resource cost should be measured before adopting the change.
 
 ---
 

@@ -45,22 +45,15 @@ def _argument_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip tests marked slow with tests/slow_test_support.slow_test.",
     )
-    parser.add_argument(
-        "--workers",
-        type=int,
-        help=f"Parallel worker count (default: max(1, cores - {RESERVED_CORES})).",
-    )
     return parser
 
 
 def build_command(
-    arguments: Sequence[str], *, available_cores: int
+    arguments: Sequence[str], *, available_cores: int, selected_items: int | None = None
 ) -> tuple[list[str], dict[str, str | None]]:
     """Return the test command and the environment changes (None removes a variable)."""
     parser = _argument_parser()
     options, forwarded = parser.parse_known_args(arguments)
-    if options.workers is not None and options.workers < 1:
-        parser.error("--workers must be at least 1.")
     environment: dict[str, str | None] = {
         FAST_TESTS_ENVIRONMENT_VARIABLE: "1" if options.fast else None
     }
@@ -77,7 +70,9 @@ def build_command(
             *forwarded,
         ]
         return command, environment
-    workers = options.workers or default_worker_count(available_cores)
+    workers = default_worker_count(available_cores)
+    if selected_items is not None:
+        workers = min(workers, max(1, (selected_items + 1) // 2))
     # One worker runs in the main process; "-n 0" disables xdist rather than starting a worker.
     command = [
         sys.executable,
@@ -85,6 +80,7 @@ def build_command(
         "pytest",
         "-n",
         str(workers if workers > 1 else 0),
+        "--dist=worksteal",
         *forwarded,
     ]
     return command, environment
@@ -100,11 +96,36 @@ def _child_environment(changes: Mapping[str, str | None]) -> dict[str, str]:
     return environment
 
 
+def _has_selection(arguments: Sequence[str]) -> bool:
+    return any(
+        arg.startswith(("-k", "-m", "--deselect="))
+        or (not arg.startswith("-") and (
+            "::" in arg or arg.endswith(".py") or (PROJECT_ROOT / arg).is_dir()
+        ))
+        for arg in arguments
+    )
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
+    arguments = sys.argv[1:] if arguments is None else arguments
     command, environment_changes = build_command(
-        sys.argv[1:] if arguments is None else arguments,
+        arguments,
         available_cores=_available_cores(),
     )
+    if "--serial" not in arguments and _has_selection(command[6:]):
+        collection = subprocess.run(
+            [sys.executable, str(PROJECT_ROOT / "scripts" / "count_test_items.py"), *command[6:]],
+            check=False, cwd=PROJECT_ROOT, env=_child_environment(environment_changes),
+            capture_output=True, text=True,
+        )
+        if collection.returncode:
+            print(collection.stdout, end="")
+            print(collection.stderr, end="", file=sys.stderr)
+            return collection.returncode
+        selected_items = int(collection.stdout.rsplit("\n", 2)[-2])
+        command, environment_changes = build_command(
+            arguments, available_cores=_available_cores(), selected_items=selected_items
+        )
     completed = subprocess.run(
         command,
         check=False,
