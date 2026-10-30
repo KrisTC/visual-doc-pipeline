@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import unittest
+from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from math import ceil
 from pathlib import Path
 
@@ -63,22 +65,38 @@ COLOR_COMBINATIONS = (
 )
 
 
+@lru_cache(maxsize=None)
+def _provider(name: str) -> OcrProvider:
+    # Reuse each provider within a worker so its model can be reused across groups.
+    return OcrProviderFactory.discover_default_plugins().create(name)
+
+
 class OcrProviderContractTests(unittest.TestCase):
-    # Verifies FR-2026-08-01-02.
+    # Verifies FR-2026-08-01-02 and TR-2026-10-30-02.
     @slow_test
-    def test_eligible_providers_recognize_their_synthetic_languages(self) -> None:
-        factory = OcrProviderFactory.discover_default_plugins()
-        executed_cases = 0
+    def test_at_least_one_eligible_case_exists(self) -> None:
+        for name in OcrProviderFactory.discover_default_plugins().provider_names:
+            provider = _provider(name)
+            if not provider.supports_local_contract_test:
+                continue
+            skipped = {item.case for item in provider.skipped_local_contract_cases}
+            for language, _ in SYNTHETIC_TEXT_CASES:
+                if language not in provider.supported_languages:
+                    continue
+                for font in FONT_FACES:
+                    for angle in ROTATION_ANGLES:
+                        for colors in COLOR_COMBINATIONS:
+                            case = LocalContractTestCase(language, font.name, angle, colors.name)
+                            if angle not in provider.skipped_local_contract_angles and case not in skipped:
+                                return
+        self.fail("No eligible OCR-provider contract cases ran.")
 
-        for provider_name in factory.provider_names:
-            provider = factory.create(provider_name)
-            executed_cases += self._test_provider_cases(provider_name, provider)
-
-        self.assertGreater(executed_cases, 0, "No eligible OCR-provider contract cases ran.")
-
-    def _test_provider_cases(self, provider_name: str, provider: OcrProvider) -> int:
+    def _test_provider_group(
+        self, provider_name: str, language: str, expected_text: str, font_face: FontFace
+    ) -> None:
+        provider = _provider(provider_name)
         if not provider.supports_local_contract_test:
-            return 0
+            self.skipTest("Provider is not eligible for this local contract test language.")
 
         unsupported_angles = provider.skipped_local_contract_angles
         unknown_angles = unsupported_angles.difference(ROTATION_ANGLES)
@@ -95,45 +113,48 @@ class OcrProviderContractTests(unittest.TestCase):
             len(provider.skipped_local_contract_cases),
             f"{provider_name} declares the same local contract-test case more than once.",
         )
+        if language not in provider.supported_languages:
+            self.skipTest("Provider does not support this local contract test language.")
+        for angle in ROTATION_ANGLES:
+            for colors in COLOR_COMBINATIONS:
+                with self.subTest(
+                    provider=provider_name, language=language, font=font_face.name,
+                    angle=angle, colors=colors.name,
+                ):
+                    if angle in unsupported_angles:
+                        self.skipTest(
+                            f"{provider_name} does not yet support {angle}° text "
+                            "without rotation handling."
+                        )
+                    case = LocalContractTestCase(language, font_face.name, angle, colors.name)
+                    if reason := skipped_cases.get(case):
+                        self.skipTest(reason)
+                    synthetic_image = _text_image(expected_text, font_face, angle, colors)
+                    result = provider.recognize(OcrRequest(synthetic_image.image, language))
+                    _assert_result_contains_text(self, result.text_items, expected_text)
+                    _assert_region_overlap(self, result.text_items, synthetic_image.text_region_mask)
 
-        executed_cases = 0
-        for language, expected_text in SYNTHETIC_TEXT_CASES:
-            if language not in provider.supported_languages:
-                continue
-            for font_face in FONT_FACES:
-                for angle in ROTATION_ANGLES:
-                    for colors in COLOR_COMBINATIONS:
-                        with self.subTest(
-                            provider=provider_name,
-                            language=language,
-                            font=font_face.name,
-                            angle=angle,
-                            colors=colors.name,
-                        ):
-                            if angle in unsupported_angles:
-                                self.skipTest(
-                                    f"{provider_name} does not yet support {angle}° text "
-                                    "without rotation handling."
-                                )
-                            case = LocalContractTestCase(
-                                language, font_face.name, angle, colors.name
-                            )
-                            if reason := skipped_cases.get(case):
-                                self.skipTest(reason)
-                            synthetic_image = _text_image(
-                                expected_text, font_face, angle, colors
-                            )
-                            result = provider.recognize(
-                                OcrRequest(synthetic_image.image, language)
-                            )
-                            _assert_result_contains_text(
-                                self, result.text_items, expected_text
-                            )
-                            _assert_region_overlap(
-                                self, result.text_items, synthetic_image.text_region_mask
-                            )
-                        executed_cases += 1
-        return executed_cases
+
+def _group_test(
+    provider_name: str, language: str, expected_text: str, font_face: FontFace
+) -> Callable[[OcrProviderContractTests], None]:
+    # Verifies FR-2026-08-01-02 and TR-2026-10-30-02.
+    @slow_test
+    def test(self: OcrProviderContractTests) -> None:
+        self._test_provider_group(provider_name, language, expected_text, font_face)
+
+    return test
+
+
+# Both unittest and pytest discover these methods; no provider is instantiated at collection.
+for _provider_name in OcrProviderFactory.discover_default_plugins().provider_names:
+    for _language, _expected_text in SYNTHETIC_TEXT_CASES:
+        for _font_index, _font_face in enumerate(FONT_FACES):
+            setattr(
+                OcrProviderContractTests,
+                f"test_contract_{_provider_name}_{_language}_font_{_font_index}",
+                _group_test(_provider_name, _language, _expected_text, _font_face),
+            )
 
 
 def _text_image(

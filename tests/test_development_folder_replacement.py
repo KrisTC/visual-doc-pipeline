@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
@@ -16,6 +17,56 @@ from scripts import development_folder_replacement as development
 
 
 class DevelopmentFolderReplacementTests(unittest.TestCase):
+    # Verifies FR-2026-10-29-05.
+    def test_logo_environment_is_forwarded_to_all_scenarios_and_manifest(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sample-data" / "case" / "en").mkdir(parents=True)
+            with (
+                patch.dict(os.environ, {"PRESERVE_LOGO_TEXT": " NovaCorp ,NOVACORP"}),
+                patch.object(development, "PROJECT_ROOT", root),
+                patch.object(development, "run", return_value=SimpleNamespace(returncode=0)) as run_mock,
+                patch("sys.platform", "linux"),
+            ):
+                self.assertEqual(0, development.main([
+                    "case/en", "--text-replacement", "identity,character_mask", "--ocr", "no_ocr"
+                ]))
+            manifest = json.loads((root / "outputs/evaluations/dirdev/case/en-en/v1/manifest.json").read_text())
+            self.assertEqual(["NovaCorp", "NOVACORP"], manifest["preserve_logo_text"])
+            self.assertEqual(2, run_mock.call_count)
+            for call in run_mock.call_args_list:
+                command = call.args[0]
+                self.assertIn("--preserve-logo-text=NovaCorp", command)
+                self.assertIn("--preserve-logo-text=NOVACORP", command)
+
+    # Verifies FR-2026-10-29-05.
+    def test_unset_empty_and_invalid_logo_environment(self) -> None:
+        for value in (None, "", " ", "NovaCorp,", ",NovaCorp"):
+            with self.subTest(value=value), TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "sample-data" / "case" / "en").mkdir(parents=True)
+                environment = dict(os.environ)
+                environment.pop("PRESERVE_LOGO_TEXT", None)
+                if value is not None:
+                    environment["PRESERVE_LOGO_TEXT"] = value
+                with (
+                    patch.dict(os.environ, environment, clear=True),
+                    patch.object(development, "PROJECT_ROOT", root),
+                    patch.object(development, "run", return_value=SimpleNamespace(returncode=0)) as run_mock,
+                    patch("sys.platform", "linux"),
+                ):
+                    if value in (None, ""):
+                        self.assertEqual(0, development.main(["case/en", "--ocr", "no_ocr"]))
+                        manifest = json.loads((root / "outputs/evaluations/dirdev/case/en-en/v1/manifest.json").read_text())
+                        self.assertEqual([], manifest["preserve_logo_text"])
+                        self.assertFalse(any(arg.startswith("--preserve-logo-text") for arg in run_mock.call_args.args[0]))
+                    else:
+                        with self.assertRaises(SystemExit) as error:
+                            development.main(["case/en", "--ocr", "no_ocr"])
+                        self.assertEqual(2, error.exception.code)
+                        run_mock.assert_not_called()
+                        self.assertFalse((root / "outputs").exists())
+
     # Verifies FR-2026-08-22-01, FR-2026-08-22-02, and FR-2026-09-02-04.
     def test_creates_one_revision_manifest_and_command_per_scenario(self) -> None:
         with TemporaryDirectory() as temporary_directory:

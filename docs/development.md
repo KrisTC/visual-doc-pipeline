@@ -35,6 +35,21 @@ See the current CLI surface with:
 ./run.sh scripts/folder_replacement.py --help
 ```
 
+Use `--preserve-logo-text NovaCorp` to retain an OCR result matching that text
+exactly, ignoring surrounding spaces. Repeat the option for other names or case
+variants. See the [container guide](container-usage.md) for scope and limitations.
+
+For `scripts/development_folder_replacement.py`, set `PRESERVE_LOGO_TEXT` in
+the environment or in the ignored `.env.local` loaded by `run.sh`:
+
+```sh
+PRESERVE_LOGO_TEXT="NovaCorp,NOVACORP"
+```
+
+The development runner passes each comma-separated value to every scenario and
+records the effective values in its manifest. Leave the variable unset or empty
+to disable this option.
+
 Inspect aggregate counts and known provider-call timings from an existing
 source-adjacent cache (without enabling caching or reading cached results):
 
@@ -57,7 +72,8 @@ Validate the dependency policy:
 ```
 
 Run the automated test suite. By default it runs in parallel with `pytest` and
-`pytest-xdist`, using `max(1, cores - 2)` workers:
+`pytest-xdist`, using `max(1, cores - 2)` workers and work stealing to
+redistribute queued tests from busy workers:
 
 ```sh
 scripts/run-tests.sh            # Windows: .\scripts\run-tests.ps1
@@ -69,13 +85,18 @@ Options handled by the runner:
 |---|---|
 | `--serial` | Run in one process with `unittest` discovery, the reference mode for reproducing a failure. CI uses this. |
 | `--fast` | Skip tests marked `@slow_test` (`tests/slow_test_support.py`); they are reported as skipped. Use it while iterating; run without it before finishing. |
-| `--workers N` | Set the parallel worker count. |
 
 Any other argument is passed to `pytest`, or to `unittest` with `--serial`, for
 example `scripts/run-tests.sh -k name_pattern --durations 20` or
 `scripts/run-tests.sh --serial -v`. Each tool has its own options; `pytest`
 accepts file paths and `-k` expressions, whereas `unittest discover` accepts
 `-k` patterns and `--durations`.
+
+For pytest selections using `-k`, `-m`, or explicit test paths or node IDs,
+the runner first collects the selected tests, then uses one worker per two
+test items (rounded up), capped at the usual default. With one worker, pytest
+runs in the main process. Collection adds some startup time. Subtests are not
+separate items; `--fast` alone retains the full-run worker count.
 
 Type-check Python:
 

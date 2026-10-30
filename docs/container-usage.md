@@ -4,6 +4,8 @@ The CPU and GPU images run the existing folder-replacement command with fixed ro
 `/input` and `/output`. Do not pass input or output paths after the image name.
 Only normal folder-replacement options follow the image name.
 
+## Build images
+
 Build the smaller CPU image:
 
 ```sh
@@ -14,6 +16,14 @@ Build the NVIDIA GPU image only when GPU processing is needed:
 
 ```sh
 docker build --platform linux/amd64 --target gpu -t visual-doc-pipeline:gpu .
+```
+
+To check public CA trust and HTTPS access to both font download sources in the
+final images, run the following network smoke check after building them. It
+does not require a GPU, documents, or credentials:
+
+```sh
+scripts/validate-container-ca.sh visual-doc-pipeline:cpu visual-doc-pipeline:gpu
 ```
 
 Both builds select their mutually exclusive `cpu` or `gpu` uv profile from the
@@ -61,6 +71,29 @@ PaddleOCR automatically uses GPU 0 when Docker exposes a compatible device;
 there is no pipeline GPU option. This image requires a compatible exposed GPU;
 use the CPU image instead when one is not available.
 
+Check a host and published image without processing a document:
+
+```sh
+scripts/validate-container-gpu.sh registry.example/visual-doc-pipeline@sha256:IMAGE_DIGEST
+```
+
+It exits non-zero when Docker cannot request a GPU, Paddle is not CUDA-enabled,
+or no CUDA device is visible. NVIDIA documents how to configure Docker with
+the Container Toolkit at <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html>.
+
+## Folder-replacement options
+
+### Preserve logo text
+
+To preserve OCR-detected logo text, add `--preserve-logo-text NovaCorp` after
+the image name. Repeat the option for other names or case variants. It matches
+the entire OCR result case-sensitively after trimming surrounding spaces, so a
+result containing additional text is still translated. This applies to OCR
+in images and PDFs, not native text or filenames. OCR errors and overlapping
+replacement regions can still affect a logo.
+
+## Common run settings
+
 The default text-replacement provider is Google Cloud Translation. The examples
 mount its service-account JSON at the fixed secret target. The provider derives
 the project from that file and uses `europe-west1`, so no Docker `--env` option
@@ -80,16 +113,6 @@ again:
 render its live, bounded rows. `--interactive` (`-i`) is not required. For CI
 or redirected logs, omit `--tty`; processing remains supported, with non-live
 terminal output instead of an updating display.
-
-Check a host and published image without processing a document:
-
-```sh
-scripts/validate-container-gpu.sh registry.example/visual-doc-pipeline@sha256:IMAGE_DIGEST
-```
-
-It exits non-zero when Docker cannot request a GPU, Paddle is not CUDA-enabled,
-or no CUDA device is visible. NVIDIA documents how to configure Docker with
-the Container Toolkit at <https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html>.
 
 ## Optional mounts
 

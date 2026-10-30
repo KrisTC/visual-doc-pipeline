@@ -132,6 +132,13 @@ def _argument_parser(
         help="Include matching relative source paths; may repeat or use commas.",
     )
     command_options.add_argument(
+        "--preserve-logo-text",
+        action="append",
+        default=[],
+        metavar="TEXT",
+        help="Preserve exactly matching OCR text; may be repeated.",
+    )
+    command_options.add_argument(
         "--debug",
         action="store_true",
         help="Write per-document diagnostic JSON sidecars with document metrics.",
@@ -253,6 +260,8 @@ def main(
     parsed_arguments = parser.parse_args(arguments)
     _validate_roots(parsed_arguments, parser)
     include_patterns = _parse_include_patterns(parsed_arguments.include, parser)
+    if any(not value.strip(" ") for value in parsed_arguments.preserve_logo_text):
+        parser.error("--preserve-logo-text must not be empty or spaces-only")
     ocr_provider = _create_ocr_provider(parsed_arguments.ocr, parser)
     replacement_provider = _create_text_replacement_provider(
         parsed_arguments.text_replacement, parser
@@ -279,6 +288,7 @@ def main(
         document_text_layout=parsed_arguments.document_text_layout,
         xlsx_translation_mode=parsed_arguments.xlsx_translation_mode,
         include_patterns=include_patterns,
+        preserve_logo_text=tuple(parsed_arguments.preserve_logo_text),
         diagnostics_enabled=parsed_arguments.debug,
         ocr_provider_name=parsed_arguments.ocr,
         text_replacement_provider_name=parsed_arguments.text_replacement,
