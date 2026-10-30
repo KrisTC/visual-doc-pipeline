@@ -2329,3 +2329,67 @@ GDI+ content, and EMF+ Only fixtures to verify the actual playback paths, not
 only mocked calls. The owner may separately verify prepared local examples.
 
 ---
+
+## FR-2026-10-29-04
+
+| Property | Value |
+|----------|-------|
+| Title | Preserve specified logo text detected by OCR |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-29 |
+| Related Requirements | FR-2026-08-01-02, FR-2026-08-03-03, FR-2026-08-27-10, FR-2026-08-29-01, FR-2026-08-29-02, FR-2026-09-07-01, FR-2026-10-22-04 |
+
+### Description
+
+The folder-replacement command shall accept the repeatable `--preserve-logo-text` option to specify logo text strings to preserve. Empty or spaces-only values shall be rejected as command-line errors. The same option shall be available through both CPU and GPU container interfaces. When no strings are specified, existing behaviour shall remain unchanged.
+
+Matching shall be case-sensitive and require the complete OCR result to equal an individually specified string after trimming surrounding spaces from both. No other normalization shall be applied. For example, specifying `NovaCorp` shall match `NovaCorp` alone, but shall not match `NovaCorp lamp` or `NovaCorporatiion`. A matching OCR result shall be excluded from replacement planning, so its text is not sent to the text-replacement provider and its region is not deliberately wiped or redrawn by that result. Overlapping non-matching regions shall continue to be translated and rendered normally.
+
+The rule shall apply to OCR results used by folder replacement, including standalone and embedded bitmaps, outlined PDF text and the undecodable PDF text OCR fallback when available. It shall not apply to native editable text or output filenames.
+
+### Rationale
+
+Text-based company logos can use distinctive fonts that would be lost if detected text were replaced and rendered in a substitute font.
+
+### Notes
+
+An OCR-provider wrapper filters results before they reach the pipeline. Filtering occurs outside the provider-result cache so cached OCR results remain reusable when the preserve list changes.
+
+OCR can misrecognize a logo or split it across results. A separate replacement region could also overlap a preserved region; filtering the matching result alone does not guarantee that its pixels remain untouched.
+
+### Verification
+
+Automated tests shall use synthetic data and mocked providers to verify the approved matching rules, preservation across the applicable OCR paths, unchanged behaviour without the option, and availability through the container interface. Cache tests shall verify that changing the preserve list does not reuse a filtered result as if it were the original OCR response.
+
+---
+
+## FR-2026-10-29-05
+
+| Property | Value |
+|----------|-------|
+| Title | Configure preserved OCR logo text for development scenarios |
+| Owner | KrisTC |
+| Status | Implemented |
+| Source | User request |
+| Date Added | 2026-10-29 |
+| Related Requirements | FR-2026-08-22-01, FR-2026-10-29-04 |
+
+### Description
+
+The development_folder_replacement command shall read logo text to preserve from the `PRESERVE_LOGO_TEXT` environment variable. Its value shall be a comma-separated list of strings. An unset or empty variable shall disable logo preservation. Empty or spaces-only entries within a non-empty list shall be rejected before allocating an output revision. The command shall pass each configured string to every underlying folder-replacement scenario using the option defined by FR-2026-10-29-04 and record the effective strings in the revision manifest. This shall allow repeated development runs without re-entering the strings.
+
+### Rationale
+
+The development command is intended for rapid iteration with a consistent configuration across scenarios.
+
+### Notes
+
+The option's matching and validation rules remain those of FR-2026-10-29-04.
+
+### Verification
+
+Automated tests shall use synthetic values and temporary development trees. They shall verify multiple strings are passed to each scenario and recorded in the manifest, and that an unset or empty variable leaves logo preservation disabled.
+
+---

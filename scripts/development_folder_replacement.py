@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import product
 import json
+import os
 from pathlib import Path
 import re
 from subprocess import run
@@ -71,7 +72,10 @@ class Scenario:
 
 def _argument_parser() -> argparse.ArgumentParser:
     """Create the development scenario command-line parser."""
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        epilog="PRESERVE_LOGO_TEXT supplies comma-separated OCR logo strings for every scenario.",
+    )
     parser.add_argument(
         "source_folder",
         type=Path,
@@ -132,6 +136,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments.target_language, "target language", parser
     )
     include_patterns = _parse_include_patterns(arguments.include, parser)
+    raw_logo_text = os.environ.get("PRESERVE_LOGO_TEXT", "")
+    preserve_logo_text = tuple(value.strip(" ") for value in raw_logo_text.split(",")) if raw_logo_text else ()
+    if any(not value for value in preserve_logo_text):
+        parser.error("PRESERVE_LOGO_TEXT must not contain empty or spaces-only strings")
     scenarios = _expand_scenarios(arguments, parser)
     try:
         _validate_unique_scenario_output_names(scenarios)
@@ -144,6 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "source_language": source_language,
         "target_language": target_language,
         "include_patterns": list(include_patterns),
+        "preserve_logo_text": list(preserve_logo_text),
         "comment": arguments.comment,
         "scenarios": [scenario.manifest_data() for scenario in scenarios],
         "results": run_results,
@@ -161,6 +170,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_language,
             scenario,
             arguments.include,
+            preserve_logo_text,
         )
         print(f"Running scenario: {output_root.relative_to(PROJECT_ROOT)}")
         completed_process = run(command, check=False, cwd=PROJECT_ROOT)
@@ -351,6 +361,7 @@ def _folder_replacement_command(
     target_language: str,
     scenario: Scenario,
     include_option_values: list[str],
+    preserve_logo_text: tuple[str, ...],
 ) -> list[str]:
     """Build one direct-script command without processing files in this wrapper."""
     command = [
@@ -374,6 +385,8 @@ def _folder_replacement_command(
     ]
     for include_option_value in include_option_values:
         command.extend(("--include", include_option_value))
+    for logo_text in preserve_logo_text:
+        command.append(f"--preserve-logo-text={logo_text}")
     return command
 
 

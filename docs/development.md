@@ -35,6 +35,21 @@ See the current CLI surface with:
 ./run.sh scripts/folder_replacement.py --help
 ```
 
+Use `--preserve-logo-text NovaCorp` to retain an OCR result matching that text
+exactly, ignoring surrounding spaces. Repeat the option for other names or case
+variants. See the [container guide](container-usage.md) for scope and limitations.
+
+For `scripts/development_folder_replacement.py`, set `PRESERVE_LOGO_TEXT` in
+the environment or in the ignored `.env.local` loaded by `run.sh`:
+
+```sh
+PRESERVE_LOGO_TEXT="NovaCorp,NOVACORP"
+```
+
+The development runner passes each comma-separated value to every scenario and
+records the effective values in its manifest. Leave the variable unset or empty
+to disable this option.
+
 Inspect aggregate counts and known provider-call timings from an existing
 source-adjacent cache (without enabling caching or reading cached results):
 

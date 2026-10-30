@@ -25,6 +25,7 @@ from pipeline.folder_replacement.failure_diagnostics import (
     FailureContext,
     exception_cause_types,
 )
+from pipeline.folder_replacement.logo_filter import LogoFilteringOcrProvider
 from pipeline.provider_cache import (
     CACHE_FILENAME_SUFFIX, CacheInspectionError, CachingOcrProvider,
     CachingTextReplacementProvider, inspect_cache, is_cache_sidecar,
@@ -117,6 +118,7 @@ def replace_input_folder(
     document_text_layout: str = "preserve-source-formatting",
     xlsx_translation_mode: str = "full",
     include_patterns: tuple[str, ...] = (),
+    preserve_logo_text: tuple[str, ...] = (),
     diagnostics_enabled: bool = False,
     ocr_provider_name: str | None = None,
     text_replacement_provider_name: str | None = None,
@@ -134,6 +136,9 @@ def replace_input_folder(
         raise ValueError("A folder replacement run requires a non-empty source language.")
     if not target_language.strip():
         raise ValueError("A folder replacement run requires a non-empty target language.")
+    preserved_logos = frozenset(value.strip(" ") for value in preserve_logo_text)
+    if "" in preserved_logos:
+        raise ValueError("Logo text to preserve must not be empty or spaces-only.")
     if document_text_layout not in {
         "preserve-source-formatting",
         "preserve-basic-layout",
@@ -277,6 +282,8 @@ def replace_input_folder(
             processing_replacement = ContextualTextReplacementProvider(
                 processing_replacement, failure_context
             )
+        if preserved_logos:
+            processing_ocr = LogoFilteringOcrProvider(processing_ocr, preserved_logos)
         document_started = perf_counter()
         cache_scope = source_cache_scope(source_path)
         cache_scope.__enter__()
