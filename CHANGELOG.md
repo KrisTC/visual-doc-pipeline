@@ -1,5 +1,211 @@
 # Changelog
 
+## [0.4.0](https://github.com/KrisTC/visual-doc-pipeline/compare/v0.3.0...v0.4.0) (2026-10-30)
+
+### Enhanced EMF translation
+
+Translation of Enhanced Metafile (EMF) graphics now fits compatible text
+fragments together as visual lines, including EMF+ playback. This reduces
+uneven text sizes and gaps, while retaining colour emphasis and handling
+moderate differences in font size. Fitted GDI fonts are also made available
+during EMF+ playback. Windows development runs can produce side-by-side
+previews for GDI and GDI+ review. See [format support](docs/folder-replacer-format-support.md)
+and [Windows EMF previews](docs/development.md#windows-emf-previews).
+
+### Preserve OCR-detected logos
+
+Use `--preserve-logo-text` to keep specified OCR-detected logo text in its
+original image, preserving distinctive lettering instead of replacing it.
+Matching is case-sensitive and applies to complete OCR results after trimming
+surrounding spaces; repeat the option for different names or case variants.
+OCR errors and overlapping replacement regions can still affect a logo. See
+[container usage](docs/container-usage.md#preserve-logo-text) and
+[development configuration](docs/development.md).
+
+### Bug fix: GPU container certificate authorities
+
+The GPU image now includes public certificate authority trust, fixing HTTPS
+failures during first-use font downloads. Both CPU and GPU images include the
+public CA certificates. See the [container guide](docs/container-usage.md#build-images)
+for the trust and font-download smoke check.
+
+### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| SR-2026-10-28-01 | Support operator-provided trust for TLS interception | Proposed | KrisTC |
+
+### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| TR-2026-10-28-01 | Provide public CA trust in CPU and GPU container images | Implemented | KrisTC |
+| TR-2026-10-30-01 | Automatic worker count for selected tests | Implemented | KrisTC |
+| TR-2026-10-30-02 | Distribute OCR provider contract tests | Implemented | KrisTC |
+
+### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-28-02 | Generate Windows EMF comparison previews for development scenarios | Implemented | KrisTC |
+| FR-2026-10-29-04 | Preserve specified logo text detected by OCR | Implemented | KrisTC |
+| FR-2026-10-29-05 | Configure preserved OCR logo text for development scenarios | Implemented | KrisTC |
+
+### Vector Requirements
+
+Requirements for SVG, EMF, WMF, or other vector graphics.
+
+#### Added
+
+| ID | Title | Status | Owner |
+|---|---|---|---|
+| FR-2026-10-28-03 | Make fitted GDI fonts available during EMF+ playback | Implemented | KrisTC |
+| FR-2026-10-28-04 | Trace EMF fitted-layout decisions in debug sidecars | Implemented | KrisTC |
+| FR-2026-10-28-05 | Bound EMF text expansion by visible shapes | Proposed | KrisTC |
+| FR-2026-10-29-01 | Fit same-font and same-size EMF and EMF+ fragments as visual lines | Implemented | KrisTC |
+| FR-2026-10-29-02 | Preserve colour-emphasis spans in fitted EMF visual lines | Implemented | KrisTC |
+| FR-2026-10-29-03 | Join EMF visual-line fragments whose font sizes differ moderately | Implemented | KrisTC |
+
+### Requirement details
+
+#### Security Requirements
+
+Requirements for Dependency, credential, remote-data, or local-persistence security.
+
+##### SR-2026-10-28-01 — Support operator-provided trust for TLS interception [Proposed]
+
+###### Rationale
+
+An intercepting proxy presents certificates issued by an organisation's CA,
+which is not necessarily in a public trust store. Trusting that CA permits the
+proxy to inspect traffic within the selected scope; if translation traffic is
+included, this can include document text. The operator must understand and
+authorize that trust boundary.
+
+#### Technical Requirements
+
+Requirements for Tools, dependencies, test runners, typing, or shared implementation structure.
+
+##### TR-2026-10-28-01 — Provide public CA trust in CPU and GPU container images [Implemented]
+
+###### Rationale
+
+The GPU image's Python runtime was observed to have no usable default CA
+trust store, causing first-use font downloads to fail before processing.
+Supplying public trust roots to both variants makes the documented bootstrap
+usable without an operator-provided CA on ordinary public-CA networks.
+
+##### TR-2026-10-30-01 — Automatic worker count for selected tests [Implemented]
+
+###### Rationale
+
+Focused runs benefit from avoiding worker startup when only a few test items are selected, while the existing full-suite default remains appropriate for larger runs.
+
+##### TR-2026-10-30-02 — Distribute OCR provider contract tests [Implemented]
+
+###### Rationale
+
+One top-level test currently runs the entire OCR matrix on a single worker. Grouping it allows parallel scheduling while keeping individual case reporting and automatic plugin discovery. Concurrent workers may load multiple OCR models and increase memory or GPU use; the benefit and resource cost should be measured before adopting the change.
+
+#### General Requirements
+
+Requirements for Shared pipeline, CLI, layout, cache, diagnostics, or development scenarios.
+
+##### FR-2026-10-28-02 — Generate Windows EMF comparison previews for development scenarios [Implemented]
+
+###### Rationale
+
+EMF viewing and comparison are slow and vary across applications. A
+side-by-side preview next to each development output makes it quicker to
+inspect the replacement, while separate GDI and GDI+ playback exposes
+differences between a dual metafile's viewing paths. A separate command also
+allows existing development outputs to be reviewed without rerunning
+replacement.
+
+##### FR-2026-10-29-04 — Preserve specified logo text detected by OCR [Implemented]
+
+###### Rationale
+
+Text-based company logos can use distinctive fonts that would be lost if detected text were replaced and rendered in a substitute font.
+
+##### FR-2026-10-29-05 — Configure preserved OCR logo text for development scenarios [Implemented]
+
+###### Rationale
+
+The development command is intended for rapid iteration with a consistent configuration across scenarios.
+
+#### Vector Requirements
+
+Requirements for SVG, EMF, WMF, or other vector graphics.
+
+##### FR-2026-10-28-03 — Make fitted GDI fonts available during EMF+ playback [Implemented]
+
+###### Rationale
+
+An EMF+ viewer can play GDI records only inside selected device-context
+intervals. A font created outside such an interval can be unavailable when a
+later text record selects it, leaving the replacement at an unintended size.
+
+##### FR-2026-10-28-04 — Trace EMF fitted-layout decisions in debug sidecars [Implemented]
+
+###### Rationale
+
+Successful fit decisions are not issue entries, so an otherwise empty sidecar
+cannot explain how bounds, grouping, font selection, and nested playback
+affected a visible result. A local trace makes those decisions inspectable in
+subsequent reviews without a separate investigation script.
+
+##### FR-2026-10-28-05 — Bound EMF text expansion by visible shapes [Proposed]
+
+###### Rationale
+
+A text record's occupied bounds can be narrower than the available area.
+Expansion improves readability, but a corridor limited only by other text
+and selected line records can cross a visible enclosing shape or another
+graphic. Shape-aware limits retain useful expansion without assuming that
+unresolved geometry is empty.
+
+##### FR-2026-10-29-01 — Fit same-font and same-size EMF and EMF+ fragments as visual lines [Implemented]
+
+###### Rationale
+
+Independently fitting fragments of one visual line gives translated fragments
+different sizes and leaves gaps from the original placement. Fitting the
+whole line shares the original line's available width. EMF+ playback matters
+independently of the GDI stream because viewers may display only that stream.
+
+##### FR-2026-10-29-02 — Preserve colour-emphasis spans in fitted EMF visual lines [Implemented]
+
+###### Rationale
+
+Colour often emphasises a phrase rather than marking an independent label.
+Translating colour spans separately follows the PDF policy and preserves their
+colour without guessing which translated words correspond to source words.
+Fitting the combined result avoids fragment-by-fragment size changes and
+excessive gaps.
+
+##### FR-2026-10-29-03 — Join EMF visual-line fragments whose font sizes differ moderately [Implemented]
+
+###### Rationale
+
+Presentation text often sets bracketed or annotated phrases slightly smaller
+on the same baseline. Splitting those lines leaves the translated fragments
+fitted independently, with uneven sizes and large gaps. A 70% bound joins the
+common three-to-four size relationship while keeping clearly separate
+captions and labels apart.
+
 ## [0.3.0](https://github.com/KrisTC/visual-doc-pipeline/compare/v0.2.0...v0.3.0) (2026-10-28)
 
 ### Google Cloud Vision OCR
