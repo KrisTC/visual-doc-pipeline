@@ -18,6 +18,14 @@ Build the NVIDIA GPU image only when GPU processing is needed:
 docker build --platform linux/amd64 --target gpu -t visual-doc-pipeline:gpu .
 ```
 
+To check public CA trust and HTTPS access to both font download sources in the
+final images, run the following network smoke check after building them. It
+does not require a GPU, documents, or credentials:
+
+```sh
+scripts/validate-container-ca.sh visual-doc-pipeline:cpu visual-doc-pipeline:gpu
+```
+
 Both builds select their mutually exclusive `cpu` or `gpu` uv profile from the
 same committed root lockfile, and use digest-pinned base images and Python
 3.13.14. The CPU image uses normal CPU PaddlePaddle and the verified official

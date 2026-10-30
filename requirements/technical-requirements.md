@@ -834,7 +834,7 @@ Today no test-specific environment variable exists; the runners only pass the op
 |----------|-------|
 | Title | Provide public CA trust in CPU and GPU container images |
 | Owner | KrisTC |
-| Status | Proposed |
+| Status | Implemented |
 | Source | User request following container bootstrap TLS failure |
 | Date Added | 2026-10-28 |
 | Related Requirements | FR-2026-08-27-04, FR-2026-09-07-01, TR-2026-09-07-01, TR-2026-09-10-01, SR-2026-09-07-01, SR-2026-10-28-01 |

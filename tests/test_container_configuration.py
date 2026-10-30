@@ -10,6 +10,13 @@ ROOT = Path(__file__).parents[1]
 
 
 class ContainerConfigurationTests(unittest.TestCase):
+    # Verifies TR-2026-10-28-01 for both final image targets.
+    def test_runtime_images_install_public_ca_certificates(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        for stage, next_stage in (("runtime-cpu", "runtime-gpu"), ("runtime-gpu", "gpu")):
+            runtime = dockerfile.split(f" AS {stage}\n", 1)[1].split(f" AS {next_stage}\n", 1)[0]
+            self.assertIn("apt-get install --yes --no-install-recommends ca-certificates ", runtime)
+
     # Verifies TR-2026-09-07-01 and SR-2026-09-07-01.
     def test_dockerfile_defines_pinned_cpu_and_gpu_images_with_fixed_mounts(self) -> None:
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
