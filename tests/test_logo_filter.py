@@ -47,7 +47,11 @@ class LogoFilterTests(unittest.TestCase):
         provider = FakeOcr(items)
         cached = CachingOcrProvider(provider, "synthetic:v1")
         request = OcrRequest(Image.new("RGB", (100, 40), "white"), "en")
-        with TemporaryDirectory() as directory, source_cache_scope(Path(directory) / "image.png"):
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict("os.environ", {"PIPELINE_PLUGIN_CACHE": "1"}),
+            source_cache_scope(Path(directory) / "image.png"),
+        ):
             first = LogoFilteringOcrProvider(cached, frozenset({"NovaCorp", "Other"}))
             second = LogoFilteringOcrProvider(cached, frozenset({"novacorp"}))
             self.assertEqual(items[1:4], first.recognize(request).text_items)
